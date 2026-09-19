@@ -4478,3 +4478,81 @@ out = (Q @ K.T).tril(diagonal=-1) @ V   # no softmax, no 1/√d, diagonal exclud
 - No re-introducing `aten::cat` in generate / CacheManager
 - No softmax / scale / SDPA
 - No fake GPU speedups from CPU medians
+
+## opt/compile-fullgraph — probe BDH_COMPILE_FULLGRAPH=1 (2026-09-19)
+
+**Branch:** `opt/compile-fullgraph` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `aff4523` (`#83` docs matrix through #82; code tip `03bc30b` = #82
+triton-cold-v2 — default-eager-identical for compile probes).
+
+### Goal
+
+Probe `BDH_COMPILE_FULLGRAPH=1` on tip with **eager × AUTOGRAD∈{0,1}**. Document
+Dynamo graph-break boundaries; **soft-skip** if inductor/fullgraph unsupported.
+Defaults unchanged (`BDH_COMPILE=0`, `BDH_COMPILE_FULLGRAPH=0`). Honest CPU only.
+
+### Code
+
+| Piece | Change |
+|-------|--------|
+| `train.maybe_compile` | Clearer soft-fallback messages when `FULLGRAPH=1` probe fails (graph breaks → Unsupported → eager) |
+| `benchmarks/bench_train_step.py` | New `bench_compile_fullgraph_matrix` (`BDH_BENCH_COMPILE_FULLGRAPH=1`, default on) |
+| `tests/test_compile.py` | FULLGRAPH×eager×AUTOGRAD smoke + env wire + forward parity + generate-under-fullgraph |
+| Docs | This note + `OPT_STATUS` / `OPT_BACKLOG` honesty |
+
+### Dynamo graph breaks (tip `aff4523` / code `03bc30b`, this box)
+
+`torch._dynamo.explain` @ dropout=0, tiny cfg (`layers=2 d=64`, B×T as noted):
+
+| Path | Graphs | Breaks | `fullgraph=True` |
+|------|--------|--------|------------------|
+| Cold train, `IMPL=eager`, AUTOGRAD=0 | 1 | **0** | OK |
+| Cold train, `IMPL=eager`, AUTOGRAD=1 | 1 | **0** | OK |
+| Cold eval / blocked cold train / dropout=0.1 train | 1 | **0** | OK (spot) |
+| Cache prefill + T=1 decode (packed) | 1 | **0** | OK (spot) |
+| `generate()` | n/a | n/a | `@torch.compiler.disable` — runs outside the compiled graph |
+
+**Honesty:** cold eager×AUTOGRAD train path is a **single Dynamo graph** on this
+tip — `FULLGRAPH=1` is supported here. If a future change introduces breaks,
+`maybe_compile` soft-falls back to eager (probe prints `fullgraph=True` + reason).
+Do **not** claim GPU / CUDA-graph wins from fullgraph alone.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica)
+
+Tiny cfg: `layers=2 d=64 nh=2 B=4 T=64 dropout=0`, `MODE=default`, `probe=train`,
+`IMPL=eager`, `torch 2.14.0+cu130`, `cuda=False`:
+
+```text
+AUTOGRAD=0 FULLGRAPH=0:  median 6.58 ms
+AUTOGRAD=0 FULLGRAPH=1:  median 6.31 ms
+AUTOGRAD=1 FULLGRAPH=0:  median 8.75 ms
+AUTOGRAD=1 FULLGRAPH=1:  median 6.30 ms
+```
+
+**Honesty:** wall-clock only; ratios are **CPU inductor noise** under load — not
+a fullgraph speedup claim. Prefer documenting **support** (0 breaks + soft-skip)
+over citing these ms as wins. Soft-skip still applies if probe falls back.
+
+### Operator guidance
+
+```bash
+# defaults unchanged:
+BDH_COMPILE=0 BDH_COMPILE_FULLGRAPH=0 python train.py
+
+# recommended CPU compile (optional stricter fullgraph):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_MODE=default \
+  BDH_COMPILE_FULLGRAPH=1 python train.py
+# + analytic bwd (still 0 breaks on tip):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_ATTN_AUTOGRAD=1 \
+  BDH_COMPILE_FULLGRAPH=1 python train.py
+
+# harness:
+BDH_BENCH_COMPILE_FULLGRAPH=1 python benchmarks/bench_train_step.py
+```
+
+### Non-goals
+
+- No default flip of `BDH_COMPILE` / `BDH_COMPILE_FULLGRAPH`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No PRs to `pathwaycom/*`
+- No GPU / CUDA-graph speedup claims from these CPU medians

@@ -691,3 +691,153 @@ def test_compile_reduce_overhead_train_step_smoke(monkeypatch):
     opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
     loss = tr.train_step(m, opt, x, y)
     assert torch.isfinite(loss)
+
+
+# --- opt/compile-fullgraph: BDH_COMPILE_FULLGRAPH=1 probe (eager × AUTOGRAD) ---
+
+
+@pytest.mark.parametrize("autograd", [False, True])
+def test_compile_fullgraph_eager_autograd_train_smoke(autograd, monkeypatch):
+    """FULLGRAPH=1 + eager × AUTOGRAD 0/1: train probe + train_step (CPU).
+
+    Soft-skips if inductor/probe unsupported (graph breaks → Unsupported).
+    Tip probe: 0 Dynamo breaks on cold train @ dropout=0 for both AUTOGRAD
+    cells — fullgraph holds. No throughput / GPU claims.
+    """
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    if autograd:
+        monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    else:
+        monkeypatch.delenv("BDH_ATTN_AUTOGRAD", raising=False)
+
+    cfg = _small_cfg(dropout=0.0)
+    m_explain = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+    try:
+        expl = torch._dynamo.explain(m_explain)(x, y)
+    except Exception as e:
+        pytest.skip(f"dynamo.explain unavailable: {type(e).__name__}: {e}")
+    assert expl.graph_break_count == 0, (
+        f"autograd={autograd} breaks={expl.graph_break_count}: {expl.break_reasons}"
+    )
+    assert expl.graph_count >= 1
+
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "0")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    torch.manual_seed(9)
+    m = bdh.BDH(cfg).train()
+    tr.USE_COMPILE = True
+    tr.COMPILE_FULLGRAPH = True
+    try:
+        m = tr.maybe_compile(m, example_x=x, example_y=y)
+    finally:
+        tr.USE_COMPILE = False
+        tr.COMPILE_FULLGRAPH = False
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+        importlib.reload(tr)
+
+    if getattr(m, "_orig_mod", None) is None:
+        pytest.skip(
+            "torch.compile FULLGRAPH=1 unavailable or probe fell back to eager"
+        )
+
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    loss = tr.train_step(m, opt, x, y)
+    assert torch.isfinite(loss)
+
+
+def test_maybe_compile_fullgraph_env_and_soft_fallback(monkeypatch):
+    """BDH_COMPILE_FULLGRAPH=1 wires fullgraph=True; soft-fallback still safe.
+
+    Reloads train so env knobs bind. Soft-skips neither path hard-fails.
+    Defaults remain FULLGRAPH=0 / COMPILE=0.
+    """
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    importlib.reload(tr)
+    assert tr.USE_COMPILE is True
+    assert tr.COMPILE_FULLGRAPH is True
+
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(3)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(m, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+        importlib.reload(tr)
+
+    assert out is not None
+    out.train()
+    logits, loss = out(x, y)
+    assert logits.shape[-1] == cfg.vocab_size
+    assert loss is not None and torch.isfinite(loss)
+
+
+@pytest.mark.parametrize("autograd", [False, True])
+def test_compile_fullgraph_forward_matches_eager(autograd, monkeypatch):
+    """fullgraph=True cold forward matches eager @ dropout=0 (eager × AUTOGRAD).
+
+    Soft-skips if inductor/fullgraph unsupported. atol 1e-5 CPU inductor noise.
+    """
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    if autograd:
+        monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    else:
+        monkeypatch.delenv("BDH_ATTN_AUTOGRAD", raising=False)
+
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(0)
+    eager = bdh.BDH(cfg).eval()
+    compiled_src = bdh.BDH(cfg).eval()
+    compiled_src.load_state_dict(eager.state_dict())
+    compiled = _compile_or_skip(compiled_src, mode="default", fullgraph=True)
+
+    torch.manual_seed(17)
+    x = torch.randint(0, cfg.vocab_size, (2, 12))
+    y = torch.randint(0, cfg.vocab_size, (2, 12))
+
+    def _warm():
+        with torch.no_grad():
+            return compiled(x, y)
+
+    _probe_or_skip(compiled, _warm)
+    with torch.no_grad():
+        le, lose = eager(x, y)
+        lc, losc = compiled(x, y)
+    assert torch.allclose(le, lc, rtol=0, atol=1e-5), (
+        f"autograd={autograd} logits maxdiff={(le - lc).abs().max().item()}"
+    )
+    assert torch.allclose(lose, losc, rtol=0, atol=1e-5)
+
+
+def test_generate_still_runs_under_fullgraph_compile():
+    """generate() is @torch.compiler.disable — works on a fullgraph module."""
+    cfg = _small_cfg(dropout=0.0)
+    m = bdh.BDH(cfg).eval()
+    compiled = _compile_or_skip(m, mode="default", fullgraph=True)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 4))
+
+    def _warm():
+        with torch.no_grad():
+            compiled(prompt)
+
+    _probe_or_skip(compiled, _warm)
+    out = compiled.generate(prompt, max_new_tokens=3, top_k=3)
+    assert out.shape == (1, 7)

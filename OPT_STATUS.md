@@ -91,15 +91,15 @@ export BDH_ROPE_IMPL=fused
 | `BDH_COMPILE` | `0` | Set `1` / `true` to enable `train.maybe_compile` |
 | `BDH_COMPILE_MODE` | `default` | `default` \| `reduce-overhead` \| `max-autotune` |
 | `BDH_COMPILE_PROBE` | `train` | `eval` \| `train` \| `train_bwd` |
-| `BDH_COMPILE_FULLGRAPH` | `0` | `fullgraph=True` when set |
+| `BDH_COMPILE_FULLGRAPH` | `0` | `fullgraph=True` when set; soft-fallback to eager on graph breaks (#84 probe: cold eager×AUTOGRAD holds 0 breaks on tip) |
 
 `generate()` is `@torch.compiler.disable`. Changing `BDH_ATTN_IMPL` after compile → recompile. On CPU, `reduce-overhead` is **not useful** — CUDA graphs need a real GPU (`maybe_compile` warns; prefer `MODE=default`).
 
-**Operator guidance (CPU, after #46 / opt/compile-reduce):** recommend `BDH_COMPILE=1` **only** with
-`BDH_ATTN_IMPL=eager` and `BDH_COMPILE_MODE=default` (optionally `BDH_ATTN_AUTOGRAD=1` — still 0 Dynamo graph
-breaks). `maybe_compile` logs a clear warning if `COMPILE=1` with
+**Operator guidance (CPU, after #46 / #63 / #84):** recommend `BDH_COMPILE=1` **only** with
+`BDH_ATTN_IMPL=eager` and `BDH_COMPILE_MODE=default` (optionally `BDH_ATTN_AUTOGRAD=1` and/or `BDH_COMPILE_FULLGRAPH=1` — tip cold path
+still 0 Dynamo graph breaks; FULLGRAPH soft-falls back if Unsupported). `maybe_compile` logs a clear warning if `COMPILE=1` with
 `IMPL∈{blocked,online,triton}` (measured CPU regression) **or** `MODE=reduce-overhead` on non-CUDA.
-Defaults unchanged (`COMPILE=0`, `MODE=default`, `IMPL=eager`). **GPU** inductor / CUDA graphs still unmeasured.
+Defaults unchanged (`COMPILE=0`, `MODE=default`, `FULLGRAPH=0`, `IMPL=eager`). **GPU** inductor / CUDA graphs still unmeasured.
 
 ```bash
 BDH_COMPILE=0 python train.py
@@ -107,6 +107,8 @@ BDH_COMPILE=0 python train.py
 BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_MODE=default BDH_COMPILE_PROBE=train python train.py
 # optional analytic bwd (still 0 graph breaks on eager):
 BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_ATTN_AUTOGRAD=1 python train.py
+# optional fullgraph (soft-fallback if Dynamo breaks; tip holds):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_FULLGRAPH=1 python train.py
 # warns (CPU regression) — do not use as default train:
 BDH_COMPILE=1 BDH_ATTN_IMPL=blocked python train.py
 # warns on CPU (no CUDA graphs) — prefer default; try on GPU:
@@ -154,7 +156,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#82)
+## Landed opts (#1–#84)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -240,6 +242,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **80** | `opt/profile-v7` | Re-profile tip after #75–#77 (+ #79 on tip); refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #69–#79 off short default window | No GPU measurements; defaults unchanged |
 | **81** | docs align (#80 tip) | Align optimization docs with #80 tip | Docs only | — |
 | **82** | `opt/triton-cold-v2` | Deepen Triton cold tiles (adaptive BLOCK_M/N @T≥256; pair #75/#79); CPU→blocked adaptive; AUTO docs | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
+| **83** | docs matrix (#82 tip) | Refresh optimization docs through #82 | Docs only | — |
+| **84** | `opt/compile-fullgraph` | Probe `BDH_COMPILE_FULLGRAPH=1` eager×AUTOGRAD; graph-break docs; soft-skip | 0 breaks cold eager; bench matrix; soft-fallback | GPU inductor still P1 |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -257,7 +261,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
 | `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75/#77); `THRESHOLD` default 512; optional `COLD_THRESHOLD` (#auto-tune) |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
-| `BDH_COMPILE` / `BDH_COMPILE_MODE` | `0` / `default` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
+| `BDH_COMPILE` / `MODE` / `FULLGRAPH` | `0` / `default` / `0` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); optional `FULLGRAPH=1` (#84; soft-fallback); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on **CUDA** train boxes (CPU = smoke only) |
 | `BDH_AMP_FORWARD_ONLY` | `0` | `1` for logits-only autocast + fp32 CE |
@@ -272,7 +276,7 @@ cd /workspace/bdh-gpu-opt   # or this worktree
 source .venv/bin/activate
 python -m pytest tests/ -q
 python benchmarks/profile_forward.py --mode all
-BDH_BENCH_COMPILE=1 BDH_BENCH_COMPILE_MODE=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
+BDH_BENCH_COMPILE=1 BDH_BENCH_COMPILE_MODE=1 BDH_BENCH_COMPILE_FULLGRAPH=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
 python benchmarks/bench_sparse_probe.py
 python benchmarks/bench_attn_mem.py --smoke
 # on a CUDA box:
