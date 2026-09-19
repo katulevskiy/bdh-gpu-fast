@@ -214,22 +214,49 @@ def _tiled_score_v(
 _STREAM_SCORE_ELEMS = 4096  # if Bi*Bj exceeds this, stream query rows (bound peak)
 
 
-def max_score_tile_elems(T: int, block_size: int = DEFAULT_BLOCK_COLD) -> int:
+def pick_cold_block_size(T: int, block_size: int | None = None) -> int:
+    """Cold blocked/online query-tile width.
+
+    Default ``DEFAULT_BLOCK_COLD`` (64) for short/mid T; for ``T >= 256`` grow
+    to ``min(128, 2*DEFAULT_BLOCK_COLD)`` so long prefill needs fewer Python
+    tile trips while peak scores stay ≪ ``T×T``. Explicit ``block_size`` wins.
+    """
+    if block_size is not None:
+        return max(1, int(block_size))
+    if int(T) >= 256:
+        return min(128, DEFAULT_BLOCK_COLD * 2)
+    return DEFAULT_BLOCK_COLD
+
+
+def _cold_score_budget(T: int, BS: int) -> int:
+    """Score-elem budget for one past tile (never a full ``T×T``).
+
+    Base ``max(BS², _SCORE_ELEMS_BUDGET)``; for ``T >= 256`` allow a larger
+    BLAS-friendly oneshot up to ``BS * min(T, 1024)`` so long prefill past
+    regions hit one GEMM more often without materializing ``T×T``.
+    """
+    budget = max(BS * BS, _SCORE_ELEMS_BUDGET)
+    if int(T) >= 256:
+        budget = max(budget, BS * min(int(T), 1024))
+    return budget
+
+
+def max_score_tile_elems(T: int, block_size: int | None = None) -> int:
     """Upper bound on score elements materialized at once by blocked/online.
 
     Eager allocates ``T*T`` (full matrix). Vectorized blocked keeps at most:
 
     * **Past** — one ``Bi × i0`` score tile (or a budget-capped past chunk),
-      never ``T × T``. Cap is ``max(BS*BS, _SCORE_ELEMS_BUDGET)``.
+      never ``T × T``. Cap is ``_cold_score_budget(T, BS)``.
     * **Diagonal** — one ``Bi × Bi`` tile with ``tril(diagonal=-1)``.
 
-    For mid ``T`` with default ``BS=64`` this is still ≪ ``T*T`` (e.g. T=256
-    → peak ≤ 64·192 or budget, vs 65536).
+    When ``block_size`` is omitted, uses ``pick_cold_block_size(T)`` (64 → 128
+    at ``T >= 256``). Still ≪ ``T*T`` for mid/long T.
     """
-    BS = max(1, int(block_size))
+    BS = pick_cold_block_size(T, block_size)
     if T <= 0:
         return 0
-    budget = max(BS * BS, _SCORE_ELEMS_BUDGET)
+    budget = _cold_score_budget(T, BS)
     # Past: Bi * i0 with i0 < T, capped by budget (tiling kicks in above).
     past = min(BS * max(T - 1, 0), budget)
     diag = BS * BS
@@ -325,7 +352,7 @@ def blocked_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = DEFAULT_BLOCK_COLD,
+    block_size: int | None = None,
 ) -> torch.Tensor:
     """Pure-PyTorch strict-tril attention without a full T×T score matrix.
 
@@ -335,24 +362,29 @@ def blocked_tril_attn(
     * **Past** — for query block ``[i0,i1)``, one fused
       ``(Qi @ K[:,:,:i0].mT) @ V[:,:,:i0]`` when ``Bi·i0`` fits the score
       budget; otherwise chunked bmm under the same budget. Ephemeral scores
-      are ``Bi × chunk``, never ``T × T``.
+      are ``Bi × chunk``, never ``T × T``. Broadcast ``V=(B,1,T,D)`` stays
+      unexpanded (matmul broadcasts heads — same as decode-online).
     * **Diagonal** — ``Bi × Bi`` scores with ``tril(diagonal=-1)`` then ``@ Vi``
-      (torch ops, not a Python row loop).
+      (torch ops, not a Python row loop); ``out.add_`` into the past accum.
+
+    Prefill deepen (``opt/prefill-blocked``): ``pick_cold_block_size(T)`` uses
+    BS=128 when ``T >= 256`` (fewer tile trips); ``_cold_score_budget`` grows
+    the oneshot cap for long prefill. Still never allocates full ``T×T``.
 
     Semantically identical to ``eager_tril_attn`` (up to fp roundoff on long T).
     Works on CPU and CUDA; used as the non-Triton ``triton`` path fallback and
     as a lower-peak-score-memory alternative to eager.
 
-    Shares ``_expand_v_heads`` / ``DEFAULT_BLOCK_COLD`` with the Triton cold
+    Shares ``DEFAULT_BLOCK_COLD`` / adaptive tiles with the Triton cold
     launcher so CPU fallback and CUDA tiles stay aligned.
 
-    On CPU this path is measured much faster than the prior Python online-row
-    blocked loop for mid ``T``, but still typically slower than eager (which
-    pays a full ``T×T``). Default ``BDH_ATTN_IMPL`` remains eager.
+    On CPU, long ``T`` (≳512) typically beats eager wall; mid ``T`` may still
+    lose to eager's single GEMM. Default ``BDH_ATTN_IMPL`` remains eager.
     """
     B, H, T, N = Q.shape
     D = V.shape[-1]
-    Vh = _expand_v_heads(V, B, H, T, D)
+    # Keep broadcast V as (B,1,T,D) — matmul broadcasts heads; no expand copy.
+    Vh = V if (V.size(1) == 1 or V.size(1) == H) else _expand_v_heads(V, B, H, T, D)
 
     # Accumulate in a stable float: widen half/bfloat16 to fp32; keep f32/f64
     # so gradcheck / analytic bwd on float64 stay exact-dtype.
@@ -360,14 +392,15 @@ def blocked_tril_attn(
         acc_dtype = torch.float32
     else:
         acc_dtype = Q.dtype
-    Qf = Q.to(dtype=acc_dtype)
-    Kf = K.to(dtype=acc_dtype)
-    Vhf = Vh.to(dtype=acc_dtype)
+    # Skip .to() when already in acc dtype (hot fp32 generate/prefill path).
+    Qf = Q if Q.dtype == acc_dtype else Q.to(dtype=acc_dtype)
+    Kf = K if K.dtype == acc_dtype else K.to(dtype=acc_dtype)
+    Vhf = Vh if Vh.dtype == acc_dtype else Vh.to(dtype=acc_dtype)
     out = torch.zeros(B, H, T, D, device=Q.device, dtype=acc_dtype)
-    BS = max(1, int(block_size))
+    BS = pick_cold_block_size(T, block_size)
     # Allow a Bi×past score tile up to this many elems before chunking.
-    # Still ≪ T×T for mid T (e.g. 64×192 vs 256²).
-    score_budget = max(BS * BS, _SCORE_ELEMS_BUDGET)
+    # Still ≪ T×T for mid/long T (adaptive budget at T>=256).
+    score_budget = _cold_score_budget(T, BS)
 
     for i0 in range(0, T, BS):
         i1 = min(i0 + BS, T)
@@ -395,16 +428,16 @@ def blocked_tril_attn(
         if Bi > 1:
             scores = Qi @ Kf[:, :, i0:i1, :].transpose(-2, -1)
             scores = scores.tril(diagonal=-1)
-            out[:, :, i0:i1, :] = out[:, :, i0:i1, :] + scores @ Vhf[:, :, i0:i1, :]
+            out[:, :, i0:i1, :].add_(scores @ Vhf[:, :, i0:i1, :])
 
-    return out.to(dtype=Q.dtype)
+    return out.to(dtype=Q.dtype) if out.dtype != Q.dtype else out
 
 
 def online_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = DEFAULT_BLOCK_COLD,
+    block_size: int | None = None,
 ) -> torch.Tensor:
     """Alias for deepened blocked fusion (explicit name for OPT / benches)."""
     return blocked_tril_attn(Q, K, V, block_size=block_size)

@@ -57,7 +57,7 @@ export BDH_ATTN_IMPL=blocked
 export BDH_ATTN_IMPL=triton
 export BDH_ATTN_IMPL=cuda
 
-# opt-in long-S decode → blocked (cold stays IMPL)
+# opt-in long-T cold + long-S decode → blocked|triton (#75 deepens cold)
 export BDH_ATTN_AUTO=1
 export BDH_ATTN_AUTO_THRESHOLD=512
 ```
@@ -205,7 +205,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **53** | `opt/decode-mm` | T=1 decode deepen (`_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`); B=1 lm_head `mv` | ≡ eager last row; cats=0; CPU wall ~noise | GPU `--mode decode` open |
 | **54** | `opt/amp-deepen` | Harden opt-in AMP: fp16 CPU smoke, `BDH_AMP_FORWARD_ONLY`, honest AMP train_step bench, GPU-only claim | CPU smoke + bench; often ≲/≳ fp32 | GPU train AMP still open |
 | **55** | `opt/decode-online-v2` | Deepen blocked/online T=1 decode (`_DECODE_ONESHOT_ELEMS`, peak helper) | ≡ eager; cats=0; long-S peak↓ + wall↑ | GPU `--mode decode` open |
-| **56** | `opt/attn-auto` | Opt-in `BDH_ATTN_AUTO` long-S T=1 decode → blocked (thr=512); cold stays IMPL | default eager; AUTO parity; cats=0 | GPU threshold re-tune open |
+| **56** | `opt/attn-auto` | Opt-in `BDH_ATTN_AUTO` long-S T=1 decode → blocked (thr=512); cold deepened in #75 | default eager; AUTO parity; cats=0 | GPU threshold re-tune open |
 | **57** | `opt/cache-page` | Geometric CacheManager page growth + empty+prefix `copy_`; `ensure_capacity`; long-S grow stats | fewer grows/bytes vs linear; cats=0; defaults unchanged | GPU long-S peak still open |
 | **58** | `opt/layout-v2` | Eval cached contiguous encoder `(nh*N,D)` + `F.linear`; train einsum; compile traces einsum | T=1/32 eval ~1.3–1.4× vs train path; T=128 ~noise; gen uses cache | GPU layout still open |
 | **59** | `opt/profile-v5` | Re-profile tip after #55–#58; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #58 layout visible on generate | No GPU measurements; defaults unchanged |
@@ -221,8 +221,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **69** | `opt/rope-decode` | Deepen T=1 RoPE apply (`rope_rotate_t1`); table pair cache + last-pos cis reuse; keep `BDH_ROPE_IMPL` default eager | t1≡strided; CPU wall ~0.83× (no win claim) | GPU fused/Triton T=1 open |
 | **70** | `opt/dropout-compile` | Harden dropout=0 / eval identity for compile; FX/Dynamo tests; COMPILE=1 dropout A/B bench | Identity + 0 Dynamo breaks; CPU dropout A/B ~noise | GPU compile still P1 |
 | **71** | `opt/docs-matrix` (through #69) | Refresh optimization matrix through #69 (`962a3b6`) | Docs only | — |
-| **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e AUTO ~parity (prefill dominates); IMPL=blocked 1.14–1.22× | GPU thr re-tune open |
+| **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e then deepened by #75 | GPU thr re-tune open |
 | **73** | `opt/attn-mem-probe` | CPU peak-mem probe eager vs blocked vs online (`bench_attn_mem.py`) | Mid-T: peak↓ wall↑; long-T both; default eager | No GPU claims |
+| **75** | `opt/prefill-blocked` | Deepen blocked/online cold (adaptive BS@T≥256); AUTO long-T cold+decode | AUTO e2e 1.26×@1024 / 1.39×@2048; cats=0; default eager | GPU thr re-tune open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

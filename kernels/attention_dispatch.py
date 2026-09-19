@@ -17,22 +17,24 @@ Opt-in long-S decode auto-select (does **not** change default)::
     export BDH_ATTN_AUTO_THRESHOLD=512     # default 512; past_len > thr → prefer
 
 When ``BDH_ATTN_AUTO`` is truthy and ``BDH_ATTN_IMPL`` resolves to ``eager``,
-T=1 decode switches once ``past_len`` exceeds the threshold:
+long sequences switch once length exceeds the threshold:
 
-- **Triton** when ``triton_decode_available()`` (CUDA + Triton import) — fused
-  decode scaffold for GPU long-S; CPU fallback inside ``triton_decode_attn``
-  still uses #55 blocked.
-- **blocked** otherwise — CPU-honest #55 long-S wins.
+- **T=1 decode** (``past_len > thr``): **Triton** when
+  ``triton_decode_available()`` (CUDA + Triton); else **blocked** (#55).
+- **Cold / prefill** (``T > thr``): same prefer-triton-else-blocked rule so
+  long-S ``generate`` prefill is not stuck on eager ``T×T`` (#72 e2e lesson).
 
-Cold / prefill always follows ``BDH_ATTN_IMPL`` only. Explicit non-eager
-``IMPL`` is never overridden. Default (AUTO unset) remains eager for all paths.
+Short sequences and explicit non-eager ``IMPL`` are never overridden.
+Default (AUTO unset) remains eager for all paths. Decode AUTO behavior is
+unchanged; cold AUTO is the prefill deepen on top of the same knobs.
 
 Backends: eager, blocked (=online), triton, or cuda.
 
 Wire-up in ``bdh.Attention.forward``:
 
-- Cold path (``past_kr is None``): ``bdh_attn`` respects ``BDH_ATTN_IMPL``.
-  With ``BDH_ATTN_AUTOGRAD=1``, wraps in ``StrictTrilAttnFn`` (analytic train).
+- Cold path (``past_kr is None``): ``bdh_attn`` → ``resolve_cold_impl(T)``
+  (``BDH_ATTN_IMPL``, plus AUTO long-T → triton|blocked). With
+  ``BDH_ATTN_AUTOGRAD=1``, wraps in ``StrictTrilAttnFn`` (analytic train).
 - Multi-token + past under AUTOGRAD: also ``bdh_attn`` → ``strict_tril_attn``.
 - T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM by
   default; with ``BDH_ATTN_AUTO=1`` and long past, eager→triton (if CUDA+Triton)
@@ -157,10 +159,10 @@ def resolve_decode_impl(
 ) -> ImplName:
     """Resolve T=1 decode backend, applying optional long-S AUTO switch.
 
-    Cold/prefill must keep using ``resolve_attn_impl`` / ``bdh_attn`` (AUTO
-    does not apply there). When AUTO is off, or ``BDH_ATTN_IMPL`` is already
-    non-eager, this matches ``resolve_attn_impl``. When AUTO is on and the
-    base impl is eager and ``past_len > threshold``:
+    Cold/prefill uses the twin ``resolve_cold_impl(seq_len)`` (same AUTO
+    knobs). When AUTO is off, or ``BDH_ATTN_IMPL`` is already non-eager, this
+    matches ``resolve_attn_impl``. When AUTO is on and the base impl is eager
+    and ``past_len > threshold``:
 
     - ``triton`` if ``triton_decode_available()`` (CUDA + Triton) — GPU fused
       decode; host still falls back to #55 blocked when the kernel cannot run.
@@ -172,6 +174,35 @@ def resolve_decode_impl(
     if not attn_auto_enabled():
         return "eager"
     if int(past_len) > attn_auto_threshold():
+        if triton_decode_available():
+            return "triton"
+        return "blocked"
+    return "eager"
+
+
+def resolve_cold_impl(
+    seq_len: int,
+    requested: str | None = None,
+) -> ImplName:
+    """Resolve cold/prefill backend, applying optional long-T AUTO switch.
+
+    Mirrors ``resolve_decode_impl`` with the same knobs (``BDH_ATTN_AUTO``,
+    ``BDH_ATTN_AUTO_THRESHOLD``, prefer Triton when available else blocked).
+    When AUTO is off, or ``BDH_ATTN_IMPL`` is already non-eager, this matches
+    ``resolve_attn_impl``. When AUTO is on and base is eager and
+    ``seq_len > threshold``, switches so long ``generate`` prefill is not
+    stuck on full ``T×T`` eager (see ``opt/gen-long-bench`` / #72).
+
+    Short ``T`` (≤ threshold) stays eager under AUTO — preserves prior
+    short-cold behavior. Explicit non-eager ``requested`` / ``IMPL`` is never
+    overridden.
+    """
+    name = resolve_attn_impl(requested)
+    if name != "eager":
+        return name
+    if not attn_auto_enabled():
+        return "eager"
+    if int(seq_len) > attn_auto_threshold():
         if triton_decode_available():
             return "triton"
         return "blocked"
@@ -201,9 +232,12 @@ def bdh_attn(
     recompute. Default is False / env-off so the eager training path is
     unchanged.
 
-    ``BDH_ATTN_AUTO`` does **not** affect this cold/prefill path.
+    With ``BDH_ATTN_AUTO=1`` and base ``eager``, switches when
+    ``Q.size(2) > BDH_ATTN_AUTO_THRESHOLD`` (default 512) to ``triton`` if
+    CUDA+Triton are available, else ``blocked`` — same rule as decode AUTO.
+    Explicit non-eager ``impl`` / ``BDH_ATTN_IMPL`` is never overridden.
     """
-    name = resolve_attn_impl(impl)
+    name = resolve_cold_impl(int(Q.size(2)), requested=impl)
     if use_autograd_fn is None:
         use_autograd_fn = _env_autograd_enabled()
     if use_autograd_fn:
@@ -290,6 +324,9 @@ def backend_info() -> dict:
         "has_triton": _HAS_TRITON,
         "triton_decode_available": triton_decode_available(),
         "auto_decode_prefers": (
+            "triton" if triton_decode_available() else "blocked"
+        ),
+        "auto_cold_prefers": (
             "triton" if triton_decode_available() else "blocked"
         ),
         "has_cuda_ext": has_cuda_ext(),

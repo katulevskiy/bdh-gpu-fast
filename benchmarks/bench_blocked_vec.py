@@ -23,6 +23,7 @@ from kernels.attention import (  # noqa: E402
     eager_tril_attn,
     max_score_tile_elems,
     online_tril_attn,
+    pick_cold_block_size,
 )
 
 
@@ -41,7 +42,7 @@ def main():
     device = torch.device("cpu")
     B, H, N, D = 1, 2, 32, 64  # tiny B / n_head as in the opt brief
     print(f"device={device}  B={B} H={H} N={N} D={D}  torch={torch.__version__}")
-    print(f"DEFAULT_BLOCK_COLD={DEFAULT_BLOCK_COLD}")
+    print(f"DEFAULT_BLOCK_COLD={DEFAULT_BLOCK_COLD}  pick_cold_block_size(256)={pick_cold_block_size(256)}")
     print(
         f"{'T':>4} {'eager_ms':>10} {'blocked_ms':>12} {'online_ms':>10} "
         f"{'eag/blk':>8} {'peak_elems':>12} {'eager_TxT':>10}"
@@ -55,7 +56,7 @@ def main():
         blocked_tril_attn(Qw, Qw, Vw)
 
     rows = []
-    for T in (32, 64, 128, 256):
+    for T in (32, 64, 128, 256, 512, 1024):
         torch.manual_seed(0)
         Q = torch.randn(B, H, T, N, device=device)
         K = Q.clone()
@@ -65,13 +66,15 @@ def main():
         blk = blocked_tril_attn(Q, K, V)
         onl = online_tril_attn(Q, K, V)
         d_blk = (blk - ref).abs().max().item()
-        assert torch.allclose(blk, ref, rtol=1e-4, atol=1e-4), d_blk
+        # Long-T tile reorder vs one eager GEMM — allow mild fp drift.
+        tol = 1e-3 if T >= 512 else 1e-4
+        assert torch.allclose(blk, ref, rtol=tol, atol=tol), d_blk
         assert torch.equal(blk, onl)
 
         te = bench(eager_tril_attn, (Q, K, V))
         tb = bench(blocked_tril_attn, (Q, K, V))
         to = bench(online_tril_attn, (Q, K, V))
-        peak = max_score_tile_elems(T, DEFAULT_BLOCK_COLD)
+        peak = max_score_tile_elems(T)  # adaptive BS at T>=256
         ratio = te / tb if tb > 0 else float("inf")
         print(
             f"{T:4d} {te:10.3f} {tb:12.3f} {to:10.3f} "

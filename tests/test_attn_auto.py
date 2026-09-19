@@ -1,4 +1,4 @@
-"""Opt-in BDH_ATTN_AUTO: long-S T=1 decode → triton|blocked; default eager unchanged."""
+"""Opt-in BDH_ATTN_AUTO: long-T cold + long-S decode → triton|blocked; default eager."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from kernels.attention_dispatch import (
     bdh_attn,
     bdh_attn_decode,
     resolve_attn_impl,
+    resolve_cold_impl,
     resolve_decode_impl,
 )
 
@@ -90,7 +91,8 @@ def test_auto_switches_eager_decode_past_threshold(monkeypatch):
     thr = attn_auto_threshold()
     assert resolve_decode_impl(thr) == "eager"
     assert resolve_decode_impl(thr + 1) == _auto_long_s_impl()
-    # cold/prefill path unchanged
+    assert resolve_cold_impl(thr + 1) == _auto_long_s_impl()
+    # base IMPL env still eager (AUTO is length-gated, not an IMPL flip)
     assert resolve_attn_impl() == "eager"
 
 
@@ -146,10 +148,11 @@ def test_auto_off_long_s_stays_eager(monkeypatch):
     assert resolve_decode_impl(600) == "eager"
 
 
-def test_cold_path_ignores_auto(monkeypatch):
-    """Prefill / cold still follows BDH_ATTN_IMPL only (default eager)."""
+def test_cold_path_short_stays_eager_under_auto(monkeypatch):
+    """Short cold/prefill (T ≤ thr) stays eager under AUTO — prior semantics."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)
     _bump_caches()
     g = torch.Generator().manual_seed(21)
     Q = torch.randn(2, 4, 16, 16, generator=g)
@@ -157,7 +160,30 @@ def test_cold_path_ignores_auto(monkeypatch):
     out = bdh_attn(Q, Q, V)
     from kernels.attention import eager_tril_attn
 
+    assert resolve_cold_impl(16) == "eager"
     assert torch.allclose(out, eager_tril_attn(Q, Q, V), atol=0)
+
+
+def test_cold_path_auto_long_t(monkeypatch):
+    """Long cold/prefill (T > thr) switches under AUTO — same knobs as decode."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)
+    _bump_caches()
+    thr = attn_auto_threshold()
+    assert resolve_cold_impl(thr) == "eager"
+    assert resolve_cold_impl(thr + 1) == _auto_long_s_impl()
+    # Parity vs eager at long T (fp tile reorder).
+    from kernels.attention import eager_tril_attn, blocked_tril_attn
+
+    g = torch.Generator().manual_seed(22)
+    T = thr + 1
+    Q = torch.randn(1, 2, T, 16, generator=g)
+    V = torch.randn(1, 1, T, 32, generator=g)
+    out = bdh_attn(Q, Q, V)
+    ref = eager_tril_attn(Q, Q, V)
+    assert torch.allclose(out, ref, rtol=1e-3, atol=1e-3)
+    assert torch.allclose(out, blocked_tril_attn(Q, Q, V), rtol=1e-5, atol=1e-5)
 
 
 def test_attention_module_auto_decode(monkeypatch):
@@ -222,4 +248,6 @@ def test_backend_info_auto_decode_fields(monkeypatch):
     assert "triton_decode_available" in info
     assert "auto_decode_prefers" in info
     assert info["auto_decode_prefers"] in ("triton", "blocked")
+    assert "auto_cold_prefers" in info
+    assert info["auto_cold_prefers"] == info["auto_decode_prefers"]
 
