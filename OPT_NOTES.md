@@ -351,3 +351,57 @@ Python overhead vs amortized cat); expect better locality/bandwidth behavior on 
 
 ### Non-goals
 - Still no softmax / no diagonal / no SDPA substitution.
+
+## opt/qkv-fuse — Q/K/V proj + RoPE + attn prep allocs
+
+**Branch:** `opt/qkv-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+
+### Goal
+
+Cut temporary tensors on the path from encoder projection → ReLU → RoPE →
+attention prep, without changing `tril(diagonal=-1)` math or `BDH_ATTN_IMPL`
+dispatch.
+
+### What changed (`bdh.py` only)
+
+1. **Shared RoPE cis across layers** — `Attention.rope_cos_sin(T, rope_start, device)`
+   once per `BDH.forward`; each layer gets the same `(cos, sin)` via
+   `Attention.forward(..., cos_sin=...)`. Removes per-layer `arange` /
+   `remainder` / `cos` / `sin` (≈`n_layer×` before).
+
+2. **Fused RoPE into `out=`** — pairwise even/odd rotate writes straight into
+   one `empty_like` result; no full-size `v_rot` buffer and no final
+   `v*cos + v_rot*sin` extra tensor. `out=` optional; `rope(phases, v)` API
+   unchanged for tests. fp32 path bit-identical to baseline; mixed-dtype keeps
+   baseline cast-then-add rounding.
+
+3. **In-place ReLU on Q and encoder_v projections** —
+   `F.relu(x @ encoder, inplace=True)` / same for `encoder_v` — one buffer
+   instead of GEMM out + separate ReLU out.
+
+4. **Attention cold path** — still `BDH_ATTN_IMPL=eager|triton|blocked`;
+   eager still `scores.tril_(diagonal=-1)` then `@ V`.
+
+### Profiler delta (CPU, 4 layers, B=4 T=128 d=128, 5× forward)
+
+| Op (approx calls) | Before | After |
+|-------------------|--------|-------|
+| `cos` / `sin` / `remainder` | 20 each | **5** each (once/forward) |
+| `neg` (v_rot half) | 20 | **0** |
+| `copy_` | 180 | **150** |
+| `arange` (RoPE positions) | 40 | **10** |
+
+Wall medians on this CPU box are noisy; the win is fewer RoPE/trig/copy
+allocs, not a new GEMM kernel. Full TxT score materialization remains the
+big GPU opportunity (`opt/triton-attn`).
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -v
+# pytest tests/ green on CPU (incl. cache_pack + vs_baseline + BDH_ATTN_IMPL)
+# includes test_vs_baseline (logits/grads/attn), tril(-1), BDH_ATTN_IMPL hook
+```
+
+No intentional numerical approximations.
+
