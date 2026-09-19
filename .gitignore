@@ -9,3 +9,7 @@ dist/
 *.so
 .eggs/
 .venv
+
+# Profiler chrome traces (regenerate locally; keep dir via .gitkeep)
+benchmarks/traces/*
+!benchmarks/traces/.gitkeep

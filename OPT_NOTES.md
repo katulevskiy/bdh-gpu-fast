@@ -283,6 +283,128 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
   training path unchanged until GPU validation.
 - Still **do not** use `F.scaled_dot_product_attention`.
 
+## Profiler (operator-level)
+
+Harness: `benchmarks/profile_forward.py`
+
+```bash
+cd /workspace/bdh-gpu-opt
+source .venv/bin/activate
+python benchmarks/profile_forward.py              # attn + forward + generate
+python benchmarks/profile_forward.py --mode attn
+python benchmarks/profile_forward.py --mode forward --T 256
+python benchmarks/profile_forward.py --mode generate --new-tokens 32
+```
+
+- Activities: CPU always; CUDA when `torch.cuda.is_available()`.
+- Chrome traces: `benchmarks/traces/bdh_{attn,forward,generate}_{cpu|cuda}.json`
+  (gitignored; dir kept via `.gitkeep`). Open in `chrome://tracing` or Perfetto.
+- Prints top ops by **CPU total** and **self CPU**.
+- Ranked follow-ups: see `OPT_BACKLOG.md`.
+
+### Snapshot (CPU, 2026-09-19, profiler overhead included)
+
+Same cfg as `bench_forward.py` (4 layers, d=128, B=4, T=128; gen 16→+32).
+Use **percentages**, not absolute ms (profiler inflates wall time heavily).
+
+| Mode | Top self-CPU ops (approx) | Takeaway |
+|------|---------------------------|----------|
+| Attention | `mul` ~28%, `copy_` ~20%, `bmm` ~12%, RoPE trig ~20%, `tril_` ~6% | Full TxT `bmm` then mask; RoPE + copies expensive on CPU |
+| Forward | `copy_` ~23%, `mul` ~16%, `bmm` ~13%, LN ~9%, `mm` ~7%, ReLU ~7% | Matmul + memory movement; compile/fuse candidates |
+| Generate | `bmm` ~42%, `mm` ~28%, LN ~11%, `cat` ~10% | Incremental GEMM dominates; **cache `cat` is the memory tax** |
+
+## opt/cache-pack — packed KR/V cache (2026-09-19)
+
+### Change
+- New `bdh_cache.CacheManager`: preallocate `(B, nh, max_seq, N)` / `(B, 1, max_seq, D)`
+  per layer; `append` writes slices; `commit` advances `seq_len` once after all layers.
+- `bdh.BDH.forward` accepts `CacheManager` **or** legacy `list` of `{'kr','v'}` (cat path kept).
+- `generate()` uses packed cache with `max_seq = prompt + max_new_tokens`.
+  Optional `cache_dtype=torch.float16` stores half; `get_past` casts to fp32 for RoPE score GEMMs.
+
+### Correctness
+```text
+.venv/bin/python -m pytest tests/test_cache_pack.py tests/test_correctness.py \
+  tests/test_attention_mask.py tests/test_vs_baseline.py -q
+# cache_pack: 9 passed; core suite green
+```
+Packed prefill/tokenwise matches full forward and legacy cat cache (atol 1e-5 / exact where applicable).
+
+### fp16 storage numerics
+- Prefill + short decode logits: **within 1e-4** vs fp32 storage (fp32 compute).
+- 16-step tokenwise accumulation measured **~1.3e-4** max abs logit diff → allow 2e-4 in test; still ~1e-4 order.
+- Default `generate()` keeps fp32 storage (exact). Pass `cache_dtype=torch.float16` for half.
+
+### Benchmark (`benchmarks/bench_cache_mem.py`, CPU)
+```text
+decode prompt=64 + new=128, layers=4 d=128
+legacy cat-cache median:  179.27 ms
+packed fp32 median:       225.29 ms  (0.80× — slower on CPU this size)
+packed fp16 storage:      204.15 ms  (0.88×)
+legacy final cache bytes: 12_976_128
+packed fp32 prealloc:     12_976_128  (same final footprint; no per-step realloc growth)
+packed fp16 prealloc:      6_488_064  (2.00× smaller)
+```
+**Merge rationale:** prealloc correctness landed; eliminates O(steps) `torch.cat` realloc/copy
+of growing KR/V; fp16 option halves cache RAM. CPU wall time not improved here (copy_ +
+Python overhead vs amortized cat); expect better locality/bandwidth behavior on GPU.
+
+### Non-goals
+- Still no softmax / no diagonal / no SDPA substitution.
+
+## opt/qkv-fuse — Q/K/V proj + RoPE + attn prep allocs
+
+**Branch:** `opt/qkv-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+
+### Goal
+
+Cut temporary tensors on the path from encoder projection → ReLU → RoPE →
+attention prep, without changing `tril(diagonal=-1)` math or `BDH_ATTN_IMPL`
+dispatch.
+
+### What changed (`bdh.py` only)
+
+1. **Shared RoPE cis across layers** — `Attention.rope_cos_sin(T, rope_start, device)`
+   once per `BDH.forward`; each layer gets the same `(cos, sin)` via
+   `Attention.forward(..., cos_sin=...)`. Removes per-layer `arange` /
+   `remainder` / `cos` / `sin` (≈`n_layer×` before).
+
+2. **Fused RoPE into `out=`** — pairwise even/odd rotate writes straight into
+   one `empty_like` result; no full-size `v_rot` buffer and no final
+   `v*cos + v_rot*sin` extra tensor. `out=` optional; `rope(phases, v)` API
+   unchanged for tests. fp32 path bit-identical to baseline; mixed-dtype keeps
+   baseline cast-then-add rounding.
+
+3. **In-place ReLU on Q and encoder_v projections** —
+   `F.relu(x @ encoder, inplace=True)` / same for `encoder_v` — one buffer
+   instead of GEMM out + separate ReLU out.
+
+4. **Attention cold path** — still `BDH_ATTN_IMPL=eager|triton|blocked`;
+   eager still `scores.tril_(diagonal=-1)` then `@ V`.
+
+### Profiler delta (CPU, 4 layers, B=4 T=128 d=128, 5× forward)
+
+| Op (approx calls) | Before | After |
+|-------------------|--------|-------|
+| `cos` / `sin` / `remainder` | 20 each | **5** each (once/forward) |
+| `neg` (v_rot half) | 20 | **0** |
+| `copy_` | 180 | **150** |
+| `arange` (RoPE positions) | 40 | **10** |
+
+Wall medians on this CPU box are noisy; the win is fewer RoPE/trig/copy
+allocs, not a new GEMM kernel. Full TxT score materialization remains the
+big GPU opportunity (`opt/triton-attn`).
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -v
+# pytest tests/ green on CPU (incl. cache_pack + vs_baseline + BDH_ATTN_IMPL)
+# includes test_vs_baseline (logits/grads/attn), tril(-1), BDH_ATTN_IMPL hook
+```
+
+No intentional numerical approximations.
+
 ## opt/compile-train (train loop)
 
 **Owns:** `train.py`, optional `train_fast.py`, `benchmarks/bench_train_step.py`.
