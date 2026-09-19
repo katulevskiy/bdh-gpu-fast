@@ -350,6 +350,22 @@ def test_batch_prefetcher_producer_alive(tr):
         assert loader._thread is None
 
 
+def test_batch_prefetcher_producer_failure_surfaces_on_next(tr, monkeypatch):
+    """Async producer failures reach the consumer instead of hanging forever."""
+
+    def fail_gather(_split):
+        raise ValueError("simulated host gather failure")
+
+    monkeypatch.setattr(tr, "_gather_batch_host_numpy", fail_gather)
+    loader = tr.BatchPrefetcher("train", async_host=True)
+    try:
+        with pytest.raises(RuntimeError, match="prefetch producer failed") as exc_info:
+            loader.next()
+        assert isinstance(exc_info.value.__cause__, ValueError)
+    finally:
+        loader.close()
+
+
 def test_batch_prefetcher_close_idempotent(tr):
     loader = tr.BatchPrefetcher("val", async_host=True)
     _ = loader.next()
