@@ -5447,7 +5447,7 @@ kernel win, or speedup is claimed.
 ## opt/cuda-cold-v3 — bounded wide-head CUDA tiles (2026-09-19)
 
 **Branch:** `opt/cuda-cold-v3` (private `katulevskiy/bdh-gpu-opt` only).
-**Base tip:** `acf6e09` (`main`, #111 docs-v24); pair with merged #79
+**Base tip:** `0f7af06` (`main`, #113 docs-v25); pair with merged #79
 `opt/cuda-cold-v2` and #108 `opt/triton-cold-v3`.
 
 ### Audit / deepen
