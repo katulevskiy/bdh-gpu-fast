@@ -178,3 +178,50 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
     assert "without a first probe" in captured
     assert "probe=train_bwd" in captured
     assert "first probe failed" not in captured
+
+
+def test_compile_failure_without_probe_preserves_caller_state(
+    monkeypatch, capsys
+):
+    """No-probe construction failure keeps the original module untouched."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    def fail_compile(model, **kwargs):
+        compile_kwargs.update(kwargs)
+        raise RuntimeError("synthetic compile construction failure")
+
+    monkeypatch.setattr(tr.torch, "compile", fail_compile)
+
+    model = bdh.BDH(_small_cfg()).train()
+    expected_grads = []
+    for index, param in enumerate(model.parameters(), start=1):
+        grad = torch.full_like(param, float(index))
+        param.grad = grad
+        expected_grads.append(grad.clone())
+    try:
+        out = tr.maybe_compile(model)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BD_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert out is model
+    assert out.training
+    assert all(
+        param.grad is not None and torch.equal(param.grad, expected)
+        for param, expected in zip(model.parameters(), expected_grads)
+    )
+    assert "torch.compile failed" in captured
+    assert "soft-fallback to original eager module" in captured
+    assert "without a first probe" not in captured
+    assert "first probe failed" not in captured
