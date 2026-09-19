@@ -7,11 +7,11 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `f10bdd4` / documented code tip `f10bdd4` (post #85 cache-page-bench, #86 docs, #87 zerograd; base docs tip #88 `dfc7646`; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `f10bdd4` / documented code tip `24f44a6` (post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
-Post-#85–#87 re-profile (`opt/profile-v8`): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#87 do not alter this short default eval/generate window. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
+Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#89 do not alter this short default eval/generate window, and #90 adds no GPU timing. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
 
 Post-#64–#66 re-profile (`opt/profile-v6`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #58 layout-v2 still visible on generate (`mm`/`linear`); #64–#66 not exercised on short default window (CUDA decode / train log). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v6.
 
@@ -90,18 +90,21 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Compile fullgraph probe (`opt/compile-fullgraph` #84) — FULLGRAPH=1 × eager×AUTOGRAD; 0 Dynamo breaks on tip cold path; soft-fallback; GPU still open
 - Docs refresh (#86) — docs-only alignment through #84; documented tip `006de27`
 - Zero-grad train-path hardening (#87, `opt/zerograd`) — `clear_grads()` chokepoint, `set_to_none=True` + fused AdamW path, compile `train_bwd` probe, and 8 smoke tests; CPU re-smoke ~1.03× fused+set-to-none vs legacy; defaults unchanged
+- Docs matrix v15 (#88) — refresh through #87; documented tip `f10bdd4`
+- Profile-v8 (#89) — CPU profile evidence for the #85–#87 tip; no GPU measurements; defaults unchanged
+- Rope-fuse-v2 (#90, `opt/rope-fuse-v2`) — no-expand/stack fused rotate, cached table-pair T=1 apply, blocked Triton CPU scaffold, and parity tests; default `BDH_ROPE_IMPL=eager`; GPU validation remains open
 - Docs matrix v6 refresh (`opt/docs-matrix-v6` #65) — docs-only through #64; documented tip `4558501`
 
 ## Ranked next work
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
-| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v8): attn `bmm`~23% `mul`~22% `copy_`~21%; forward `copy_`~24% `mm`~23% `bmm`~22% `mul`~12%. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
+| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v8): attn `bmm`~23% `mul`~22% `copy_`~21%; forward `copy_`~24% `mm`~23% `bmm`~22% `mul`~12%. #88–#90 add no GPU timing or speedup claim. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold` + `opt/triton-cold-v2`:** adaptive power-of-2 tiles (grow @T≥256 pair #75/#79), fused strict-tril score×V, broadcast-V staging, CPU→blocked adaptive; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn); optional `FULLGRAPH=1` (#84). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` + `FULLGRAPH` via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** + **`opt/prefill-blocked`** + **`opt/auto-tune`**: AUTO long-T cold+decode (adaptive blocked cold @T≥256), with optional independent cold threshold. CPU e2e AUTO **1.26×@1024 / 1.39×@2048**; IMPL=blocked ~1.23–1.43×; short A/B ~1.25× @1024. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 
-| **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate** `opt/rope-fuse`; **deepen** `opt/rope-fuse-v2` (no expand/stack; table-pair T=1; blocked Triton fallback). Default still eager. | GPU Triton microbench still open | Low–medium |
+| **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Landed #90** `opt/rope-fuse-v2` deepens `opt/rope-fuse`: no expand/stack, table-pair T=1, blocked Triton fallback; default remains eager. GPU validation is still open. | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | **Density measured** `opt/sparse-probe`: short-train x~27% xy~12% @150 steps (≫ paper 5%); CPU sparse **never reliably beat dense** → **keep OFF**. GPU sparse still open. | GPU sparse bench if density ≪10% | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed #13+#16+#36+#47 + `opt/layout-v2`** — eval cached encoder `F.linear`; train einsum; channels_last rejected; CPU short-T win / long-T ~noise | Low |
 | **P3** | **Hardware / dtype** | **Landed `opt/bf16-train`+#54 `opt/amp-deepen`:** opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA; CPU smoke/bench honest (often slower); `BDH_AMP_FORWARD_ONLY`. GPU train throughput still open. | GPU box microbench | Env |
@@ -121,7 +124,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Re-profile post-#55–#58 | **Landed** `opt/profile-v5` #59 — tip `fc9283d`; cats=0; contiguous=0; layout-v2 visible on generate |
 | Re-profile post-#64–#66 | **Landed** `opt/profile-v6` #68 — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; #64–#66 off short default window |
 | Re-profile post-#75–#77 | **Landed** `opt/profile-v7` (#80) — tip `b8067f5`; profile source `ca5038f`; cats=0; contiguous=0; #69–#79 off short default window |
-| Re-profile post-#85–#87 | **Proposed** `opt/profile-v8` (this PR) — tip `f10bdd4`; profile source `f10bdd4`; cats=0; contiguous=0; #85–#87 off or outside the short default window |
+| Re-profile post-#85–#87 | **Landed** #89 `opt/profile-v8` — tip `f10bdd4`; profile source `f10bdd4`; cats=0; contiguous=0; #85–#87 off or outside the short default window; no GPU measurements |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
@@ -130,8 +133,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63+#70+#84; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); dropout=0 / eval identity hardened (#70); **FULLGRAPH=1** probed (#84; 0 breaks cold eager×AUTOGRAD; soft-fallback); remaining = **GPU** measure (P1) |
 | ~~Zero-grad / `set_to_none` train-path hardening~~ | **Landed** #87 `opt/zerograd` — `clear_grads()` chokepoint plus compile `train_bwd` probe; CPU re-smoke ~1.03× fused+set-to-none vs legacy; defaults unchanged |
-| Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` + **`opt/rope-fuse-v2`** — default eager; no-expand/stack fuse; table-pair T=1; blocked Triton CPU scaffold |
-| T=1 RoPE apply deepen | **Landed** `opt/rope-decode` + pair-apply wire in `opt/rope-fuse-v2` — `rope_rotate_paired` from `_rope_table_pairs`; CPU wall ~noise; GPU open |
+| Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` + **#90 `opt/rope-fuse-v2`** — default eager; no-expand/stack fuse; table-pair T=1; blocked Triton CPU scaffold; GPU validation open |
+| T=1 RoPE apply deepen | **Landed** `opt/rope-decode` + **#90 `opt/rope-fuse-v2`** pair-apply wire — `rope_rotate_paired` from `_rope_table_pairs`; CPU parity / no GPU claim |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Decode-mm T=1 / lm_head mv | **Landed** `opt/decode-mm` — `_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`, B=1 `mv`; CPU wall ~noise; GPU open |
 | Decode-online-v2 blocked T=1 | **Landed** `opt/decode-online-v2` — tight broadcast oneshot; long-S peak↓ + wall↑ on CPU; GPU open |
@@ -241,7 +244,7 @@ python benchmarks/bench_generate.py --device cuda --warmup 5 --iters 20
 python benchmarks/bench_generate.py --mode auto-ab --device cuda
 ```
 
-**CPU honesty (this box / profile source `ca5038f`; documented code tip `f10bdd4`):**
+**CPU honesty (this box / profile source `f10bdd4`; documented code tip `24f44a6`):**
 - `--mode impls` short prompt: medians ~noise vs eager; match; `aten::cat=0`
 - `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO**
   **1.26× @1024 / 1.39× @2048** after `opt/prefill-blocked` (cold+decode);
