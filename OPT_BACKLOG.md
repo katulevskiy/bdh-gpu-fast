@@ -21,7 +21,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - KV-style cache + incremental `generate`
 - MLP `permute → contiguous → view`
 - Vectorized `train.get_batch` (+ pin/non_blocking CUDA; optional DataLoader workers #14)
-- Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked slower; GPU unmeasured
+- Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked still < eager after `opt/blocked-vec`; GPU unmeasured
 - Experimental sparse ReLU matmul (default off); **short-train density + CPU crossover** (`opt/sparse-probe`) — keep OFF
 - CUDA extension scaffold for tril score×V (optional build)
 - Weight layout: `(B,T,nh,N)` encoder einsum, decoder view+`F.linear`, optional bias fuse (#13)
@@ -33,6 +33,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Decode-copy: `reserve` + in-place RoPE into packed KR; `narrow` past views; no intermediate `.to()` on `copy_` (`opt/decode-copy`)
 - Decode GEMM polish: blocked/Triton/CUDA T=1 score×V vs packed KR/V — broadcast-V, Triton staging, tiled CUDA (`opt/decode-gemm`)
 - Online fused strict-tril score×V (no full T×T) under `blocked`/`online` (`opt/fuse-scorev` #21)
+- Vectorized CPU blocked/online tiles (`opt/blocked-vec`) — beats old Python-row blocked wall; still < eager on CPU
 - GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
 - Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold`) — GPU measure still P0
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
@@ -59,7 +60,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Was | Status |
 |-----|--------|
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
-| Fuse score×V epilogue (no materialize T×T) | **Landed** #21 under `BDH_ATTN_IMPL=blocked\|online` (CPU slower; GPU measure = P0) |
+| Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22; CPU 0-vs-1 train bench `opt/compile-bench`; remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
@@ -70,7 +71,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Softmax / diagonal inclusion
 - PRs to `pathwaycom/*`
 - Claiming GPU speedups from CPU profiler absolute times
-- Defaulting `BDH_ATTN_IMPL=blocked` on CPU (measured slower)
+- Defaulting `BDH_ATTN_IMPL=blocked` on CPU (still slower than eager after `opt/blocked-vec`; use for peak-score memory / parity)
 - Re-introducing `aten::cat` in `generate` / packed cache path
 
 ## Suggested order

@@ -66,8 +66,8 @@ def test_max_score_tile_bound_vs_full_txt():
     bound = max_score_tile_elems(T, BS)
     full = T * T
     assert bound < full
-    assert bound <= BS * BS
-    # Online diag rows are even smaller
+    # Vectorized blocked: past Bi×i0 (budget-capped) + Bi×Bi diag — still ≪ T×T
+    assert bound <= max(BS * (T - 1), BS * BS)
     assert bound >= BS - 1
 
 
@@ -104,11 +104,11 @@ def test_blocked_never_allocates_full_txt_scores(monkeypatch):
     assert not any(s[-2] == T and s[-1] == T for s in blocked_shapes), (
         f"blocked must not materialize T×T scores, got {blocked_shapes}"
     )
-    # Every blocked score tile fits in the documented bound
+    # Every blocked score tile fits in the documented bound (or Bi×past < T×T)
     bound = max_score_tile_elems(T, BS)
     for s in blocked_shapes:
         elems = s[-2] * s[-1]
-        assert elems <= bound or elems <= BS * T, (
+        assert elems <= bound or elems < T * T, (
             f"unexpected large score tile {s} elems={elems} bound={bound}"
         )
 

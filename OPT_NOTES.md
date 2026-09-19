@@ -358,7 +358,7 @@ Python overhead vs amortized cat); expect better locality/bandwidth behavior on 
 ## opt/cache-v2 — deepen CacheManager (2026-09-19)
 
 **Branch:** `opt/cache-v2` (private `katulevskiy/bdh-gpu-opt` only).
-**Base tip:** `35564ad` (main).
+**Base tip:** `c953c79` (main).
 
 ### Goal
 Eliminate remaining `aten::cat` in `generate`, pack KR/V layer-contiguously,
@@ -2196,3 +2196,72 @@ export BDH_ATTN_IMPL=cuda   # cold + decode via kernels.cuda_attn
 - No PRs to `pathwaycom/*`
 - No change to default `BDH_ATTN_IMPL=eager`
 - No fake GPU speedups from CPU medians
+
+## opt/blocked-vec — vectorized CPU blocked/online tril attn (2026-09-19)
+
+**Branch:** `opt/blocked-vec` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `c953c79` (main).
+
+### Goal
+
+Speed up CPU `blocked` / `online` strict-tril attention by cutting Python
+tile/row loops — vectorize with torch ops while still avoiding a full `T×T`
+score matrix when possible. Preserve `tril(diagonal=-1)`, no softmax / scale /
+SDPA. Default `BDH_ATTN_IMPL=eager` unchanged.
+
+### What changed
+
+| Path | Change |
+|------|--------|
+| `kernels/attention.py` | `blocked_tril_attn`: past = budgeted one-shot / chunked `(Qi@K[:i0].mT)@V[:i0]`; diagonal = `Bi×Bi` + `tril(diagonal=-1)` (no Python row loop). `online_tril_attn` still an alias. `_accumulate_*` online helpers retained for low-peak reference. `max_score_tile_elems` documents new peak (past `Bi·i0` budget-capped + `Bi×Bi` diag), still ≪ `T×T` for mid T. |
+| `benchmarks/bench_blocked_vec.py` | CPU microbench eager vs blocked/online for T∈{32,64,128,256}, tiny B/H. |
+| `tests/test_fuse_scorev.py` | Bound assertion updated for vectorized peak (still `< T×T`). |
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_fuse_scorev.py tests/test_triton_attn.py -q
+# 65 passed, 1 skipped
+```
+
+Bit-close vs eager at existing atol/rtol (`1e-4`). Position 0 stays exact zero.
+Matmul spy still: eager allocates `(B,H,T,T)` scores; blocked does not.
+
+### Measured CPU medians (B=1 H=2 N=32 D=64, CPU, OMP≈2)
+
+**Before** (old online-row blocked, same shapes, clean run before change):
+
+| T | eager ms | blocked ms (old) | eager/old_blk |
+|---|----------|------------------|---------------|
+| 32 | 0.024 | 0.941 | 0.03× |
+| 64 | 0.032 | 1.873 | 0.02× |
+| 128 | 0.052 | 3.716 | 0.01× |
+| 256 | 0.098 | 9.192 | 0.01× |
+
+**After** (vectorized blocked):
+
+| T | eager ms | blocked ms (new) | eager/new_blk | vs old blocked |
+|---|----------|------------------|---------------|----------------|
+| 32 | 0.021 | 0.034 | 0.61× | **~28×** faster |
+| 64 | 0.027 | 0.052 | 0.51× | **~36×** faster |
+| 128 | 0.066 | 0.205 | 0.32× | **~18×** faster |
+| 256 | 0.128 | 0.359 | 0.36× | **~26×** faster |
+
+```bash
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_blocked_vec.py
+```
+
+### Honest claim
+
+- **Win vs prior blocked/online CPU wall:** yes (~18–36× on these mid-T shapes).
+- **Win vs eager on CPU:** **no** — still ~0.3–0.6× eager (eager’s single big GEMM +
+  `tril` wins for mid T when `T×T` fits). Do **not** default `BDH_ATTN_IMPL=blocked`
+  on CPU.
+- Peak score elems still bound ≪ `T×T` for mid T (e.g. T=256 → bound 16320 vs 65536).
+- No GPU on this box — do not claim GPU speedups from these CPU medians.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No fake “beats eager” claims on CPU

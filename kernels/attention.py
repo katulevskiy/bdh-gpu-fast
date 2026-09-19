@@ -154,18 +154,23 @@ _STREAM_SCORE_ELEMS = 4096  # if Bi*Bj exceeds this, stream query rows (bound pe
 def max_score_tile_elems(T: int, block_size: int = DEFAULT_BLOCK_COLD) -> int:
     """Upper bound on score elements materialized at once by blocked/online.
 
-    Eager allocates ``T*T`` (full matrix). Blocked/online keeps at most one
-    tile: ``min(BS*BS, _STREAM_SCORE_ELEMS)`` when streaming, else ``BS*BS``,
-    and diagonal online rows keep at most ``BS-1`` keys per query row.
+    Eager allocates ``T*T`` (full matrix). Vectorized blocked keeps at most:
+
+    * **Past** — one ``Bi × i0`` score tile (or a budget-capped past chunk),
+      never ``T × T``. Cap is ``max(BS*BS, _SCORE_ELEMS_BUDGET)``.
+    * **Diagonal** — one ``Bi × Bi`` tile with ``tril(diagonal=-1)``.
+
+    For mid ``T`` with default ``BS=64`` this is still ≪ ``T*T`` (e.g. T=256
+    → peak ≤ 64·192 or budget, vs 65536).
     """
     BS = max(1, int(block_size))
     if T <= 0:
         return 0
-    # Past tiles: Bi <= BS, Bj <= BS → Bi*Bj, or streamed to Bj (<= BS)
-    past = min(BS * BS, _STREAM_SCORE_ELEMS) if BS * BS > _STREAM_SCORE_ELEMS else BS * BS
-    # Diagonal online: one query row × at most (BS-1) within-block keys
-    diag = max(0, BS - 1)
-    return max(past, diag)
+    budget = max(BS * BS, _SCORE_ELEMS_BUDGET)
+    # Past: Bi * i0 with i0 < T, capped by budget (tiling kicks in above).
+    past = min(BS * max(T - 1, 0), budget)
+    diag = BS * BS
+    return max(past, diag, max(0, BS - 1))
 
 
 def _accumulate_qk_v(
@@ -213,8 +218,10 @@ def _accumulate_diag_online(
 ) -> None:
     """Diagonal block with strict ``tril(diagonal=-1)`` via online rows.
 
-    For local row ``r``, only keys ``j in [i0, i0+r)`` contribute — never
-    materializes a ``Bi×Bi`` score matrix (peak ``O(r) <= O(BS)`` per row).
+    Retained as a lower-peak-memory alternative to the vectorized ``Bi×Bi``
+    ``tril`` used by ``blocked_tril_attn``. For local row ``r``, only keys
+    ``j in [i0, i0+r)`` contribute — never materializes a ``Bi×Bi`` score
+    matrix (peak ``O(r) <= O(BS)`` per row).
     """
     Bi = i1 - i0
     if Bi <= 1:
@@ -237,12 +244,15 @@ def blocked_tril_attn(
 ) -> torch.Tensor:
     """Pure-PyTorch strict-tril attention without a full T×T score matrix.
 
-    Online fused accumulation of ``sum_{j<i} (Q_i·K_j) V_j``:
+    Vectorized block accumulation of ``sum_{j<i} (Q_i·K_j) V_j`` (fewer Python
+    tile/row loops than the older online-row path):
 
-    * **Past tiles** — all ``j < i0`` for query block ``[i0,i1)``; fuse
-      score×V per tile (stream query rows when the tile is large).
-    * **Diagonal tile** — row-wise online strict lower triangle (no ``Bi×Bi``
-      scores + ``tril_``).
+    * **Past** — for query block ``[i0,i1)``, one fused
+      ``(Qi @ K[:,:,:i0].mT) @ V[:,:,:i0]`` when ``Bi·i0`` fits the score
+      budget; otherwise chunked bmm under the same budget. Ephemeral scores
+      are ``Bi × chunk``, never ``T × T``.
+    * **Diagonal** — ``Bi × Bi`` scores with ``tril(diagonal=-1)`` then ``@ Vi``
+      (torch ops, not a Python row loop).
 
     Semantically identical to ``eager_tril_attn`` (up to fp roundoff on long T).
     Works on CPU and CUDA; used as the non-Triton ``triton`` path fallback and
@@ -250,6 +260,10 @@ def blocked_tril_attn(
 
     Shares ``_expand_v_heads`` / ``DEFAULT_BLOCK_COLD`` with the Triton cold
     launcher so CPU fallback and CUDA tiles stay aligned.
+
+    On CPU this path is measured much faster than the prior Python online-row
+    blocked loop for mid ``T``, but still typically slower than eager (which
+    pays a full ``T×T``). Default ``BDH_ATTN_IMPL`` remains eager.
     """
     B, H, T, N = Q.shape
     D = V.shape[-1]
@@ -266,25 +280,37 @@ def blocked_tril_attn(
     Vhf = Vh.to(dtype=acc_dtype)
     out = torch.zeros(B, H, T, D, device=Q.device, dtype=acc_dtype)
     BS = max(1, int(block_size))
+    # Allow a Bi×past score tile up to this many elems before chunking.
+    # Still ≪ T×T for mid T (e.g. 64×192 vs 256²).
+    score_budget = max(BS * BS, _SCORE_ELEMS_BUDGET)
 
     for i0 in range(0, T, BS):
         i1 = min(i0 + BS, T)
         Qi = Qf[:, :, i0:i1, :]
+        Bi = i1 - i0
 
-        # Past blocks: every key index j < i0 is strictly before all queries
-        for j0 in range(0, i0, BS):
-            j1 = min(j0 + BS, i0)
-            _accumulate_qk_v(
-                out,
-                Qi,
-                Kf[:, :, j0:j1, :],
-                Vhf[:, :, j0:j1, :],
-                i0=i0,
-                i1=i1,
-            )
+        # Past: every key index j < i0 is strictly before all queries in Qi.
+        if i0 > 0:
+            if Bi * i0 <= score_budget:
+                out[:, :, i0:i1, :] = (
+                    Qi @ Kf[:, :, :i0, :].transpose(-2, -1)
+                ) @ Vhf[:, :, :i0, :]
+            else:
+                # Chunk past so each score tile has ≤ score_budget elems.
+                tile = max(BS, score_budget // max(Bi, 1))
+                acc = out.new_zeros(B, H, Bi, D)
+                for j0 in range(0, i0, tile):
+                    j1 = min(j0 + tile, i0)
+                    acc = acc + (
+                        Qi @ Kf[:, :, j0:j1, :].transpose(-2, -1)
+                    ) @ Vhf[:, :, j0:j1, :]
+                out[:, :, i0:i1, :] = acc
 
-        # Diagonal: online rows with j < i inside the block (tril diagonal=-1)
-        _accumulate_diag_online(out, Qf, Kf, Vhf, i0=i0, i1=i1)
+        # Diagonal: vectorized Bi×Bi strict lower triangle (no Python row loop).
+        if Bi > 1:
+            scores = Qi @ Kf[:, :, i0:i1, :].transpose(-2, -1)
+            scores = scores.tril(diagonal=-1)
+            out[:, :, i0:i1, :] = out[:, :, i0:i1, :] + scores @ Vhf[:, :, i0:i1, :]
 
     return out.to(dtype=Q.dtype)
 
