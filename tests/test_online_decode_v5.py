@@ -647,3 +647,48 @@ def test_online_decode_tiled_shared_v_offset_views_preserve_autograd_contract():
         assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-5), (
             f"grad maxdiff={(actual - expected).abs().max().item()}"
         )
+
+
+def test_online_decode_tiled_per_head_v_offset_views_preserve_autograd_contract():
+    """Tiled per-head-V decode keeps raw-score gradients through packed views."""
+    B, H, S, Tq, N, D = 2, 3, 513, 2, 4, 2
+    offset = 7
+    capacity = S + 19
+    g = torch.Generator().manual_seed(3031)
+    Q0 = torch.randn(B, H, Tq, N, generator=g)
+    K_storage0 = torch.randn(B, H, offset + capacity, N, generator=g)
+    V_storage0 = torch.randn(B, H, offset + capacity, D, generator=g)
+    weights = torch.randn(B, H, Tq, D, generator=g)
+
+    Q_ref = Q0.detach().clone().requires_grad_()
+    K_storage_ref = K_storage0.detach().clone().requires_grad_()
+    V_storage_ref = V_storage0.detach().clone().requires_grad_()
+    K_ref = K_storage_ref.narrow(2, offset, S)
+    V_ref = V_storage_ref.narrow(2, offset, S)
+    ref = eager_decode_attn(Q_ref, K_ref, V_ref)
+    (ref * weights).sum().backward()
+    ref_grads = (
+        Q_ref.grad.detach().clone(),
+        K_storage_ref.grad.detach().clone(),
+        V_storage_ref.grad.detach().clone(),
+    )
+
+    Q = Q0.detach().clone().requires_grad_()
+    K_storage = K_storage0.detach().clone().requires_grad_()
+    V_storage = V_storage0.detach().clone().requires_grad_()
+    K = K_storage.narrow(2, offset, S)
+    V = V_storage.narrow(2, offset, S)
+    got = online_decode_attn(Q, K, V, block_size=64)
+    assert S * Tq > 1024  # force the per-head-V tiled decode path
+    (got * weights).sum().backward()
+
+    assert torch.allclose(got, ref.detach(), rtol=1e-4, atol=1e-5), (
+        f"maxdiff={(got - ref.detach()).abs().max().item()}"
+    )
+    for actual, expected in zip(
+        (Q.grad, K_storage.grad, V_storage.grad), ref_grads
+    ):
+        assert actual is not None
+        assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-5), (
+            f"grad maxdiff={(actual - expected).abs().max().item()}"
+        )
