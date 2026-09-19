@@ -126,6 +126,16 @@ def test_fused_out_param_and_no_alias():
     with pytest.raises(ValueError, match="alias"):
         fused_rope_rotate_pytorch(v, cos, sin, out=v)
 
+    view_alias = v.view_as(v)
+    with pytest.raises(ValueError, match="alias"):
+        fused_rope_rotate_pytorch(v, cos, sin, out=view_alias)
+
+    backing = torch.empty(*v.shape[:-1], v.shape[-1] + 1)
+    shifted_v = backing[..., :-1]
+    shifted_out = backing[..., 1:]
+    with pytest.raises(ValueError, match="alias"):
+        fused_rope_rotate_pytorch(shifted_v, cos, sin, out=shifted_out)
+
 
 def test_rope_shape_contracts_reject_malformed_inputs():
     """Rotation entrypoints fail clearly before doing partial math."""
