@@ -64,6 +64,34 @@ def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
     ]
 
 
+def test_run_auto_ab_sweep_preserves_explicit_cold_threshold(monkeypatch):
+    """An explicit cold gate stays independent across decode threshold runs."""
+    calls = []
+
+    def fake_run_auto_ab(args, device):
+        calls.append(
+            (
+                args.auto_threshold,
+                args.auto_cold_threshold,
+                args.auto_threshold_sweep,
+            )
+        )
+        return 0
+
+    monkeypatch.setattr(bench_generate, "run_auto_ab", fake_run_auto_ab)
+    args = argparse.Namespace(
+        auto_threshold=999,
+        auto_cold_threshold=64,
+        auto_threshold_sweep="256,512",
+    )
+
+    assert bench_generate.run_auto_ab_sweep(args, object()) == 0
+    assert calls == [
+        (256, 64, None),
+        (512, 64, None),
+    ]
+
+
 def test_run_impls_rejects_invalid_selection_before_model_setup(
     monkeypatch, capsys
 ):
