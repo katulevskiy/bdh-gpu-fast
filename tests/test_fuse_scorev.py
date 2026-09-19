@@ -111,13 +111,16 @@ def test_online_blocked_long_path_grad_matches_eager_for_shared_v():
     g = torch.Generator(device="cpu").manual_seed(35)
     Q = torch.randn(B, H, T, N, generator=g, dtype=torch.float64)
     K = torch.randn(B, H, T, N, generator=g, dtype=torch.float64)
-    V = torch.randn(B, 1, T, D, generator=g, dtype=torch.float64)
+    V_storage = torch.randn(B, 1, T, D + 1, generator=g, dtype=torch.float64)
+    V = V_storage[..., :D]
+    assert not V.is_contiguous()
     dO = torch.randn(B, H, T, D, generator=g, dtype=torch.float64)
 
     def run(fn):
         q = Q.detach().clone().requires_grad_(True)
         k = K.detach().clone().requires_grad_(True)
-        v = V.detach().clone().requires_grad_(True)
+        # Preserve the strided shared-V view used by capacity-padded caches.
+        v = V.detach().requires_grad_(True)
         if fn is eager_tril_attn:
             out = fn(q, k, v)
         else:
