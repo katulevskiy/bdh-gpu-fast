@@ -73,7 +73,7 @@ def test_cpu_flattened_bmm_broadcast_and_head_matched(value_heads):
 @pytest.mark.parametrize("value_heads", [1, 3])
 def test_cpu_flattened_bmm_wide_head_parity(value_heads):
     """Wide N/D heads preserve CPU cold parity for both V layouts."""
-    T, B, H, N, D = 512, 1, 2, 128, 256
+    T, B, H, N, D = 512, 1, 3, 128, 256
     g = torch.Generator().manual_seed(31 + value_heads)
     Q = torch.randn(B, H, T, N, generator=g)
     K = torch.randn(B, H, T, N, generator=g)
@@ -102,10 +102,13 @@ def test_cpu_wide_head_partial_tile_parity(value_heads):
 
 @pytest.mark.parametrize("impl", ["blocked", "online"])
 @pytest.mark.parametrize("value_heads", [1, 2])
-def test_cpu_long_blocked_online_autograd_matches_eager(impl, value_heads):
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_cpu_long_blocked_online_autograd_matches_eager(
+    impl, value_heads, batch_size
+):
     """Long flattened CPU tiles preserve raw-score forward and gradient parity."""
-    T, B, H, N, D = 257, 1, 2, 5, 4
-    g = torch.Generator().manual_seed(101 + value_heads)
+    T, B, H, N, D = 257, batch_size, 2, 5, 4
+    g = torch.Generator().manual_seed(101 + value_heads + batch_size)
     Q0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
     K0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
     V0 = torch.randn(B, value_heads, T, D, dtype=torch.float64, generator=g)
