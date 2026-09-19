@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#51)
+# OPT status — landed work (#1–#53)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `b19ec59` (`#51` ln-deepen on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49/#50/#51 docs).
+Tip documented here: `d25ec33` (`#52` docs on `main`; code tip `#51` ln-deepen). Profile source: `c7a7471` (post-#48; eager unchanged by #49–#52). This PR adds `#53` decode-mm.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -36,10 +36,10 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 
 | Value | Cold / prefill | T=1 decode vs packed KR/V | Notes |
 |-------|----------------|---------------------------|-------|
-| `eager` | Full `T×T` then `tril_(diagonal=-1)` | Two-GEMM `(Q@K.mT)@V` | **Default**; reference math |
-| `blocked` | Online / tiled fused score×V (no full `T×T`) | Tiled decode, broadcast V | Lower peak score mem; CPU often slower |
+| `eager` | Full `T×T` then `tril_(diagonal=-1)` | `_two_gemm_decode` (Tq=1 BH-bmm / 4D @) | **Default**; reference math |
+| `blocked` | Online / tiled fused score×V (no full `T×T`) | Tiled decode, `out.add_`, broadcast V | Lower peak score mem; CPU often slower |
 | `triton` | Triton fused on CUDA; else blocked | Triton decode + `V_BROADCAST`; else blocked | Needs CUDA + Triton to run kernel |
-| `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` tiled / ref | Scaffold; GPU measure open |
+| `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` Tq=1 + `DECODE_TILE_N` | Scaffold; GPU measure open |
 
 Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7/#39/#41). Default **off**. With `IMPL=blocked|online|triton|cuda`, bwd is **tiled** (no full T×T); eager keeps dense M-recompute. T=1 CacheManager decode / `generate` stay on the decode path.
 
@@ -180,6 +180,8 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **49** | `opt/compile-guidance` | Warn COMPILE+blocked/online/triton; document eager compile path | Advisory warn; defaults unchanged | GPU still open |
 | **50** | `opt/profile-v4` | Re-profile tip after gen-sample #48 (+ #49 guidance); refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; gen-host host self ~1.4% | No GPU measurements; defaults unchanged |
 | **51** | `opt/ln-deepen` | Residual LN: `F.layer_norm` + inner-out `add_` reuse (cut add temp) | Residual micro small; e2e ~noise; Dynamo 0 breaks | No fused GPU LN claim |
+| **52** | `opt/docs-matrix` (docs refresh) | Refresh OPT matrix / backlog through #51 | Docs only | — |
+| **53** | `opt/decode-mm` | T=1 decode deepen (`_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`); B=1 lm_head `mv` | ≡ eager last row; cats=0; CPU wall ~noise | GPU `--mode decode` open |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 

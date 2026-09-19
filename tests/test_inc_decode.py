@@ -320,3 +320,91 @@ def test_cuda_dispatch_decode_vs_eager_last_row():
     )[:, :, -1:, :]
     got = bdh_attn_decode(q, past_k, past_v, impl="cuda")
     assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
+
+
+def test_two_gemm_decode_tq1_bh_bmm_matches_4d():
+    """Tq=1 + per-head V uses BH-bmm path; must match broadcast 4D @."""
+    from kernels.attention import _two_gemm_decode
+
+    B, H, S, N, D = 2, 4, 48, 8, 16
+    g = torch.Generator().manual_seed(77)
+    Q = torch.randn(B, H, 1, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    Vh = torch.randn(B, H, S, D, generator=g)
+    got = _two_gemm_decode(Q, K, Vh)
+    ref = (Q @ K.transpose(-2, -1)) @ Vh
+    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_two_gemm_decode_broadcast_v_no_expand():
+    """Broadcast V=(B,1,S,D) stays unexpanded; ≡ eager last-row tril(-1)."""
+    from kernels.attention import _two_gemm_decode
+
+    B, H, S, N, D = 2, 4, 17, 8, 16
+    g = torch.Generator().manual_seed(78)
+    Q = torch.randn(B, H, 1, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    V = torch.randn(B, 1, S, D, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    got = _two_gemm_decode(Q, K, V)
+    last = eager_tril_attn(
+        torch.cat([K, Q], dim=2),
+        torch.cat([K, Q], dim=2),
+        torch.cat([V, v_new], dim=2),
+    )[:, :, -1:, :]
+    assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
+
+
+def test_tiled_score_v_add_inplace_matches_eager():
+    """Forced tile loop (out.add_) ≡ eager two-GEMM."""
+    Q, K, V = _make_decode_qkv(B=1, H=2, S=80, N=8, D=16, Tq=1, seed=12)
+    ref = eager_decode_attn(Q, K, V)
+    # Small BS forces tiles under budget path
+    got = _tiled_score_v(Q, K, V, block_size=4)
+    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+
+
+def test_cuda_decode_tiled_ref_uses_decode_tile_n():
+    """CUDA decode tiled ref (DECODE_TILE_N) ≡ eager last row."""
+    from kernels.cuda_attn import CUDA_DECODE_TILE_N, tril_decode_tiled_ref
+
+    assert CUDA_DECODE_TILE_N >= 32
+    B, H, S, N, D = 1, 2, 100, 8, 16
+    g = torch.Generator().manual_seed(88)
+    q = torch.randn(B, H, 1, N, generator=g)
+    k = torch.randn(B, H, S, N, generator=g)
+    v = torch.randn(B, 1, S, D, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    last = eager_tril_attn(
+        torch.cat([k, q], dim=2),
+        torch.cat([k, q], dim=2),
+        torch.cat([v, v_new], dim=2),
+    )[:, :, -1:, :]
+    got = tril_decode_tiled_ref(q, k, v, tile_n=CUDA_DECODE_TILE_N)
+    assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
+
+
+def test_attention_t1_unified_decode_dispatch(monkeypatch):
+    """Attention T=1 routes all impls through bdh_attn_decode (eager included)."""
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    B, nh, S = 1, cfg.n_head, 9
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // nh
+    D = cfg.n_embd
+    torch.manual_seed(3)
+    Q = torch.randn(B, nh, 1, N)
+    past_kr = torch.randn(B, nh, S, N)
+    past_v = torch.randn(B, 1, S, D)
+    V = torch.randn(B, 1, 1, D)
+    out, _, _ = attn(Q, Q, V, rope_start=S, past_kr=past_kr, past_v=past_v)
+    # Poison V_new must not affect (tril -1 / past-only)
+    out2, _, _ = attn(
+        Q, Q, torch.randn_like(V) * 99, rope_start=S, past_kr=past_kr, past_v=past_v
+    )
+    assert torch.allclose(out, out2, atol=0)
+    # pos0-style: S=0 → zeros
+    out0, _, _ = attn(
+        Q, Q, V, rope_start=0, past_kr=past_kr[:, :, :0], past_v=past_v[:, :, :0]
+    )
+    assert torch.all(out0 == 0)

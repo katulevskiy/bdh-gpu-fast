@@ -8,6 +8,7 @@ namespace {
 // Match csrc/tril_attn_cuda.cu tile sizes for CPU online scaffolds.
 constexpr int64_t TILE_M = 16;
 constexpr int64_t TILE_N = 16;
+constexpr int64_t DECODE_TILE_N = 32;  // decode-mm: larger past tiles (no causal diag)
 // Below this score footprint, prefer a single vectorized matmul (eager-shaped).
 constexpr int64_t SCORE_ELEMS_EAGER_OK = 256 * 256;
 
@@ -122,8 +123,8 @@ static torch::Tensor tril_decode_cpu_tiled(torch::Tensor q, torch::Tensor k_past
   auto vf = maybe_acc(v_past);
   auto out = torch::zeros({B, H, Tq, Dv}, qf.options());
 
-  for (int64_t j0 = 0; j0 < S; j0 += TILE_N) {
-    const int64_t j1 = std::min(j0 + TILE_N, S);
+  for (int64_t j0 = 0; j0 < S; j0 += DECODE_TILE_N) {
+    const int64_t j1 = std::min(j0 + DECODE_TILE_N, S);
     auto Kj = kf.narrow(/*dim=*/2, j0, j1 - j0);
     auto Vj = vf.narrow(/*dim=*/2, j0, j1 - j0);
     out.add_(at::matmul(at::matmul(qf, Kj.transpose(-2, -1)), Vj));

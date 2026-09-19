@@ -2976,3 +2976,84 @@ this CPU; e2e forward still GEMM/`copy_`-dominated (profile-v4: LN ~11%,
 - No RMSNorm / affine LN / softmax / SDPA
 - No default `BDH_COMPILE` / attn impl change
 - No custom CUDA/Triton LN kernel on this branch
+
+## opt/decode-mm — cut generate decode GEMM tax (2026-09-19)
+
+**Branch:** `opt/decode-mm` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `d25ec33` (main after docs #52 / ln-deepen #51; profile-v4 generate still `bmm`~43% + `mm`~30%).
+
+### Goal
+
+Attack generate decode **bmm** + **mm** tax from profile-v4 by deepening existing
+blocked / Triton / CUDA T=1 decode vs packed KR/V, plus a B=1 lm_head `mv` path.
+Keep **cat-free** CacheManager, `tril(diagonal=-1)`, and **default eager**.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `_two_gemm_decode` (Tq=1 BH-`bmm` when V per-head; else 4D @ broadcast-V); tiled decode uses `out.add_`; Triton decode tiles up to 256 |
+| `bdh.py` | T=1 Attention always → `bdh_attn_decode`; `_lm_head_last_into` uses `mv`/`addmv` when `B==1` |
+| `kernels/cuda_attn.py` | `CUDA_DECODE_TILE_N=32`; tiled ref via `_two_gemm_decode` + `add_` |
+| `csrc/tril_attn_cuda.cu` | `DECODE_TILE_N=32`; dedicated **`tril_decode_tq1_kernel`** (thin grid) |
+| `csrc/tril_attn_cpu.cpp` | Decode tiled path uses `DECODE_TILE_N=32` |
+| `tests/test_inc_decode.py` | BH-bmm parity, broadcast-V, tile `add_`, cuda tiled ref, unified T=1 dispatch |
+| `tests/test_gen_sample.py` | B=1 lm_head mv ≡ vocab logits (untied + tied) |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — _two_gemm_decode
+export BDH_ATTN_IMPL=blocked   # tiled decode, out.add_
+export BDH_ATTN_IMPL=triton    # CUDA fused; CPU → blocked
+export BDH_ATTN_IMPL=cuda      # Tq=1 CUDA kernel / DECODE_TILE_N ref
+```
+
+### Semantics (unchanged)
+
+```text
+# decode at absolute index S (past length S):
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+# CacheManager: aten::cat = 0; pos0 / S=0 → zeros
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_inc_decode.py tests/test_gen_sample.py \
+  tests/test_attention_mask.py tests/test_cuda_decode.py tests/test_cache_pack.py -q
+# blocked/triton/cuda decode ≡ eager last row; B=1 lm_head mv ≡ mm; pos0==0; cats=0
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```text
+# tip d25ec33 vs opt/decode-mm  (OMP_NUM_THREADS=2, Europe/Podgorica)
+# bench_generate.py --warmup 2 --iters 5  layers=4 d=128 prompt=16/+32
+tip    eager 56.84 ms | blocked 59.29 ms | match_eager=yes | aten::cat=0
+branch eager 59.22 ms | blocked 61.81 ms | match_eager=yes | aten::cat=0
+# delta ~noise / slight regress (~4%) — NOT a wall win
+
+# decode score×V micro (B=4 H=4 S=128 N=64 D=128):
+correctness max|blocked-eager|=0
+eager_decode   median: ~0.043 ms
+blocked_decode median: ~0.037 ms
+triton_decode  median: ~0.034 ms  (CPU → blocked)
+cuda_ref       median: ~0.035 ms
+two_gemm BH-V  median: ~0.023 ms  (per-head V bmm path)
+
+# long S=2048 (B=1 H=2 N=32 D=64, block_size=64): maxdiff=0; ~0.03 ms both
+```
+
+**Verdict:** no reliable default-path CPU wall win vs tip. Land **structural**
+deepen (shared `_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`, B=1 lm_head `mv`)
++ honest docs. **No GPU on this box** — `tril_decode_tq1_kernel` unexecuted;
+`bench_gpu_attn.py --mode decode` skips cleanly. Expect GPU wins from thin Tq=1
+grid + larger past tiles + fused score×V. Default remains eager.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / scale / SDPA
+- No fake GPU speedups from CPU medians
