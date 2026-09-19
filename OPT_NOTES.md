@@ -2471,3 +2471,63 @@ larger mid-T microbenches (see opt/blocked-vec). GPU unmeasured.
 - No softmax / scale / SDPA
 - No PRs to `pathwaycom/*`
 - No fused CUDA/Triton backward kernel (tiled analytic is still PyTorch tiles)
+
+## opt/prefetch-v2 — deepen BatchPrefetcher host overlap (2026-09-19)
+
+**Branch:** `opt/prefetch-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `d3ff475` (main, after profile-v3 #40). **Does not** touch `bdh.py`,
+attention, or `tril(diagonal=-1)`.
+
+### Goal
+
+Reduce host stall between `train_step` calls by overlapping the **next**
+`get_batch` host gather with the current step. Keep the existing
+`.next()` API and 90/10 split / LM window semantics.
+
+### What changed (`train.py`)
+
+| Piece | Change |
+|-------|--------|
+| `BatchPrefetcher` | Daemon host thread + `queue.Queue(maxsize=1)` double-buffer (default). Producer refills while caller runs `train_step`. |
+| `_gather_batch_host_numpy` | Producer gather via numpy indexing — avoids PyTorch OpenMP steal from the step. |
+| CUDA path | Producer: gather + `pin_memory`. Caller: side-stream `non_blocking` H2D + wait-event. |
+| Sync A/B | `BDH_PREFETCH_ASYNC=0` or `async_host=False` — one-slot preload on the caller thread. |
+| Public `get_batch` | Unchanged torch vectorized path (seed-stable for tests). |
+
+Hot loop unchanged::
+
+    loss = train_step(model, opt, x, y)
+    x, y = loader.next()  # wait for ready slot; producer already refilling
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/test_dataloader.py -q
+# 13 passed
+# full: 288 passed, 9 skipped
+```
+
+LM windows still contiguous; `x[:,1:]==y[:,:-1]`. Async/sync both covered.
+
+### Measured CPU (honest, this box, `cuda=False`, OMP≈2)
+
+```text
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_prefetch.py
+# host gather / get_batch median:           ~0.07 ms
+# synthetic overlap (host sleep 2 ms + busy step 3 ms):
+#   serial ~5.2 ms | async ~3.1 ms | **~1.7×**
+# tiny train_step+prefetch loop:            sync/async often ~noise–modest
+#   (load-sensitive on this shared CPU box)
+```
+
+**Claim:** measurable **overlap win** when host prep is non-trivial (synthetic
+probe with sleep-modeled host delay). Real vectorized gather is already
+~0.07 ms, so e2e train_step wins on this CPU box are **small / noisy** — do
+not claim a large wall-clock train speedup here. GPU pin/H2D overlap still
+unmeasured (no CUDA on this runner).
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL` / attention math
+- No fake GPU wins from CPU medians

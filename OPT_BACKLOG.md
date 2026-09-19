@@ -26,6 +26,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - KV-style cache + incremental `generate`
 - MLP `permute → contiguous → view`
 - Vectorized `train.get_batch` (+ pin/non_blocking CUDA; optional DataLoader workers #14)
+- BatchPrefetcher v2: host-thread queue double-buffer + numpy producer gather (`opt/prefetch-v2`); synthetic overlap ~1.6×; e2e CPU ~noise
 - Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked still < eager after `opt/blocked-vec`; GPU unmeasured
 - Experimental sparse ReLU matmul (default off); **short-train density + CPU crossover** (`opt/sparse-probe`) — keep OFF
 - CUDA extension scaffold for tril score×V (optional build)

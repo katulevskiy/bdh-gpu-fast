@@ -24,6 +24,7 @@ def tr(monkeypatch):
     monkeypatch.setattr(tr, "_train_data", None)
     monkeypatch.setattr(tr, "_val_data", None)
     monkeypatch.setattr(tr, "_offsets", None)
+    monkeypatch.setattr(tr, "USE_PREFETCH_ASYNC", True)
     tr.fetch_data()
     return tr
 
@@ -82,12 +83,59 @@ def test_to_train_device_cpu_passthrough(tr):
 
 def test_batch_prefetcher_next(tr):
     loader = tr.BatchPrefetcher("train")
-    x1, y1 = loader.next()
-    x2, y2 = loader.next()
-    assert x1.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
-    assert x2.shape == x1.shape
-    # consecutive random batches should almost never be identical
-    assert not torch.equal(x1, x2)
+    try:
+        x1, y1 = loader.next()
+        x2, y2 = loader.next()
+        assert x1.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
+        assert x2.shape == x1.shape
+        # consecutive random batches should almost never be identical
+        assert not torch.equal(x1, x2)
+    finally:
+        loader.close()
+
+
+def test_batch_prefetcher_async_and_sync(tr):
+    """Async and sync paths both yield contiguous LM windows of the right shape."""
+    for async_host in (True, False):
+        loader = tr.BatchPrefetcher("train", async_host=async_host)
+        try:
+            assert loader._async is async_host
+            xs = []
+            for _ in range(3):
+                x, y = loader.next()
+                assert x.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
+                assert y.shape == x.shape
+                assert x.is_contiguous() and y.is_contiguous()
+                assert torch.equal(x[:, 1:], y[:, :-1])
+                xs.append(x.clone())
+            assert not torch.equal(xs[0], xs[1])
+        finally:
+            loader.close()
+
+
+def test_batch_prefetcher_producer_alive(tr):
+    """Async path keeps a daemon producer thread filling the one-slot queue."""
+    loader = tr.BatchPrefetcher("train", async_host=True)
+    try:
+        assert loader._thread is not None and loader._thread.is_alive()
+        assert loader._q is not None
+        x, y = loader.next()
+        assert x.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
+        assert y.dtype == torch.int64
+        # Producer refills while we hold the batch (queue depth 1).
+        x2, y2 = loader.next()
+        assert x2.shape == x.shape
+        assert not torch.equal(x, x2)
+    finally:
+        loader.close()
+        assert loader._thread is None
+
+
+def test_batch_prefetcher_close_idempotent(tr):
+    loader = tr.BatchPrefetcher("val", async_host=True)
+    _ = loader.next()
+    loader.close()
+    loader.close()  # second close must not raise
 
 
 def test_dataloader_num_workers_zero(tr, monkeypatch):
