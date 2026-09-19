@@ -116,6 +116,16 @@ def test_batch_prefetch_defaults_unchanged(tr):
     assert tr.USE_PREFETCH_H2D is True
 
 
+def test_prefetch_h2d_cpu_gate_does_not_probe_cuda(tr, monkeypatch):
+    """A CPU device short-circuits before querying CUDA availability."""
+
+    def fail_cuda_probe():
+        pytest.fail("CPU H2D gate must not query CUDA availability")
+
+    monkeypatch.setattr(tr.torch.cuda, "is_available", fail_cuda_probe)
+    assert tr.prefetch_h2d_skip_reason() == "device-not-cuda: cpu"
+
+
 def test_prefetch_h2d_skip_reason_is_cpu_safe(tr, monkeypatch):
     """The H2D gate reports CPU/runtime skips without CUDA construction."""
     assert tr.prefetch_h2d_skip_reason() == "device-not-cuda: cpu"
