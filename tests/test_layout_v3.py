@@ -970,6 +970,7 @@ def test_sampler_padded_nonunit_logits_preserves_neighbors():
 
     for name, kwargs in (
         ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-one", dict(scale=0.7, do_topk=True, top_k_n=1)),
         ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
         ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
         ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
