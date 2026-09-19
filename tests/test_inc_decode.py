@@ -15,12 +15,16 @@ sys.path.insert(0, str(ROOT))
 import bdh
 from bdh_cache import CacheManager
 from kernels.attention import (
+    DEFAULT_BLOCK_DECODE,
+    _pick_tile_size,
+    _tiled_score_v,
     blocked_decode_attn,
+    blocked_tril_attn,
     eager_decode_attn,
     eager_tril_attn,
     triton_decode_attn,
 )
-from kernels.attention_dispatch import bdh_attn_decode
+from kernels.attention_dispatch import bdh_attn_decode, resolve_attn_impl
 
 
 def _small_cfg(**kwargs) -> bdh.BDHConfig:
@@ -202,3 +206,63 @@ def test_attention_module_t1_no_self_attend():
         Q, Q, torch.randn_like(V) * 100, rope_start=S, past_kr=past_kr, past_v=past_v
     )
     assert torch.allclose(out1, out2, atol=0)
+
+
+def test_pick_tile_size_prefers_fewer_trips_for_tq1():
+    """Decode default tile is larger than cold 64; adaptive grows toward fewer tiles."""
+    assert DEFAULT_BLOCK_DECODE >= 128
+    # Fixed BS honored when S is small
+    assert _pick_tile_size(40, 1, 256) == 40
+    # Long past, Tq=1: tile grows above a small requested BS (fewer Python loops)
+    big = _pick_tile_size(2048, 1, 64)
+    assert big >= 64
+    assert big <= 2048
+    # Roughly ~8 tiles worth
+    assert big >= 2048 // 8
+
+
+def test_tiled_score_v_shared_with_cold_past_region():
+    """Cold blocked past region == decode helper against K[:, :i0]."""
+    B, H, T, N, D = 1, 2, 20, 8, 16
+    g = torch.Generator().manual_seed(21)
+    Q = torch.randn(B, H, T, N, generator=g)
+    V = torch.randn(B, 1, T, D, generator=g)
+    i0, i1 = 8, 12
+    Qi = Q[:, :, i0:i1, :]
+    K_past = Q[:, :, :i0, :]
+    V_past = V[:, :, :i0, :]
+    # Expand V like blocked paths
+    Vh = V.expand(B, H, T, D)
+    shared = _tiled_score_v(Qi, K_past, Vh[:, :, :i0, :], block_size=4)
+    # Full cold blocked, slice the query block — past-only contribution equals
+    # full output minus diagonal-block contribution.
+    full_blocked = blocked_tril_attn(Q, Q, V, block_size=4)
+    # Diagonal-only reference for [i0,i1)
+    scores = Qi @ Q[:, :, i0:i1, :].transpose(-2, -1)
+    scores = scores.tril(diagonal=-1)
+    diag = scores @ Vh[:, :, i0:i1, :]
+    past_only = full_blocked[:, :, i0:i1, :] - diag
+    assert torch.allclose(shared, past_only, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("S,BS", [(17, 5), (64, 256), (100, 16), (3, 64)])
+def test_blocked_decode_vs_eager_tril_last_row(S, BS):
+    """blocked_decode ≡ last row of eager tril(-1) over concat(past, new)."""
+    B, H, N, D = 2, 4, 8, 16
+    g = torch.Generator().manual_seed(100 + S + BS)
+    past_k = torch.randn(B, H, S, N, generator=g)
+    past_v = torch.randn(B, 1, S, D, generator=g)
+    q = torch.randn(B, H, 1, N, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    K_all = torch.cat([past_k, q], dim=2)
+    V_all = torch.cat([past_v, v_new], dim=2)
+    last = eager_tril_attn(K_all, K_all, V_all)[:, :, -1:, :]
+    got = blocked_decode_attn(q, past_k, past_v, block_size=BS)
+    tri = triton_decode_attn(q, past_k, past_v, block_size=BS)
+    assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(tri, last, rtol=1e-5, atol=1e-5)
+
+
+def test_default_impl_is_eager(monkeypatch):
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    assert resolve_attn_impl() == "eager"

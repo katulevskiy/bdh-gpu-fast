@@ -1161,3 +1161,63 @@ logging / `.item()` stay outside. `train_fast.py` defaults `BDH_COMPILE=1`.
 - No change to CE loss / tril(-1) / train=first 90% val=last 10%
 - No change to `BDH_ATTN_IMPL` / `CacheManager` / Parameter layout migration
 - No default weight tying (embed-tie remains opt-in)
+
+## opt/triton-decode2 — polish blocked/Triton decode vs packed KR/V (2026-09-19)
+
+**Branch:** `opt/triton-decode2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `35564ad` (main after dropout-fuse #17).
+
+### Goal
+
+Polish the **single-token / Tq decode** path against packed past KR/V that
+landed in `opt/inc-decode`: fewer Python tile trips, better default tile sizes,
+share the past score×V helper with cold `blocked_tril_attn`, and add a dedicated
+Triton decode kernel (CUDA) that skips causal masking. Preserve
+`tril(diagonal=-1)` and keep **default `BDH_ATTN_IMPL=eager`**.
+
+### What landed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `_expand_v_heads`, `_pick_tile_size`, `_tiled_score_v` shared by decode + cold past region; `DEFAULT_BLOCK_DECODE=256` (cold stays 64); `blocked_tril_attn` past = `_tiled_score_v`; Triton `_bdh_decode_fwd_kernel` + `triton_decode_attn` (CUDA fused, else blocked) |
+| `kernels/attention_dispatch.py` | `bdh_attn_decode` default tile = `DEFAULT_BLOCK_DECODE`; triton always goes through `triton_decode_attn` |
+| `tests/test_inc_decode.py` | Tile picker, shared past vs cold blocked, decode ≡ last row of eager `tril(-1)`, default eager |
+
+### Semantics (unchanged)
+
+```text
+# decode at absolute index S (past length S):
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+```
+
+### Wire-up
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — two-GEMM decode, full TxT cold
+export BDH_ATTN_IMPL=blocked   # tiled decode + cold (shared _tiled_score_v)
+export BDH_ATTN_IMPL=triton    # CUDA decode kernel; CPU → blocked decode
+export BDH_ATTN_IMPL=cuda      # kernels.cuda_attn.tril_decode
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_inc_decode.py tests/test_triton_attn.py \
+  tests/test_attn_unify.py tests/test_attention_mask.py -q
+# 81 passed, 4 skipped (CUDA paths) across inc_decode+triton_attn+attn_unify+attention_mask+cuda_decode
+# blocked/triton decode match eager tril(-1) last row (rtol/atol 1e-5)
+# cold blocked still matches eager; default impl remains eager
+```
+
+### Honest limits (CPU)
+
+- **No GPU on this box** — Triton decode kernel is in-tree but unmeasured;
+  `triton_decode_attn` → `blocked_decode_attn` here.
+- On CPU, larger decode tiles cut **Python loop count**, not wall time vs the
+  eager two-GEMM for modest S. Tiled path is for peak score-memory shape /
+  API parity with the GPU path.
+- Adaptive `_pick_tile_size` still caps score elems (~256²) so a pathological
+  long-S decode does not allocate a full `(1×S)` if callers force tiny
+  `block_size` — but the default one-shots when `Tq*S` fits the budget.
+- Still no softmax / no scale / no SDPA. No PR to `pathwaycom/*`.

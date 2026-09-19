@@ -27,6 +27,7 @@ import torch
 from .attention import (
     _HAS_TRITON,
     _can_use_triton,
+    DEFAULT_BLOCK_DECODE,
     blocked_decode_attn,
     blocked_tril_attn,
     eager_decode_attn,
@@ -98,7 +99,7 @@ def bdh_attn_decode(
     V_past: torch.Tensor,
     *,
     impl: str | None = None,
-    block_size: int = 64,
+    block_size: int = DEFAULT_BLOCK_DECODE,
 ) -> torch.Tensor:
     """Attend new queries to packed past KR/V only (no full TxT).
 
@@ -107,8 +108,8 @@ def bdh_attn_decode(
     query never attends to itself.
 
     - eager:   single ``(Q @ K.mT) @ V`` (reference)
-    - blocked: tiled over past length (no ``(S+T)x(S+T)`` scores)
-    - triton:  blocked on CPU / no-CUDA; same API for GPU later
+    - blocked: tiled over past (shared ``_tiled_score_v``; larger default tile)
+    - triton:  fused decode kernel on CUDA; blocked fallback on CPU
     - cuda:    ``kernels.cuda_attn.tril_decode`` (native ext if built, else ref)
     """
     name = resolve_attn_impl(impl)
@@ -120,10 +121,8 @@ def bdh_attn_decode(
         from .cuda_attn import tril_decode
 
         return tril_decode(Q, K_past, V_past)
-    # triton → decode kernel not specialized; CPU fallback is blocked_decode
-    if _can_use_triton(Q):
-        return triton_decode_attn(Q, K_past, V_past, block_size=block_size)
-    return blocked_decode_attn(Q, K_past, V_past, block_size=block_size)
+    # triton → fused decode on CUDA; blocked (_tiled_score_v) otherwise
+    return triton_decode_attn(Q, K_past, V_past, block_size=block_size)
 
 
 def backend_info() -> dict:

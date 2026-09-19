@@ -28,14 +28,16 @@ export BDH_ATTN_IMPL=cuda
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` when
 `BDH_ATTN_IMPL` is `blocked` / `triton` / `cuda` (`cuda` → `tril_decode`).
+Blocked/triton decode share `_tiled_score_v` with the cold past region;
+Triton has a dedicated decode kernel on CUDA (blocked fallback on CPU).
 Default remains **eager**.
 
 ## Modules
 
 | Path | Role |
 |------|------|
-| `attention.py` | `eager_tril_attn`, `blocked_tril_attn`, `triton_tril_attn` |
-| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `resolve_attn_impl()` |
+| `attention.py` | cold tril + decode: `blocked_*`, `triton_*`, shared `_tiled_score_v` |
+| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref (full + decode) |
 
