@@ -537,15 +537,23 @@ class BDH(nn.Module):
     def _residual_ln(self, x: torch.Tensor, y_mlp: torch.Tensor) -> torch.Tensor:
         """``LN(x + LN(y_mlp))`` via ``F.layer_norm`` only — compile-friendly.
 
-        Pure functional (out-of-place ``x + y``): no in-place ``add_`` aliasing
-        for AOTAutograd functionalization, and no Python control flow. Prefer
-        ``F.layer_norm`` over ``nn.LayerNorm`` module calls. Bit-identical to
-        ``self.ln(x + self.ln(y_mlp))`` and to the prior in-place reuse form.
+        Still the #30 hot path: ``F.layer_norm`` (not ``self.ln`` / module hooks),
+        no Python control flow, no ``is_grad_enabled`` branch. Deepen vs #30's
+        out-of-place ``x + y``: reuse the inner LN *output* buffer with
+        ``y.add_(x)`` so the residual sum does not allocate a separate add
+        temporary. Autograd-safe (in-place into a fresh LN output; ``y_mlp`` and
+        ``x`` stay intact for backward). Dynamo: 0 graph breaks; bit-identical
+        to ``self.ln(x + self.ln(y_mlp))`` at dropout=0.
+
+        Torch has no eager affine-free fused add+LN op; inductor may still fuse
+        ``layer_norm(x + y)`` on GPU compile — this path keeps ``F.layer_norm``
+        so that remains available if we ever flip back to out-of-place add.
         """
         shape = self._ln_shape
         eps = self._ln_eps
         y = F.layer_norm(y_mlp, shape, weight=None, bias=None, eps=eps)
-        return F.layer_norm(x + y, shape, weight=None, bias=None, eps=eps)
+        y.add_(x)
+        return F.layer_norm(y, shape, weight=None, bias=None, eps=eps)
 
     def _dropout(self, x: torch.Tensor) -> torch.Tensor:
         """Compile-friendly dropout via ``F.dropout`` (ATen / torch RNG only).

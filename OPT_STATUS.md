@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#50)
+# OPT status — landed work (#1–#51)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `f16111b` (`#49` compile-guidance on `main`; re-profiled in `opt/profile-v4`). Profile source: `c7a7471` (post-#48; eager unchanged by #49).
+Tip documented here: `527ead2` (`#50` profile-v4 on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49/#50 docs).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -125,7 +125,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 
 ---
 
-## Landed opts (#1–#50)
+## Landed opts (#1–#51)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -179,6 +179,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **48** | `opt/gen-sample` | Fuse T=1 lm_head+sample / optional fused top-k; reuse logits/probs buffers | Large-V top_k ~1.5×; default-V wall ~noise; tokens-match | GPU decode open |
 | **49** | `opt/compile-guidance` | Warn COMPILE+blocked/online/triton; document eager compile path | Advisory warn; defaults unchanged | GPU still open |
 | **50** | `opt/profile-v4` | Re-profile tip after gen-sample #48 (+ #49 guidance); refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; gen-host host self ~1.4% | No GPU measurements; defaults unchanged |
+| **51** | `opt/ln-deepen` | Residual LN: `F.layer_norm` + inner-out `add_` reuse (cut add temp) | Residual micro small; e2e ~noise; Dynamo 0 breaks | No fused GPU LN claim |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 

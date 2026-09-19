@@ -248,6 +248,51 @@ def test_residual_ln_matches_module_ln_bitexact():
     assert torch.equal(m._ln(x), m.ln(x))
 
 
+def test_residual_ln_grad_parity_vs_out_of_place_add():
+    """In-place residual reuse matches out-of-place LN(x+LN(y)) grads @ dropout=0."""
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(3)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 12))
+    y = torch.randint(0, cfg.vocab_size, (2, 12))
+
+    # Reference: force out-of-place add path via monkeypatch
+    import torch.nn.functional as F
+
+    def _oop(self, x_t, y_mlp):
+        shape, eps = self._ln_shape, self._ln_eps
+        yy = F.layer_norm(y_mlp, shape, weight=None, bias=None, eps=eps)
+        return F.layer_norm(x_t + yy, shape, weight=None, bias=None, eps=eps)
+
+    ref = bdh.BDH(cfg).train()
+    ref.load_state_dict(m.state_dict())
+    ref._residual_ln = _oop.__get__(ref, bdh.BDH)
+
+    logits_m, loss_m = m(x, y)
+    loss_m.backward()
+    logits_r, loss_r = ref(x, y)
+    loss_r.backward()
+    assert torch.equal(logits_m, logits_r)
+    assert torch.equal(loss_m, loss_r)
+    for (n1, p1), (n2, p2) in zip(m.named_parameters(), ref.named_parameters()):
+        if p1.grad is None and p2.grad is None:
+            continue
+        assert torch.equal(p1.grad, p2.grad), n1
+
+
+def test_residual_ln_does_not_mutate_inputs():
+    """y.add_(x) must only mutate the inner LN output, not x / y_mlp."""
+    cfg = _small_cfg(dropout=0.0)
+    m = bdh.BDH(cfg)
+    torch.manual_seed(11)
+    x = torch.randn(2, 8, cfg.n_embd)
+    y_mlp = torch.randn(2, 8, cfg.n_embd)
+    x0, y0 = x.clone(), y_mlp.clone()
+    _ = m._residual_ln(x, y_mlp)
+    assert torch.equal(x, x0)
+    assert torch.equal(y_mlp, y0)
+
+
 def test_compile_residual_ln_path_matches_eager():
     """Compiled forward (residual LN epilogue) matches eager at dropout=0.
 

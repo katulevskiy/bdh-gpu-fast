@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `c7a7471` / documented tip `f16111b` (post #48 gen-sample + #49 compile-guidance; this PR `opt/profile-v4`), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `c7a7471` / documented tip `527ead2` (post #48–#50; includes `opt/profile-v4`), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -45,7 +45,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
 - Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold`) — GPU measure still P0
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
-- Compile-friendly LN+residual: `F.layer_norm` only, functional residual, no `is_grad_enabled` product branch (`opt/ln-compile`)
+- Compile-friendly LN+residual: `F.layer_norm` only, no `is_grad_enabled` product branch (`opt/ln-compile` #30); deepen: inner-LN buffer `add_` reuse (`opt/ln-deepen`)
 - CPU train-step `BDH_COMPILE=0` vs `1` microbench via `maybe_compile` (soft-skip if inductor missing) (`opt/compile-bench`)
 - Generate microbench `benchmarks/bench_generate.py`: CacheManager generate × attn impls eager|blocked|triton|cuda when avail; honest CPU numbers (`opt/gen-bench`)
 - OPT_STATUS operator matrix + README pointer (`opt/docs-matrix` #34)
@@ -57,7 +57,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Compile × blocked × AUTOGRAD train matrix + SelfAttnFn Dynamo fix (`opt/compile-blocked` #46) — CPU; compile+blocked not a win
 - Encoder fuse attempt (`opt/encoder-fuse` #47): default stays einsum; optional bias → `F.linear` epilogue; always-on linear lost on CPU (weight transpose-copy)
 - Compile guidance: warn COMPILE+blocked|online|triton; recommend COMPILE=1 only with eager on CPU (`opt/compile-guidance` #49) — GPU compile still P1
-- Profile-v4 docs refresh (`opt/profile-v4`) — tip `f16111b`; profile source `c7a7471`; cats=0; contiguous=0; no GPU measurement
+- Profile-v4 docs refresh (`opt/profile-v4` #50) — tip `527ead2`; profile source `c7a7471`; cats=0; contiguous=0; no GPU measurement
+- Residual LN deepen: reuse inner LN out via `add_` (fewer add temps; `F.layer_norm` #30 path kept) (`opt/ln-deepen`) — CPU e2e ~noise
 
 ## Ranked next work
 
@@ -83,7 +84,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | CUDA attn CPU refs deepen | **Landed** #37 `opt/cuda-ref-v2` |
 | Vectorized CPU blocked tiles | **Landed** #38 `opt/blocked-vec` — still < eager; GPU measure open |
 | Re-profile post-mlp-fuse | **Landed** #40 `opt/profile-v3` — profile source tip `b160469`; documented tip `d3ff475`; cats=0; contiguous=0 |
-| Re-profile post-gen-sample | **Landed** `opt/profile-v4` (this PR) — tip `f16111b`; profile source `c7a7471`; cats=0; contiguous=0; gen-host host self ↓ |
+| Re-profile post-gen-sample | **Landed** `opt/profile-v4` #50 — tip `527ead2`; profile source `c7a7471`; cats=0; contiguous=0; gen-host host self ↓ |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |

@@ -2913,10 +2913,66 @@ Unchanged honesty vs backlog: **P0** = GPU measure fused score×V (CPU % above
 are not GPU wins). **P1** = GPU compile train-step + generate/decode GEMM
 (`bench_generate.py` / `bench_gpu_attn.py --mode decode`). gen-host / gen-sample /
 compile-guidance already on main — strike from “next.”
-
 ### Non-goals
 
 - No PRs to `pathwaycom/*`
 - No softmax / diagonal / SDPA
 - No GPU speedup claims from these CPU % figures
 - No defaulting `BDH_ATTN_IMPL=blocked` on CPU
+
+## opt/ln-deepen — cut residual LN temporaries (2026-09-19)
+
+**Branch:** `opt/ln-deepen` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `527ead2` (main after #50 profile-v4; started at `c7a7471`, rebased through #49/#50).
+
+### Goal
+
+Further cut **LayerNorm + residual** copy/temp tax on forward (profile still
+shows LN + `copy_` significant). Keep the #30 compile-friendly **`F.layer_norm`**
+path (no `self.ln` module calls, no `is_grad_enabled` product branch). Preserve
+`tril(-1)`, defaults, bit-identical @ dropout=0.
+
+### What we tried
+
+| Approach | Dynamo 0 breaks? | Bit-identical? | Result |
+|----------|------------------|----------------|--------|
+| Eager fused add+LN (aten / F) | — | — | **No API** for affine-free fused add+`layer_norm` on this torch |
+| Nested `F.layer_norm(x + F.layer_norm(...))` | yes | yes | Same temps as #30; inductor may fuse on GPU compile |
+| **`y = LN(y_mlp); y.add_(x); LN(y)`** (ln-fuse reuse) | **yes** | **yes** (fwd+grad) | **Landed** — drops out-of-place `x+y` temp; #30 `F.layer_norm` kept |
+
+Re-measure vs #30's caution: in-place into the **inner LN output** (not into `x`
+or `y_mlp`) stays AOTAutograd/Dynamo-clean (`torch._dynamo.explain` → **0**
+graph breaks on cold train @ dropout=0) and **grad bit-exact** vs out-of-place add.
+
+### Code
+
+`_residual_ln`: `F.layer_norm` twice + `y.add_(x)` buffer reuse (same pattern as
+#12 ln-fuse, but still never call `self.ln` on the hot path — #30 preserved).
+
+### Honest CPU numbers (`torch 2.14.0+cu130`, this box, `cuda=False`)
+
+```text
+.venv/bin/python benchmarks/bench_residual_ln.py
+# residual-only (B=4 T=64 D=128): oop 15.95 ms / inplace 16.00 ms  (ratio ~1.00× — parity)
+# op mix 40×: oop {native_layer_norm:80, add:40}; inplace {native_layer_norm:80, add_:40}
+# forward tip-style (layers=4 d=128 nh=4 B=4 T=64): e2e wall **~noise** (do not claim ratio)
+```
+
+**Claim carefully:** structural temp cut is real (`aten::add` → `aten::add_` into
+LN out — no separate residual-sum tensor). Residual-only wall is **parity** on
+this CPU; e2e forward still GEMM/`copy_`-dominated (profile-v4: LN ~11%,
+`copy_` ~24%). No GPU fused-kernel claim.
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/test_compile.py tests/test_vs_baseline.py -q
+# residual bitexact vs module LN; grad parity vs oop add; compile path; 0 graph breaks
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No RMSNorm / affine LN / softmax / SDPA
+- No default `BDH_COMPILE` / attn impl change
+- No custom CUDA/Triton LN kernel on this branch
