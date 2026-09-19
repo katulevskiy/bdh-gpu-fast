@@ -418,3 +418,30 @@ def test_dispatch_preserves_composed_feature_strided_storage_gradients(
         (got_v_grad, ref_v_grad),
     ):
         assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_self_qk_analytic_autograd_contract(impl, v_heads):
+    """Analytic dispatch keeps strict-tril gradients when Q and K alias."""
+    B, H, T, N, D = 2, 3, 23, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1929)
+    Q = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
+    V = torch.randn(B, v_heads, T, D, generator=generator, dtype=torch.float64)
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    def run(name, use_autograd_fn):
+        q = Q.detach().clone().requires_grad_(True)
+        v = V.detach().clone().requires_grad_(True)
+        out = bdh_attn(q, q, v, impl=name, use_autograd_fn=use_autograd_fn)
+        out.backward(dO)
+        return out.detach(), q.grad.detach(), v.grad.detach()
+
+    ref, ref_q_grad, ref_v_grad = run("eager", use_autograd_fn=False)
+    expected = (Q @ Q.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_q_grad, got_v_grad = run(impl, use_autograd_fn=True)
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    assert torch.allclose(got_q_grad, ref_q_grad, rtol=1e-9, atol=1e-9)
+    assert torch.allclose(got_v_grad, ref_v_grad, rtol=1e-9, atol=1e-9)
