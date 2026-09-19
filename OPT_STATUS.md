@@ -90,7 +90,7 @@ export BDH_ROPE_IMPL=fused
 |-----|---------|---------|
 | `BDH_COMPILE` | `0` | Set `1` / `true` to enable `train.maybe_compile` |
 | `BDH_COMPILE_MODE` | `default` | `default` \| `reduce-overhead` \| `max-autotune` |
-| `BDH_COMPILE_PROBE` | `train` | `eval` \| `train` \| `train_bwd` |
+| `BDH_COMPILE_PROBE` | `train_bwd` | `eval` \| `train` \| `train_bwd` |
 | `BDH_COMPILE_FULLGRAPH` | `0` | `fullgraph=True` when set; soft-fallback to eager on graph breaks (#84 probe: cold eager×AUTOGRAD holds 0 breaks on tip) |
 
 `generate()` is `@torch.compiler.disable`. Changing `BDH_ATTN_IMPL` after compile → recompile. On CPU, `reduce-overhead` is **not useful** — CUDA graphs need a real GPU (`maybe_compile` warns; prefer `MODE=default`).
@@ -104,7 +104,7 @@ Defaults unchanged (`COMPILE=0`, `MODE=default`, `FULLGRAPH=0`, `IMPL=eager`). *
 ```bash
 BDH_COMPILE=0 python train.py
 # recommended CPU compile train path:
-BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_MODE=default BDH_COMPILE_PROBE=train python train.py
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_MODE=default BDH_COMPILE_PROBE=train_bwd python train.py
 # optional analytic bwd (still 0 graph breaks on eager):
 BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_ATTN_AUTOGRAD=1 python train.py
 # optional fullgraph (soft-fallback if Dynamo breaks; tip holds):

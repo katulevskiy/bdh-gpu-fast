@@ -166,8 +166,10 @@ USE_LOG_ASYNC = os.environ.get("BDH_LOG_ASYNC", "1") not in ("0", "false", "Fals
 # Compile / opt knobs (env overrides for benches and CPU boxes without inductor deps)
 USE_COMPILE = os.environ.get("BDH_COMPILE", "0") in ("1", "true", "True")
 COMPILE_MODE = os.environ.get("BDH_COMPILE_MODE", "default")  # default|reduce-overhead|max-autotune
-# Probe depth when BDH_COMPILE=1: eval | train | train_bwd (default train — matches train loop)
-COMPILE_PROBE = os.environ.get("BDH_COMPILE_PROBE", "train").strip().lower()
+# Probe depth when BDH_COMPILE=1: eval | train | train_bwd.
+# The default includes backward because this is a train-step path; use
+# BDH_COMPILE_PROBE=train for a forward-only diagnostic when startup cost matters.
+COMPILE_PROBE = os.environ.get("BDH_COMPILE_PROBE", "train_bwd").strip().lower()
 COMPILE_FULLGRAPH = os.environ.get("BDH_COMPILE_FULLGRAPH", "0") in ("1", "true", "True")
 USE_FUSED_ADAMW = os.environ.get("BDH_FUSED_ADAMW", "1") not in ("0", "false", "False")
 # Data path: default = vectorized get_batch + BatchPrefetcher; optional torch DataLoader
@@ -597,9 +599,10 @@ def maybe_compile(
     forward), not at ``torch.compile()`` time — pass an example batch to probe.
 
     Probe depth (``BDH_COMPILE_PROBE``):
-      - ``eval``      — ``eval()`` + ``no_grad`` forward (old default)
-      - ``train``     — ``train()`` forward with targets (default; matches loop)
+      - ``eval``      — ``eval()`` + ``no_grad`` forward (diagnostic only)
+      - ``train``     — ``train()`` forward with targets (forward-only diagnostic)
       - ``train_bwd`` — train forward + ``loss.backward()`` then zero grads
+        (default; validates the compiled portion of ``train_step``)
 
     Eval-only probes leave a *separate* Dynamo graph for training (dropout /
     ``is_grad_enabled`` guards differ). Prefer ``train`` or ``train_bwd``.
@@ -630,7 +633,11 @@ def maybe_compile(
             "Prefer BDH_ATTN_IMPL=eager when compiling on CPU; GPU still open."
         )
 
-    probe = COMPILE_PROBE if COMPILE_PROBE in ("eval", "train", "train_bwd") else "train"
+    probe = (
+        COMPILE_PROBE
+        if COMPILE_PROBE in ("eval", "train", "train_bwd")
+        else "train_bwd"
+    )
     device_tag = f"{device.type}" + (
         f":{device.index}" if getattr(device, "index", None) is not None else ""
     )
@@ -658,9 +665,19 @@ def maybe_compile(
     if example_x is None:
         print(
             f"torch.compile enabled (mode={COMPILE_MODE}, fullgraph={COMPILE_FULLGRAPH}, "
-            f"device={device_tag}, unprobed)"
+            f"device={device_tag}, probe={probe}, unprobed)"
         )
         return compiled
+
+    if probe == "train_bwd" and example_y is None:
+        # Do not return an apparently train-ready OptimizedModule when the
+        # selected probe cannot exercise backward. Returning the original
+        # module is a soft fallback and avoids a first-step surprise.
+        print(
+            "torch.compile probe skipped: BDH_COMPILE_PROBE=train_bwd requires "
+            f"example_y; using eager [device={device_tag} mode={COMPILE_MODE}]"
+        )
+        return model
 
     was_training = model.training
     try:
@@ -850,6 +867,8 @@ def eval(model):
 def train_step(model, optimizer, x, y):
     """Single optimize step — kept as a function for benches / future fullgraph.
 
+    The module forward/backward may be a ``torch.compile`` region, but the
+    optimizer step and grad clearing intentionally remain outside that region.
     Always ends with ``clear_grads(optimizer)`` → ``zero_grad(set_to_none=True)``
     so the next step does not pay fill-zero allocator traffic (and plays nicer
     with CUDA-graph capture). Grads are ``None`` after return — inspect before

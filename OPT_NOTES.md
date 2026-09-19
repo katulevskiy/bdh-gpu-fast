@@ -5536,3 +5536,67 @@ and blocked `generate()` token parity with eager while `torch.cat` remains 0.
 - No V expansion into `(B,H,S,D)` and no full score materialization.
 - No GPU timing, kernel claim, or speedup claim from this CPU-only box.
 - No public PR and no PRs to `pathwaycom/*`; private repo only.
+## opt/compile-train-v2 — backward-aware compile probe (2026-09-19)
+
+**Branch:** `opt/compile-train-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `d193d78` (`origin/main`, #115). No pathwaycom or public PR.
+
+### Audit / deepen
+
+The train path already kept data loading, logging, `generate()`, and optimizer
+control outside the compiled module. The remaining gap was probe depth:
+`BDH_COMPILE_PROBE=train` warmed only the forward graph, so a compile failure
+in the backward portion could still first appear in the real `train_step`.
+
+This revision makes `BDH_COMPILE_PROBE=train_bwd` the opt-in compile default.
+It runs the train forward with targets, calls `loss.backward()`, and clears the
+probe gradients through `zero_grad(set_to_none=True)` before returning. The
+forward-only `train` and `eval` probes remain available for diagnostics. If the
+backward probe is selected without `example_y`, `maybe_compile` now returns the
+original module with an explicit soft-fallback message instead of returning an
+unprobed `OptimizedModule`.
+
+`train_step` documents the boundary explicitly: the compiled module covers
+forward/backward, while `optimizer.step()` and gradient clearing remain eager.
+This preserves the current optimizer semantics and avoids claiming that the
+whole Python train-step function is captured.
+
+### Bench / matrix contract
+
+`benchmarks/bench_train_step.py` now imports with
+`BDH_COMPILE_PROBE=train_bwd` unless the operator explicitly sets a probe. Its
+compile A/B and FULLGRAPH×eager×AUTOGRAD sections print the effective probe,
+soft-skip compile/probe/train-step failures, and retain the honest CPU-only
+matrix. The matrix dimensions are:
+
+```text
+COMPILE ∈ {0,1}
+IMPL ∈ {eager, blocked}
+AUTOGRAD ∈ {0,1}
+FULLGRAPH ∈ {0,1} × IMPL=eager
+MODE ∈ {default, reduce-overhead}
+```
+
+On this CPU-only box, use only `BDH_COMPILE=1 BDH_ATTN_IMPL=eager
+BDH_COMPILE_MODE=default` as the recommended compile combination. CPU wall
+medians are not GPU or CUDA-graph claims; `COMPILE=0` remains the repository
+default.
+
+### Tests
+
+```bash
+.venv/bin/python -m pytest tests/test_compile.py -q
+.venv/bin/python -m pytest tests/ -q
+```
+
+Coverage adds the backward-probe default contract and verifies that missing
+probe targets soft-fall back to eager without requiring inductor. Existing
+FULLGRAPH×eager×AUTOGRAD parity/smoke coverage remains unchanged. No GPU was
+available for this work, so no GPU compile, CUDA-graph, or speedup claim is made.
+
+### Non-goals
+
+- No default `BDH_COMPILE=1`; `COMPILE=0` remains unchanged.
+- No default attention/RoPE/autograd implementation change.
+- No attention math change: raw scores × strict `tril(diagonal=-1)` remains.
+- No GPU claims and no PRs to `pathwaycom/*` / no public PR.
