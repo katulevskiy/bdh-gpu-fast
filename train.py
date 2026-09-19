@@ -51,6 +51,9 @@ LOG_FREQ = 100
 # Compile / opt knobs (env overrides for benches and CPU boxes without inductor deps)
 USE_COMPILE = os.environ.get("BDH_COMPILE", "0") in ("1", "true", "True")
 COMPILE_MODE = os.environ.get("BDH_COMPILE_MODE", "default")  # default|reduce-overhead|max-autotune
+# Probe depth when BDH_COMPILE=1: eval | train | train_bwd (default train — matches train loop)
+COMPILE_PROBE = os.environ.get("BDH_COMPILE_PROBE", "train").strip().lower()
+COMPILE_FULLGRAPH = os.environ.get("BDH_COMPILE_FULLGRAPH", "0") in ("1", "true", "True")
 USE_FUSED_ADAMW = os.environ.get("BDH_FUSED_ADAMW", "1") not in ("0", "false", "False")
 # Data path: default = vectorized get_batch + BatchPrefetcher; optional torch DataLoader
 USE_DATALOADER = os.environ.get("BDH_DATALOADER", "0") in ("1", "true", "True")
@@ -240,43 +243,104 @@ def maybe_compile(
 ) -> torch.nn.Module:
     """torch.compile with graceful fallback when inductor/CXX is missing.
 
-    Inductor errors often surface on the *first forward*, not at compile() time,
-    so pass an example batch to probe when possible.
+    Inductor errors often surface on the *first forward* (or first *train*
+    forward), not at ``torch.compile()`` time — pass an example batch to probe.
 
-    Notes to avoid graph breaks in the *training loop* (model is what we compile):
-    - Keep control flow / logging / get_batch outside the compiled module.
-    - Prefer tensor ops inside BDH; avoid `.item()` / print inside forward.
-    - Detach losses before Python accumulators so the graph is freed.
-    - CUDA graphs (`mode='reduce-overhead'`) need static shapes + no CPU sync;
-      see train_fast.py / OPT_NOTES.md. Not enabled by default on dynamic T.
+    Probe depth (``BDH_COMPILE_PROBE``):
+      - ``eval``      — ``eval()`` + ``no_grad`` forward (old default)
+      - ``train``     — ``train()`` forward with targets (default; matches loop)
+      - ``train_bwd`` — train forward + ``loss.backward()`` then zero grads
+
+    Eval-only probes leave a *separate* Dynamo graph for training (dropout /
+    ``is_grad_enabled`` guards differ). Prefer ``train`` or ``train_bwd``.
+
+    Graph-break boundaries (documented in OPT_NOTES.md ``opt/compile-harden``):
+    - Compile **only the module**; keep get_batch / logging / ``.item()`` outside.
+    - ``generate()`` is dynamic-length and marked ``torch.compiler.disable``.
+    - RoPE table cache skips Python attribute writes while Dynamo is tracing.
+    - ``BDH_ATTN_IMPL`` / env are specialized at compile time (change → recompile).
+    - CUDA graphs (``mode='reduce-overhead'``) need a real GPU + static shapes;
+      on CPU this mode is accepted but does **not** claim graph capture wins.
     """
     if not USE_COMPILE:
         print("torch.compile disabled (set BDH_COMPILE=1 to enable)")
         return model
+
+    probe = COMPILE_PROBE if COMPILE_PROBE in ("eval", "train", "train_bwd") else "train"
+    device_tag = f"{device.type}" + (
+        f":{device.index}" if getattr(device, "index", None) is not None else ""
+    )
+    if COMPILE_MODE == "reduce-overhead" and device.type != "cuda":
+        print(
+            f"torch.compile note: mode=reduce-overhead on {device_tag} "
+            "(no CUDA graphs on this device; inductor still may run)"
+        )
+
+    compile_kwargs = dict(mode=COMPILE_MODE)
+    if COMPILE_FULLGRAPH:
+        compile_kwargs["fullgraph"] = True
+
     try:
-        compiled = torch.compile(model, mode=COMPILE_MODE)
+        compiled = torch.compile(model, **compile_kwargs)
     except Exception as e:
-        print(f"torch.compile failed ({e}); using eager")
+        print(
+            f"torch.compile failed ({type(e).__name__}: {e}); using eager "
+            f"[device={device_tag} mode={COMPILE_MODE}]"
+        )
         return model
-    if example_x is not None:
-        was_training = model.training
-        try:
+
+    if example_x is None:
+        print(
+            f"torch.compile enabled (mode={COMPILE_MODE}, fullgraph={COMPILE_FULLGRAPH}, "
+            f"device={device_tag}, unprobed)"
+        )
+        return compiled
+
+    was_training = model.training
+    try:
+        if probe == "eval":
             compiled.eval()
             with torch.no_grad(), ctx:
                 if example_y is not None:
                     compiled(example_x, example_y)
                 else:
                     compiled(example_x)
-            print(f"torch.compile enabled (mode={COMPILE_MODE})")
-        except Exception as e:
-            print(f"torch.compile probe failed ({e}); using eager")
-            if was_training:
-                model.train()
-            return model
-        if was_training:
+        else:
+            # Warm the *training* graph (same guards as train_step).
             compiled.train()
-        return compiled
-    print(f"torch.compile enabled (mode={COMPILE_MODE}, unprobed)")
+            with ctx:
+                _logits, loss = (
+                    compiled(example_x, example_y)
+                    if example_y is not None
+                    else compiled(example_x)
+                )
+            if probe == "train_bwd":
+                if loss is None:
+                    raise RuntimeError(
+                        "BDH_COMPILE_PROBE=train_bwd requires example_y (loss)"
+                    )
+                loss.backward()
+                # Drop probe grads so the first real step starts clean.
+                compiled.zero_grad(set_to_none=True)
+        print(
+            f"torch.compile enabled (mode={COMPILE_MODE}, probe={probe}, "
+            f"fullgraph={COMPILE_FULLGRAPH}, device={device_tag})"
+        )
+    except Exception as e:
+        print(
+            f"torch.compile probe failed ({type(e).__name__}: {e}); using eager "
+            f"[probe={probe} device={device_tag} mode={COMPILE_MODE}]"
+        )
+        if was_training:
+            model.train()
+        else:
+            model.eval()
+        return model
+
+    if was_training:
+        compiled.train()
+    else:
+        compiled.eval()
     return compiled
 
 
