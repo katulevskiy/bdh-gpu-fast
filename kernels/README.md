@@ -14,6 +14,7 @@ No softmax, no `1/sqrt(d)`, diagonal excluded.
 | Path | Role |
 |------|------|
 | `attention.py` / `attention_dispatch.py` | Triton + blocked/eager PyTorch (`BDH_ATTN_IMPL`) |
+| `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref |
 
 ## Python API (`kernels/cuda_attn.py`)

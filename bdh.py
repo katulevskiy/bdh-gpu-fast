@@ -135,15 +135,22 @@ class Attention(torch.nn.Module):
         if past_kr is None:
             # Training / cold prefill: strict lower-triangular score@V.
             # BDH_ATTN_IMPL=eager|triton|blocked (default eager). See kernels/.
+            # BDH_ATTN_AUTOGRAD=1 → StrictTrilAttnFn + analytic Q/K/V bwd (opt-in).
             impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
-            if impl == "eager":
+            autograd_on = os.environ.get("BDH_ATTN_AUTOGRAD", "").strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+            if impl == "eager" and not autograd_on:
                 scores = QR @ QR.transpose(-2, -1)
                 scores.tril_(diagonal=-1)
                 out = scores @ V
             else:
                 from kernels.attention_dispatch import bdh_attn
 
-                out = bdh_attn(QR, QR, V, impl=impl)
+                out = bdh_attn(QR, QR, V, impl=impl, use_autograd_fn=autograd_on or None)
             return out, QR, V
 
         # Incremental: queries attend to all past positions + earlier positions

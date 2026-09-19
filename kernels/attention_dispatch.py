@@ -5,6 +5,7 @@ Wire-up (already applied thinly in bdh.py Attention.forward cold path)::
     export BDH_ATTN_IMPL=triton   # blocked PyTorch on CPU; Triton on CUDA
     export BDH_ATTN_IMPL=eager    # default — full T×T then tril_(diagonal=-1)
     export BDH_ATTN_IMPL=blocked  # tiled pure-PyTorch, no full upper triangle
+    export BDH_ATTN_AUTOGRAD=1    # optional — StrictTrilAttnFn + analytic bwd
 
 If bdh.py is contended in another branch, import from here instead::
 
@@ -15,7 +16,7 @@ If bdh.py is contended in another branch, import from here instead::
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Literal, Optional
 
 import torch
 
@@ -26,6 +27,7 @@ from .attention import (
     eager_tril_attn,
     triton_tril_attn,
 )
+from .attention_bwd import _env_autograd_enabled, strict_tril_attn
 
 ImplName = Literal["eager", "triton", "blocked"]
 
@@ -47,14 +49,24 @@ def bdh_attn(
     V: torch.Tensor,
     *,
     impl: str | None = None,
+    use_autograd_fn: Optional[bool] = None,
 ) -> torch.Tensor:
     """Compute tril(Q @ K.T, diagonal=-1) @ V with the selected backend.
 
     - eager:   materialize full scores (reference; matches original bdh.py)
     - blocked: tiled pure PyTorch (no full upper triangle; CPU/CUDA)
     - triton:  Triton fused kernel on CUDA; else same as blocked
+
+    When ``use_autograd_fn`` is True (or BDH_ATTN_AUTOGRAD=1 and the arg is
+    None), wraps the forward in ``StrictTrilAttnFn`` with analytic Q/K/V
+    backward. Default is False / env-off so the eager training path is
+    unchanged.
     """
     name = resolve_attn_impl(impl)
+    if use_autograd_fn is None:
+        use_autograd_fn = _env_autograd_enabled()
+    if use_autograd_fn:
+        return strict_tril_attn(Q, K, V, impl=name, use_fn=True)
     if name == "eager":
         return eager_tril_attn(Q, K, V)
     if name == "blocked":
@@ -72,6 +84,7 @@ def backend_info() -> dict:
     cuda = torch.cuda.is_available()
     return {
         "BDH_ATTN_IMPL": impl,
+        "BDH_ATTN_AUTOGRAD": _env_autograd_enabled(),
         "has_triton": _HAS_TRITON,
         "cuda": cuda,
         "effective": (
