@@ -732,3 +732,51 @@ def test_sampler_probability_buffer_preserves_padded_neighbors():
             multinomial=torch.multinomial,
         )
         assert torch.equal(got, ref), name
+
+
+def test_sampler_probability_buffer_preserves_padded_nonunit_vocab_neighbors():
+    """Full-vocab sampling must honor padding with non-unit vocab stride."""
+    torch.manual_seed(0)
+    logits_storage = torch.randn(2, 32, 2)
+    logits = logits_storage[..., 0]
+    probs_storage = torch.full((2, 34, 2), -777.0)
+    probs_buf = probs_storage[:, 1:-1, 0]
+    before = probs_storage.clone()
+    assert logits.stride() == (64, 2)
+    assert probs_buf.shape == (2, 32)
+    assert probs_buf.stride() == (68, 2)
+    assert probs_buf.storage_offset() == 2
+
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        probs_storage.copy_(before)
+        destination = torch.empty(2, 1, dtype=torch.long)
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=probs_buf,
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=destination,
+        )
+        assert got is destination, name
+
+        assert torch.equal(probs_storage[..., 1], before[..., 1]), name
+        assert torch.equal(probs_storage[:, 0], before[:, 0]), name
+        assert torch.equal(probs_storage[:, -1], before[:, -1]), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.contiguous(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
