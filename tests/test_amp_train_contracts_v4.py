@@ -403,6 +403,52 @@ def test_forward_only_runs_logits_under_amp_and_ce_in_fp32(monkeypatch):
     assert ce_dtypes == [torch.float32]
 
 
+def test_default_amp_keeps_full_forward_under_context(monkeypatch):
+    """Default AMP passes targets to the full model forward inside autocast."""
+    events = []
+    forward_targets = []
+    active = False
+
+    class _ProbeContext:
+        def __enter__(self):
+            nonlocal active
+            active = True
+            events.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            nonlocal active
+            active = False
+            events.append("exit")
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.eye(3))
+
+        def forward(self, x, y=None):
+            assert active
+            forward_targets.append(y)
+            events.append(("forward", y is not None))
+            logits = x @ self.weight
+            return logits, logits.square().mean()
+
+    monkeypatch.setattr(tr, "ctx", _ProbeContext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", False)
+    monkeypatch.setattr(tr, "scaler", None)
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    x = torch.tensor([[[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]])
+    y = torch.tensor([[0, 1]])
+    loss = tr.train_step(model, optimizer, x, y)
+
+    assert loss.ndim == 0
+    assert events == ["enter", ("forward", True), "exit"]
+    assert forward_targets[0] is y
+
+
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
     """A live CUDA runtime is the only positive throughput claim surface."""
     with monkeypatch.context() as mp:
