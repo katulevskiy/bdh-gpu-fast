@@ -528,3 +528,40 @@ def test_online_decode_preserves_strided_query_views():
             f"block_size={block_size} maxdiff={(got - ref).abs().max().item()}"
         )
         assert torch.equal(Q, Q_before)
+
+
+def test_online_decode_tiled_shared_v_preserves_autograd_raw_score_contract():
+    """Tiled shared-V decode keeps raw score×V gradients graph-safe."""
+    B, H, S, Tq, N, D = 1, 2, 513, 2, 3, 2
+    g = torch.Generator().manual_seed(2728)
+    Q0 = torch.randn(B, H, Tq, N, generator=g)
+    K0 = torch.randn(B, H, S, N, generator=g)
+    V0 = torch.randn(B, 1, S, D, generator=g)
+    weights = torch.randn(B, H, Tq, D, generator=g)
+
+    Q_ref = Q0.detach().clone().requires_grad_()
+    K_ref = K0.detach().clone().requires_grad_()
+    V_ref = V0.detach().clone().requires_grad_()
+    ref = eager_decode_attn(Q_ref, K_ref, V_ref)
+    (ref * weights).sum().backward()
+    ref_grads = (
+        Q_ref.grad.detach().clone(),
+        K_ref.grad.detach().clone(),
+        V_ref.grad.detach().clone(),
+    )
+
+    Q = Q0.detach().clone().requires_grad_()
+    K = K0.detach().clone().requires_grad_()
+    V = V0.detach().clone().requires_grad_()
+    got = online_decode_attn(Q, K, V, block_size=64)
+    assert S * Tq > 1024  # force the shared-V tiled decode path
+    (got * weights).sum().backward()
+
+    assert torch.allclose(got, ref.detach(), rtol=1e-4, atol=1e-5), (
+        f"maxdiff={(got - ref.detach()).abs().max().item()}"
+    )
+    for actual, expected in zip((Q.grad, K.grad, V.grad), ref_grads):
+        assert actual is not None
+        assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-5), (
+            f"grad maxdiff={(actual - expected).abs().max().item()}"
+        )
