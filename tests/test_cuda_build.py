@@ -87,6 +87,33 @@ def test_non_executable_nvcc_stub_is_clear_noop(tmp_path):
     assert "CPU refs remain available" in output
 
 
+def test_cuda_path_non_executable_nvcc_stub_is_clear_noop(tmp_path):
+    """A stale CUDA_PATH nvcc path must not enter CUDAExtension setup."""
+    nvcc = tmp_path / "cuda-path" / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\n", encoding="utf-8")
+    nvcc.chmod(0o644)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "CUDA_HOME": str(tmp_path / "missing-cuda-home"),
+            "CUDA_PATH": str(tmp_path / "cuda-path"),
+            "PATH": str(empty_path),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "skipping CUDA extension build" in output
+    assert "nvcc not found in CUDA_HOME/CUDA_PATH or PATH" in output
+    assert "CPU refs remain available" in output
+
+
 def test_nvcc_directory_is_clear_noop(tmp_path):
     """A directory named nvcc must not enter CUDAExtension setup."""
     nvcc = tmp_path / "cuda-home" / "bin" / "nvcc"
