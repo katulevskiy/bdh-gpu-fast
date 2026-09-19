@@ -164,10 +164,14 @@ def test_generate_environ_get_reduced_vs_unhoisted(monkeypatch):
     monkeypatch.setattr(os.environ, "get", hooked)
     torch.manual_seed(0)
     m.generate(prompt.clone(), max_new_tokens=n_new, temperature=1.0)
-    # Unhoisted tip: ~2 backends × n_layer × (1 prefill + n_new) ≈ 36+.
-    # Hoisted: attn override removes decode attn gets; rope still cached-get
-    # per layer. Expect well below the unhoisted floor.
-    unhoisted_floor = 2 * cfg.n_layer * (1 + n_new)  # 36 for this cfg
+    # Unhoisted tip (post #56): attn+rope × n_layer × (1 prefill + n_new)
+    # plus BDH_ATTN_AUTO once per layer × decode step ≈ 36+16=52+.
+    # Hoisted: attn override removes decode attn gets; rope + AUTO still
+    # cached-get per call. Expect below the post-#56 unhoisted floor.
+    unhoisted_floor = (
+        2 * cfg.n_layer * (1 + n_new)  # attn + rope per layer × steps
+        + cfg.n_layer * n_new  # BDH_ATTN_AUTO on T=1 decode (#56)
+    )  # 52 for this cfg
     assert counts["n"] < unhoisted_floor, (
         f"environ.get {counts['n']} not below unhoisted floor {unhoisted_floor}"
     )
