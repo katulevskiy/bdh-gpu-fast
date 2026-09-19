@@ -346,6 +346,30 @@ def test_density_only_implies_crossover_skip_without_training(monkeypatch, capsy
     assert "exit_code=0 reason=probe_complete" in captured.out
 
 
+def test_density_only_skip_training_enforces_no_sample_guardrail(
+    monkeypatch, capsys
+):
+    """Density-only skip mode must report missing samples when enforcement is on."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+
+    def unexpected_work(*_, **__):
+        raise AssertionError("no-sample enforcement must not run probe work")
+
+    monkeypatch.setattr(probe, "short_train_density", unexpected_work)
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_work)
+    assert (
+        probe.main(
+            ["--density-only", "--skip-train", "--enforce-density-guardrail"]
+        )
+        == probe.EXIT_GUARDRAIL_NO_SAMPLES
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=unavailable" in captured.err
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=3 reason=guardrail_no_samples" in captured.err
+
+
 def test_disabled_gate_overrides_enforcement_without_probe_work(monkeypatch, capsys):
     """The default-off gate must win even when guardrail enforcement is asked for."""
     monkeypatch.delenv(sp.SPARSE_PROBE_ENV, raising=False)
