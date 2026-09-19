@@ -98,7 +98,10 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
 
 def test_backend_matrix_includes_online_decode():
-    namespace: dict[str, object] = {"__name__": "bench_gpu_attn_test", "__file__": str(SCRIPT)}
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
     exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
     assert list(namespace["BACKENDS_COLD"]) == [
         "eager",
@@ -132,3 +135,16 @@ def test_backend_skip_result_has_no_timing_claim():
         "max_rel_delta": None,
         "median_ms": None,
     }
+
+
+def test_force_cpu_overrides_available_cuda():
+    """CPU smoke remains CPU-only even when CUDA is present."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    select_device = namespace["_select_device"]
+    assert select_device(cuda_available=True, force_cpu=True).type == "cpu"
+    assert select_device(cuda_available=True, force_cpu=False).type == "cuda"
+    assert select_device(cuda_available=False, force_cpu=True).type == "cpu"

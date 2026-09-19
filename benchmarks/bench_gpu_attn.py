@@ -114,6 +114,11 @@ def _backend_skip(
     }
 
 
+def _select_device(*, cuda_available: bool, force_cpu: bool) -> torch.device:
+    """Choose the execution device without letting smoke mode measure a GPU."""
+    return torch.device("cuda" if cuda_available and not force_cpu else "cpu")
+
+
 def _skip_summary() -> dict[str, Any]:
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -236,7 +241,7 @@ def main() -> int:
         _summary_path(args.json_out, summary)
         return 0
 
-    device = torch.device("cuda" if cuda_ok else "cpu")
+    device = _select_device(cuda_available=cuda_ok, force_cpu=args.force_cpu)
     dtype = getattr(torch, args.dtype)
     B, H, T, N, D = args.B, args.H, args.T, args.N, args.D
     mode = args.mode
