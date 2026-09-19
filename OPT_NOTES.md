@@ -1935,9 +1935,87 @@ but unexecuted; `bench_gpu_attn.py --mode decode` skips cleanly. On GPU expect
 wins from (1) no `B·H·S·D` V expand staging, (2) fused score×V without
 materializing `Tq×S`, (3) tiled smem CUDA vs naive O(S·Dk) per thread.
 
+## opt/sparse-probe — ReLU density on short train + CPU crossover (2026-09-19)
+
+**Branch:** `opt/sparse-probe` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `410656f` (main after rope-fuse).
+**DEFAULT OFF** — `bdh.py` forward unchanged; probe uses `bdh_sparse` helpers only.
+
+### Goal
+
+P2 follow-through on experimental sparse ReLU path:
+
+1. Measure post-ReLU **x / y / xy** density on a **short CPU train** (not just init).
+2. Document when sparse matmul / masked densify **beats dense** on CPU (if ever).
+3. Keep sparse **default off** unless a clear win appears.
+
+### What landed
+
+| Piece | Role |
+|-------|------|
+| `benchmarks/bench_sparse_probe.py` | Short train density snapshots + dense vs COO/CSR/row/col crossover sweep |
+| `bdh_sparse.py` | Doc pointer only (API unchanged; still opt-in) |
+| `OPT_BACKLOG.md` | P2 sparsity row → density measured on CPU |
+
+```bash
+.venv/bin/python benchmarks/bench_sparse_probe.py
+.venv/bin/python benchmarks/bench_sparse_probe.py --steps 150 --log-every 25
+.venv/bin/python benchmarks/bench_sparse_probe.py --skip-train   # crossover only
+.venv/bin/python benchmarks/bench_sparse_probe.py --skip-crossover
+```
+
+### Short-train density (this box, CPU)
+
+Config: `n_layer=2 n_embd=64 n_head=2 mlp_mult=16`, `B=8 T=64`, AdamW 1e-3,
+tiny Shakespeare via `train.get_batch`, `torch 2.14.0+cu130`, `cuda=False`.
+
+```text
+step    loss     mean x    mean y    mean xy
+0       n/a      0.5018    0.4856    0.2427
+25      3.81     0.4553    0.4770    0.2417
+50      3.15     0.4019    0.4846    0.2095
+75      2.88     0.3202    0.4844    0.1807
+100     2.65     0.2902    0.4652    0.1531
+125     2.44     0.2791    0.4473    0.1305
+150     2.45     0.2682    0.4292    0.1162
+```
+
+**Takeaway:** training **does** drive sparsity (x ~50%→27%, xy ~24%→12% in 150
+steps), but paper-cited **~5%** is **not** reached on this short CPU probe.
+`y` (encoder_v ReLU) stays ~43–49%. Do not assume 5% density at init or after
+a few dozen steps.
+
+### CPU sparse vs dense crossover
+
+Decoder-shaped `act @ W` with synthetic `force_sparsity`, shapes
+`(M,K,N) ∈ {(256,1024,128), (512,2048,128), (1024,4096,256)}`, densities
+`0.50 … 0.001`. Paths: dense, COO `sparse.mm`, CSR, row-mask, col-gather.
+
+```text
+# Representative (M=256 K=1024 N=128):
+dens~0.50: dense≪sparse (coo/csr/row/col all slower; conversion dominates)
+dens~0.05: dense still fastest
+dens~0.001: dense still fastest on mid shapes
+
+# Large (M=1024 K=4096 N=256), dens~0.001:
+# one-off flaky micro-wins for COO were NOT reproducible under the timed
+# warmup/reps harness — treat as noise, not a win.
+```
+
+**Verdict (CPU):** sparse **never reliably beat dense** across the sweep, even
+at 0.1% density. Row/col masked densify lose to dense GEMM + indexing overhead.
+**Keep DEFAULT OFF.** Real opportunity (if any) needs trained ≪10% density **and**
+GPU sparse kernels — re-measure on CUDA before wiring into `BDH.forward`.
+
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
 ### Non-goals
 
 - No PRs to `pathwaycom/*`
 - No change to default `BDH_ATTN_IMPL=eager`
 - No re-introducing `aten::cat` in generate / CacheManager
+- No change to default `bdh.py` path / no `use_sparse=True` default
 - No fake GPU speedups from CPU medians
+

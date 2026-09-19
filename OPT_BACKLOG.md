@@ -22,7 +22,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - MLP `permute → contiguous → view`
 - Vectorized `train.get_batch` (+ pin/non_blocking CUDA; optional DataLoader workers #14)
 - Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked slower; GPU unmeasured
-- Experimental sparse ReLU matmul (default off)
+- Experimental sparse ReLU matmul (default off); **short-train density + CPU crossover** (`opt/sparse-probe`) — keep OFF
 - CUDA extension scaffold for tril score×V (optional build)
 - Weight layout: `(B,T,nh,N)` encoder einsum, decoder view+`F.linear`, optional bias fuse (#13)
 - Contiguous vocab proj + optional `tie_weights` (`opt/embed-tie` #16)
@@ -48,7 +48,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU** `BDH_COMPILE=0` vs `1` train-step bench landed (`opt/compile-bench`, soft-skip if inductor missing). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` (+ `reduce-overhead`) via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8% (post-#20 cats=0; post-decode-copy `copy_` 265→133). **`opt/decode-gemm`:** blocked broadcast-V + tiled score×V; Triton decode `V_BROADCAST` staging; CUDA decode **tiled online** (smem) vs packed KR/V. Default still eager. | GPU decode microbench (`--mode decode`); keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
-| **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
+| **P2** | **Sparsity follow-through** | **Density measured** `opt/sparse-probe`: short-train x~27% xy~12% @150 steps (≫ paper 5%); CPU sparse **never reliably beat dense** → **keep OFF**. GPU sparse still open. | GPU sparse bench if density ≪10% | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; embed/lm_head path: see `opt/embed-tie`; CPU wall ~noise vs tip | Low |
 | **P3** | **Hardware / dtype** | **Landed `opt/bf16-train`:** opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA only; CPU parity tests. GPU train bench still open. | GPU box microbench | Env |
 | **P3** | **Profiler CI artifact** | Traces gitignored; optional nightly upload. | CI | N/A |
@@ -77,7 +77,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 1. GPU: bench eager vs blocked/online vs Triton vs CUDA fused score×V (cold + T=1 decode)
 2. GPU: `BDH_COMPILE=0` vs `1` train-step (CPU harness ready in `bench_train_step.py`; try `reduce-overhead` on CUDA)
 3. ~~Cache preallocate / cat-free generate~~ (**done** `opt/cache-v2` #20)
-4. ~~RoPE fuse~~ (**done** `opt/rope-fuse`) / sparsity density / dtype
+4. ~~RoPE fuse~~ (**done** `opt/rope-fuse`) / ~~sparsity density CPU~~ (`opt/sparse-probe`) / dtype
 
 ```bash
 python benchmarks/profile_forward.py --mode all

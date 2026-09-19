@@ -12,6 +12,9 @@ are mathematically equivalent to the dense ReLU GEMMs used in ``bdh.py``:
 
 Nothing here is wired into ``BDH.forward``. Import and opt-in explicitly.
 
+Short-train density + CPU crossover: ``benchmarks/bench_sparse_probe.py``.
+Keep this module DEFAULT OFF until a measured GPU win exists.
+
 Strategies
 ----------
 1. **torch.sparse** (COO / CSR): ``sparse.mm(A_sp, W)`` ≡ ``A_dense @ W``
