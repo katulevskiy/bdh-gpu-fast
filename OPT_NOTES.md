@@ -4905,3 +4905,63 @@ short T, and no GPU speedup is claimed. Default `BDH_ATTN_IMPL` remains eager.
 - No public or `pathwaycom/*` PRs
 - No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change
 - No full score materialization, softmax, scale, or diagonal inclusion
+
+## opt/copy-tax-v1 — cut forward QR GEMM copy_ tax (2026-09-19)
+
+**Branch:** `opt/copy-tax-v1` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `3cac6d7` (`origin/main`, docs-v17 / #94).
+
+### Audit (profile-v8 shape, default eager train/eval forward)
+
+On the profile harness cfg (`layers=4 d=128 nh=4 B=4 T=128`), one forward had
+**24× `aten::copy_`**. Shape attribution:
+
+| Shape | Count | Source |
+|-------|------:|--------|
+| `(B,H,T,N/2)` pair stores | 8 | RoPE write into QR (unavoidable) |
+| `(B,H,T,N)` + `(B,H,N,T)` | 8 | **QR / QR.mT contig clones** before score GEMM |
+| `(B,H,T,T)` or `(B,H,T,D)` | 4 | broadcast `scores @ V` materializes expanded V |
+| misc | 4 | einsum / other |
+
+Root cause of the 8 GEMM clones: train feeds RoPE a **non-contiguous**
+`(B,nh,T,N)` permute view of contiguous `(B,T,nh,N)`.
+`torch.empty_like(v)` preserves that layout (`preserve_format`), so QR is
+non-contiguous and BLAS clones both QR and `QR.mT`.
+
+`eager_tril_attn` also used out-of-place `scores.tril(...)` despite docs /
+OPT_NOTES claiming in-place `tril_`.
+
+### Changes (defaults unchanged)
+
+1. **`kernels/rope.py`**: `_alloc_rope_out(v)` → `torch.empty(shape,…)`
+   (contiguous). Used by `_store_pairs`, eager multi-T, fused blocked, and
+   Triton host alloc when `out is None`. Caller `out=` (CacheManager KR slot)
+   unchanged.
+2. **`kernels/attention.py`**: `eager_tril_attn` and blocked diagonal tile use
+   `scores.tril_(diagonal=-1)` on the fresh matmul buffer.
+3. **`tests/test_copy_tax.py`**: contiguous QR from permute view; no QR/KT
+   contig copies in forward profile; logits/grads @ dropout=0 vs baseline;
+   generate token parity.
+
+Left on the table (not safe / not bit-identical grads): replace
+`scores @ V` broadcast with `einsum("bhij,bjd->bhid", …)` — drops V expand
+`copy_` but gV differs by ~1e-4 association.
+
+### Measured (CPU-only, honest)
+
+| Metric | Before | After |
+|--------|-------:|------:|
+| Forward `aten::copy_` (1 run, profile cfg) | **24** | **18** |
+| QR `(B,H,T,N)` / `(B,H,N,T)` contig copies | 8 | **0** |
+| RoPE+score GEMM clone/copy micro (permute v) | 9 | 2 (pair stores only) |
+
+No GPU claim. Wall % will still show RoPE stores + V broadcast + GEMM; this
+cuts the **avoidable** QR layout tax. `aten::contiguous` remains 0; generate
+`aten::cat` remains 0.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; no public PR
+- No default `BDH_ATTN_IMPL` / `BDH_ROPE_IMPL` change
+- No softmax / scale / SDPA / diagonal inclusion
+- No fake GPU wins from CPU copy_ counts

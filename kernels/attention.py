@@ -27,9 +27,13 @@ def eager_tril_attn(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.
     Q, K: (B, H, T, N)
     V:    (B, 1, T, D) or (B, H, T, D)
     Returns: (B, H, T, D)
+
+    Uses in-place ``tril_`` on the fresh matmul buffer (no out-of-place
+    ``tril`` clone of the T×T scores). Broadcast ``V=(B,1,…)`` still goes
+    through ``scores @ V`` for bit-identical grads vs historical eager.
     """
     scores = Q @ K.transpose(-2, -1)
-    scores = scores.tril(diagonal=-1)
+    scores.tril_(diagonal=-1)
     return scores @ V
 
 
@@ -520,7 +524,7 @@ def blocked_tril_attn(
         # Diagonal: vectorized Bi×Bi strict lower triangle (no Python row loop).
         if Bi > 1:
             scores = Qi @ Kf[:, :, i0:i1, :].transpose(-2, -1)
-            scores = scores.tril(diagonal=-1)
+            scores.tril_(diagonal=-1)
             out[:, :, i0:i1, :].add_(scores @ Vhf[:, :, i0:i1, :])
 
     return out.to(dtype=Q.dtype) if out.dtype != Q.dtype else out

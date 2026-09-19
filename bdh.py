@@ -116,7 +116,7 @@ class Attention(torch.nn.Module):
 
     @staticmethod
     def rope(phases, v, out: Optional[torch.Tensor] = None, cos_sin=None):
-        """Rotate adjacent pairs into ``out`` (or a fresh empty_like).
+        """Rotate adjacent pairs into ``out`` (or a fresh contiguous empty).
 
         When ``cos_sin`` is provided, skips recomputing cos/sin (shared across
         layers / ``rope_cos_sin`` cache). Dispatch via ``BDH_ROPE_IMPL``:
