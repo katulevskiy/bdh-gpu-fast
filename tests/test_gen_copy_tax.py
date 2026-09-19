@@ -1,4 +1,4 @@
-"""gen-copy-tax-v1: RoPE complex-pair store + sample-into-out — parity + copy_ gate."""
+"""gen-copy-tax + gen-vcopy: RoPE pair store, sample out=, V/sampler probe."""
 
 from __future__ import annotations
 
@@ -187,7 +187,7 @@ def test_generate_cache_continuity_across_steps():
 
 
 def test_generate_aten_copy_below_profile_v9_and_cat_zero():
-    """CPU profiler: copy_/gen well below profile-v9 ~558; aten::cat stays 0."""
+    """CPU profiler: copy_/gen below profile-v10 ~398; aten::cat stays 0."""
     cfg = _cfg(n_layer=4, n_embd=128, n_head=4)
     torch.manual_seed(0)
     m = bdh.BDH(cfg).eval()
@@ -199,7 +199,108 @@ def test_generate_aten_copy_below_profile_v9_and_cat_zero():
                 m.generate(idx, max_new_tokens=32, temperature=1.0)
     n = next(e.count for e in prof.key_averages() if e.key == "aten::copy_")
     per = n / 3
-    # profile-v9 ~558; complex RoPE store + sample-into-out → ~398
-    assert per < 480, f"expected copy_/gen < 480, got {per}"
+    # profile-v10 ~398; gen-vcopy T>1 pair store → ~394
+    assert per < 420, f"expected copy_/gen < 420, got {per}"
     cat_n = next((e.count for e in prof.key_averages() if e.key == "aten::cat"), 0)
     assert cat_n == 0
+
+
+def test_eager_rope_t_gt1_single_aten_copy_matches_strided_ref():
+    """T>1 eager RoPE: one fp32 copy_ via _store_pairs; bit-identical to strided."""
+    torch.manual_seed(2)
+    v = torch.randn(2, 4, 16, 32)
+    cos = torch.randn(1, 1, 16, 32)
+    sin = torch.randn(1, 1, 16, 32)
+
+    # Historical strided reference (kept inline so we do not depend on old eager).
+    def _strided(v, cos, sin, out):
+        ve, vo = v[..., 0::2], v[..., 1::2]
+        out[..., 0::2] = ve * cos[..., 0::2] - vo * sin[..., 0::2]
+        out[..., 1::2] = vo * cos[..., 1::2] + ve * sin[..., 1::2]
+        return out
+
+    buf_a = torch.zeros(2, 4, 32, 32)
+    buf_b = torch.zeros(2, 4, 32, 32)
+    oa = buf_a.narrow(2, 2, 16)
+    ob = buf_b.narrow(2, 2, 16)
+    _strided(v, cos, sin, oa)
+    eager_rope_rotate(v, cos, sin, out=ob)
+    assert torch.equal(oa, ob)
+
+    out = buf_b.narrow(2, 2, 16)
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        for _ in range(8):
+            eager_rope_rotate(v, cos, sin, out=out)
+    n = next(e.count for e in prof.key_averages() if e.key == "aten::copy_")
+    cat = next((e.count for e in prof.key_averages() if e.key == "aten::cat"), 0)
+    assert n == 8, n
+    assert cat == 0
+
+
+def test_topk_gather_out_parity_and_one_fewer_copy():
+    """top_k idx_out= uses gather(out=); token parity + isolated copy_ cut."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 64)
+    probs = torch.empty(2, 64)
+    out_a = torch.empty(2, 1, dtype=torch.long)
+    out_b = torch.empty(2, 1, dtype=torch.long)
+
+    torch.manual_seed(21)
+    bdh.BDH._sample_from_logits(
+        logits.clone(),
+        scale=None,
+        do_topk=True,
+        top_k_n=8,
+        probs_buf=probs.clone(),
+        softmax=torch.nn.functional.softmax,
+        multinomial=torch.multinomial,
+        idx_out=out_a,
+    )
+    # Manual gather+copy reference under same seed
+    torch.manual_seed(21)
+    values, indices = torch.topk(logits.clone(), 8, dim=-1)
+    probs_k = torch.nn.functional.softmax(values, dim=-1)
+    idx_k = torch.multinomial(probs_k, 1)
+    out_b.copy_(indices.gather(1, idx_k))
+    assert torch.equal(out_a, out_b)
+
+    # Isolated: gather(out=) vs gather+copy_ (no multinomial noise).
+    indices = torch.randint(0, 50, (4, 16))
+    idx_k = torch.randint(0, 16, (4, 1))
+    buf = torch.empty(4, 1, dtype=torch.long)
+    with profile(activities=[ProfilerActivity.CPU]) as p_out:
+        for _ in range(64):
+            torch.gather(indices, 1, idx_k, out=buf)
+    with profile(activities=[ProfilerActivity.CPU]) as p_copy:
+        for _ in range(64):
+            buf.copy_(indices.gather(1, idx_k))
+    n_out = next((e.count for e in p_out.key_averages() if e.key == "aten::copy_"), 0)
+    n_copy = next((e.count for e in p_copy.key_averages() if e.key == "aten::copy_"), 0)
+    assert n_out < n_copy, f"gather out= {n_out} should be < gather+copy_ {n_copy}"
+
+
+def test_vcopy_attribution_buckets_sum_near_total():
+    """Probe: V + RoPE + multinomial explain ~all generate aten::copy_."""
+    cfg = _cfg(n_layer=4, n_embd=128, n_head=4)
+    torch.manual_seed(0)
+    m = bdh.BDH(cfg).eval()
+    idx = torch.randint(0, cfg.vocab_size, (1, 16))
+    n_layer, n_new = 4, 32
+    with torch.inference_mode():
+        m.generate(idx, max_new_tokens=2, temperature=1.0)
+        with profile(activities=[ProfilerActivity.CPU]) as prof:
+            m.generate(idx, max_new_tokens=n_new, temperature=1.0)
+    total = next(e.count for e in prof.key_averages() if e.key == "aten::copy_")
+    cat = next((e.count for e in prof.key_averages() if e.key == "aten::cat"), 0)
+    # V: one/layer/forward; RoPE: one/layer/forward after gen-vcopy; multi: 4/step
+    v_writes = n_layer * (1 + n_new)
+    rope = n_layer * (1 + n_new)
+    multi = 4 * n_new
+    prompt = 1
+    accounted = v_writes + rope + multi + prompt
+    # Allow small profiler noise; must stay cat-free
+    assert cat == 0
+    assert abs(total - accounted) <= 12, (
+        f"copy_={total} accounted={accounted} "
+        f"(V={v_writes} RoPE={rope} multi={multi} prompt={prompt})"
+    )
