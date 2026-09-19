@@ -6543,7 +6543,7 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q
 ## opt/gen-copy-v2 — confirm post-#110 generate copy ceiling (2026-09-19)
 
 **Branch:** `opt/gen-copy-v2` (private `katulevskiy/bdh-gpu-opt` only).
-**Base tip:** `8f6ec4a` (`main` after #149 auto-thr-v3; current through #149).
+**Base tip:** `748a138` (`main` after #150 triton-cold-v4; current through #150).
 
 ### Audit / verdict
 
