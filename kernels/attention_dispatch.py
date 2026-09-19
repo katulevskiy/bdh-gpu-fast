@@ -108,9 +108,9 @@ def bdh_attn_decode(
     query never attends to itself.
 
     - eager:   single ``(Q @ K.mT) @ V`` (reference)
-    - blocked: tiled over past (shared ``_tiled_score_v``; larger default tile)
-    - triton:  fused decode kernel on CUDA; blocked fallback on CPU
-    - cuda:    ``kernels.cuda_attn.tril_decode`` (native ext if built, else ref)
+    - blocked: tiled over past (broadcast-V; shared ``_tiled_score_v``; larger default tile)
+    - triton:  fused decode + V_BROADCAST on CUDA; blocked fallback on CPU
+    - cuda:    ``kernels.cuda_attn.tril_decode`` (tiled CUDA ext if built, else ref)
     """
     name = resolve_attn_impl(impl)
     if name == "eager":
