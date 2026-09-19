@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `19c1a59` (`#79` cuda-cold-v2 / `#78` docs matrix through #77; `#77` auto-tune / `#76` docs / `#75` prefill-blocked / `#74` docs / `#73` attn-mem). Profile source: `ca5038f` (post-#75–#77; default eager unchanged by #69–#79 on short window; re-profiled in `opt/profile-v7`).
+Tip documented here: `b8067f5` (`#80` profile-v7 / `#79` cuda-cold-v2 / `#78` docs matrix through #77; `#77` auto-tune / `#76` docs / `#75` prefill-blocked / `#74` docs / `#73` attn-mem). Profile source: `ca5038f` (post-#75–#77; default eager unchanged by #69–#79 on short window; re-profiled in `opt/profile-v7`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
