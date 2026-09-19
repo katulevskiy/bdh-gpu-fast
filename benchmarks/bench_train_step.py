@@ -6,6 +6,11 @@ document CPU honesty.
 CPU-honest: no CUDA on the default runner. Measures median step time for a
 tiny BDH config.
 
+BDH_AMP_DTYPE (opt/amp-deepen):
+  Honest fp32 vs bf16/fp16 train_step medians on this device. On CPU AMP is
+  often *slower* than fp32 (cast overhead). Throughput wins are GPU-only —
+  never cite these CPU ms as Tensor Core speedups. Opt out: BDH_BENCH_AMP=0.
+
 BDH_COMPILE=0 vs 1 (opt/compile-bench):
   Always attempted unless BDH_BENCH_COMPILE=0. Uses train.maybe_compile so
   inductor / CXX / probe failures soft-skip (print + return) instead of
@@ -336,6 +341,95 @@ def bench_compile_blocked_matrix(cfg, device, fused_ok: bool) -> None:
 
 
 
+
+def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
+    """Honest tiny train_step: fp32 vs opt-in AMP (bf16 / fp16).
+
+    Soft-skips a dtype when CPU autocast is unavailable. Restores float32 after.
+    Absolute ms are device-local; AMP throughput claim is CUDA-only.
+    """
+    print("--- BDH_AMP_DTYPE fp32 vs AMP (honest train_step) ---")
+    print(
+        f"device={device} cuda={torch.cuda.is_available()} "
+        f"amp_claim={tr.amp_throughput_claim_device()} "
+        f"cfg=layers={cfg.n_layer} d={cfg.n_embd} B=4 T=64"
+    )
+
+    x, y = _batch(device)
+    results = []
+
+    def _one(amp_name: str, forward_only: bool = False):
+        tag = amp_name + ("+fwd_only" if forward_only else "")
+        if amp_name == "bfloat16" and device.type == "cpu" and not tr.cpu_bf16_available():
+            print(f"{tag}: soft-skip (CPU bf16 unavailable)")
+            results.append((tag, None, "soft-skip"))
+            return
+        if amp_name == "float16" and device.type == "cpu" and not tr.cpu_fp16_available():
+            print(f"{tag}: soft-skip (CPU fp16 unavailable)")
+            results.append((tag, None, "soft-skip"))
+            return
+        tr.configure_amp(amp_name, forward_only=forward_only)
+        torch.manual_seed(0)
+        m = bdh.BDH(cfg).to(device)
+        m.train()
+        opt = torch.optim.AdamW(
+            m.parameters(),
+            lr=tr.LEARNING_RATE,
+            weight_decay=tr.WEIGHT_DECAY,
+            fused=fused_ok,
+        )
+
+        def step():
+            return tr.train_step(m, opt, x, y)
+
+        try:
+            med = timed(step, warmup=3, reps=12)
+        except Exception as e:
+            print(f"{tag}: soft-skip train_step {type(e).__name__}: {e}")
+            results.append((tag, None, f"soft-skip:{type(e).__name__}"))
+            return
+        ms = med * 1000.0
+        print(
+            f"{tag}: median {ms:.2f} ms  "
+            f"(scaler={tr._use_scaler} forward_only={tr._amp_forward_only})"
+        )
+        results.append((tag, ms, "ok"))
+
+    try:
+        _one("float32")
+        _one("bfloat16")
+        _one("float16")
+        # Optional forward-only path (same bf16 when available)
+        if device.type != "cpu" or tr.cpu_bf16_available():
+            _one("bfloat16", forward_only=True)
+    finally:
+        tr.configure_amp("float32")
+
+    fp32 = next((ms for tag, ms, st in results if tag == "float32" and ms is not None), None)
+    print("--- AMP summary (median ms; soft-skip = —) ---")
+    print(f"{'dtype':>18} {'median_ms':>12} {'vs_fp32':>10} {'status':>14}")
+    for tag, ms, status in results:
+        if ms is None or fp32 is None or fp32 <= 0:
+            vs = "—"
+            med_s = "—" if ms is None else f"{ms:.2f}"
+        else:
+            med_s = f"{ms:.2f}"
+            vs = f"{ms / fp32:.2f}x"
+        print(f"{tag:>18} {med_s:>12} {vs:>10} {status:>14}")
+
+    if device.type != "cuda":
+        print(
+            "honest: CPU AMP medians only — often slower than fp32 (cast tax). "
+            "No Tensor Core / GPU throughput claim. "
+            "Defaults remain BDH_AMP_DTYPE=float32, COMPILE=0, eager, tril(-1)."
+        )
+    else:
+        print(
+            "GPU box: AMP can help when Tensor Cores + bandwidth bound; "
+            "re-check GradScaler only for float16. Still opt-in."
+        )
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = _cfg()
@@ -411,8 +505,15 @@ def main():
             "(set BDH_BENCH_COMPILE_BLOCKED=1 to enable; default is on)"
         )
 
+    # Honest AMP vs fp32 (opt/amp-deepen). Default on; opt out BDH_BENCH_AMP=0.
+    if os.environ.get("BDH_BENCH_AMP", "1") in ("1", "true", "True"):
+        bench_amp_vs_fp32(cfg, device, fused_ok)
+    else:
+        print("skip AMP bench (set BDH_BENCH_AMP=1 to enable; default is on)")
+
     print(
-        "Note: CUDA graphs / reduce-overhead need a GPU; see train_fast.py + OPT_BACKLOG."
+        "Note: CUDA graphs / reduce-overhead need a GPU; see train_fast.py + OPT_BACKLOG. "
+        "AMP throughput wins are GPU-only (see BDH_AMP_DTYPE section)."
     )
 
 

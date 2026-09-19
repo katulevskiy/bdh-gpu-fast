@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#53)
+# OPT status — landed work (#1–#54)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `d25ec33` (`#52` docs on `main`; code tip `#51` ln-deepen). Profile source: `c7a7471` (post-#48; eager unchanged by #49–#52). This PR adds `#53` decode-mm.
+Tip documented here: `6e23cfe` (`#53` decode-mm on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49–#53). This PR adds `#54` amp-deepen.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -22,7 +22,7 @@ Hard constraint (all opts): attention stays **raw scores** × **strict lower-tri
 | Default train / attn path | Still **eager** + **fp32** — opt-in env flags only |
 | CPU `blocked` / `triton` (→blocked) attn | Usually **slower** than eager (Python tile loop); keep for parity / peak-memory, not default |
 | CPU `BDH_COMPILE=1` | **Only with `IMPL=eager`**: ~1.5× warm train-step (#46: 5.25 vs 7.76 ms). `COMPILE=1`+blocked|online|triton = measured regression (~70–100×); `maybe_compile` warns. GPU compile still open |
-| CPU AMP (`BDH_AMP_DTYPE`) | Correctness smoke; often **slower** than fp32 on CPU |
+| CPU AMP (`BDH_AMP_DTYPE`) | Correctness smoke (#24+#54); often **slower** than fp32 on CPU; **throughput claim = GPU-only** |
 | Sparse ReLU | **Default OFF**; short-train densifies but not to paper ~5%; CPU sparse≪dense |
 
 **Rule:** never cite CPU profiler absolute ms or CPU microbench medians as GPU speedups.
@@ -115,17 +115,24 @@ BDH_PREFETCH_ASYNC=0 python train.py  # sync debug / A-B
 | `bfloat16` / `bf16` | Yes | **Never** |
 | `float16` / `fp16` / `half` | Yes | Only if **CUDA** |
 
-CPU AMP is for parity smoke, not speed. Decode path AMP (older #5) is separate from this train knob (#24).
+Optional `BDH_AMP_FORWARD_ONLY=1` (#54): autocast **logits only**; CE in fp32 outside.
+Default `0` keeps `model(x,y)` under the same autocast ctx.
+
+CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here).
+**AMP helps on GPU** (Tensor Cores / HBM); never cite CPU medians as speedups.
+Decode path AMP (older #5) is separate from this train knob (#24+#54).
 
 ```bash
 BDH_AMP_DTYPE=float32 python train.py
 BDH_AMP_DTYPE=bfloat16 python train.py   # needs bf16 support on device
 BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
+BDH_AMP_FORWARD_ONLY=1 BDH_AMP_DTYPE=bfloat16 python train.py  # CE in fp32
+BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 ```
 
 ---
 
-## Landed opts (#1–#51)
+## Landed opts (#1–#54)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -182,6 +189,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **51** | `opt/ln-deepen` | Residual LN: `F.layer_norm` + inner-out `add_` reuse (cut add temp) | Residual micro small; e2e ~noise; Dynamo 0 breaks | No fused GPU LN claim |
 | **52** | `opt/docs-matrix` (docs refresh) | Refresh OPT matrix / backlog through #51 | Docs only | — |
 | **53** | `opt/decode-mm` | T=1 decode deepen (`_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`); B=1 lm_head `mv` | ≡ eager last row; cats=0; CPU wall ~noise | GPU `--mode decode` open |
+| **54** | `opt/amp-deepen` | Harden opt-in AMP: fp16 CPU smoke, `BDH_AMP_FORWARD_ONLY`, honest AMP train_step bench, GPU-only claim | CPU smoke + bench; often ≲/≳ fp32 | GPU train AMP still open |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
@@ -199,7 +207,8 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` | `0` | CPU: `1` **only with `IMPL=eager`** (#46/#49); GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
-| `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on CUDA train boxes |
+| `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on **CUDA** train boxes (CPU = smoke only) |
+| `BDH_AMP_FORWARD_ONLY` | `0` | `1` for logits-only autocast + fp32 CE |
 | Sparse ReLU | OFF | Only if density + GPU sparse kernel win |
 
 ---
@@ -211,7 +220,7 @@ cd /workspace/bdh-gpu-opt   # or this worktree
 source .venv/bin/activate
 python -m pytest tests/ -q
 python benchmarks/profile_forward.py --mode all
-BDH_BENCH_COMPILE=1 python benchmarks/bench_train_step.py
+BDH_BENCH_COMPILE=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
 python benchmarks/bench_sparse_probe.py
 # on a CUDA box:
 python benchmarks/bench_gpu_attn.py

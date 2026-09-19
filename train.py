@@ -1,5 +1,6 @@
 # Copyright Pathway Technology, Inc.
-# Private opt (opt/bf16-train): optional BDH_AMP_DTYPE bf16/fp16 + GradScaler fp16+CUDA only.
+# Private opt (opt/amp-deepen): harden opt-in BDH_AMP_DTYPE; GradScaler fp16+CUDA only.
+# Defaults stay fp32 / COMPILE=0 / eager. AMP throughput wins are GPU-only.
 
 from __future__ import annotations
 
@@ -21,6 +22,10 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # Optional AMP via BDH_AMP_DTYPE (default float32 / unset = no autocast).
 # Values: float32|fp32|off|"" , bfloat16|bf16 , float16|fp16|half
 # GradScaler is enabled ONLY for float16 + CUDA (bf16 needs no loss scaling).
+# Throughput wins (Tensor Cores / reduced HBM) are GPU-only; CPU AMP is for
+# correctness smoke and is often *slower* than fp32 (cast overhead).
+# Optional BDH_AMP_FORWARD_ONLY=1: autocast wraps hot logits forward only; CE
+# runs in fp32 outside autocast. Default 0 keeps model(x,y) fully under ctx.
 _AMP_NAME_ALIASES = {
     "": "float32",
     "off": "float32",
@@ -43,6 +48,8 @@ ptdtype = torch.float32
 ctx = nullcontext()
 _use_scaler = False
 scaler = None  # set in configure_amp()
+# Opt-in: autocast hot forward (logits) only; CE outside in fp32. Default off.
+_amp_forward_only = False
 
 
 def parse_amp_dtype(raw: str | None) -> str:
@@ -57,6 +64,17 @@ def parse_amp_dtype(raw: str | None) -> str:
     return _AMP_NAME_ALIASES[key]
 
 
+def _cpu_autocast_smoke(pt_dtype: torch.dtype) -> bool:
+    """True if a tiny CPU matmul under autocast(pt_dtype) succeeds."""
+    try:
+        a = torch.randn(2, 2)
+        with torch.autocast(device_type="cpu", dtype=pt_dtype):
+            _ = a @ a
+        return True
+    except Exception:
+        return False
+
+
 def cpu_bf16_available() -> bool:
     """True if CPU autocast(bfloat16) works (torch.cpu.is_bf16_supported or smoke)."""
     check = getattr(getattr(torch, "cpu", None), "is_bf16_supported", None)
@@ -65,30 +83,49 @@ def cpu_bf16_available() -> bool:
             return bool(check())
         except Exception:
             pass
-    try:
-        a = torch.randn(2, 2)
-        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
-            _ = a @ a
-        return True
-    except Exception:
-        return False
+    return _cpu_autocast_smoke(torch.bfloat16)
 
 
-def configure_amp(amp_name: str | None = None) -> str:
+def cpu_fp16_available() -> bool:
+    """True if CPU autocast(float16) works (smoke matmul)."""
+    return _cpu_autocast_smoke(torch.float16)
+
+
+def amp_throughput_claim_device() -> str:
+    """Honest claim surface: AMP train speedups are CUDA-only on this project.
+
+    Returns 'cuda' when a CUDA device is present (Tensor Core / HBM path), else
+    'none' — CPU AMP is correctness/smoke, not a throughput claim.
+    """
+    return "cuda" if device.type == "cuda" else "none"
+
+
+def configure_amp(amp_name: str | None = None, *, forward_only: bool | None = None) -> str:
     """Set module-level dtype / autocast ctx / GradScaler from name or env.
 
     Returns the resolved dtype name (float32|bfloat16|float16).
     GradScaler: enabled only when dtype==float16 and device is CUDA.
     CPU: bf16/fp16 enable autocast when requested (smoke / parity); no scaler.
+
+    forward_only: if True, train_step autocasts logits-only forward and computes
+    CE in fp32. None → read BDH_AMP_FORWARD_ONLY (default 0 / off).
     """
-    global dtype, ptdtype, ctx, _use_scaler, scaler
+    global dtype, ptdtype, ctx, _use_scaler, scaler, _amp_forward_only
     if amp_name is None:
         amp_name = os.environ.get("BDH_AMP_DTYPE", "float32")
     dtype = parse_amp_dtype(amp_name)
     ptdtype = _PTDTYPE[dtype]
+    if forward_only is None:
+        forward_only = os.environ.get("BDH_AMP_FORWARD_ONLY", "0") in (
+            "1",
+            "true",
+            "True",
+        )
+    _amp_forward_only = bool(forward_only) and dtype != "float32"
     if dtype == "float32":
         ctx = nullcontext()
         _use_scaler = False
+        _amp_forward_only = False
     else:
         # Prefer bdh helper (CPU/CUDA/MPS); keeps generate AMP consistent.
         ctx = bdh._autocast_context(device, ptdtype)
@@ -97,8 +134,12 @@ def configure_amp(amp_name: str | None = None) -> str:
             raise RuntimeError(
                 "BDH_AMP_DTYPE=bfloat16 requested but CPU bf16 autocast unavailable"
             )
+        if dtype == "float16" and device.type == "cpu" and not cpu_fp16_available():
+            raise RuntimeError(
+                "BDH_AMP_DTYPE=float16 requested but CPU fp16 autocast unavailable"
+            )
     # GradScaler device arg is the amp device type; keep constructed even when
-    # disabled so train_step branches stay simple.
+    # disabled so train_step branches stay simple. Never enable for bf16 or CPU.
     scaler = torch.amp.GradScaler(device=device.type, enabled=_use_scaler)
     return dtype
 
@@ -572,9 +613,24 @@ def eval(model):
 
 
 def train_step(model, optimizer, x, y):
-    """Single optimize step — kept as a function for benches / future fullgraph."""
-    with ctx:
-        _logits, loss = model(x, y)
+    """Single optimize step — kept as a function for benches / future fullgraph.
+
+    AMP: module ``ctx`` wraps the hot forward. With ``_amp_forward_only``
+    (BDH_AMP_FORWARD_ONLY=1), only logits are under autocast; CE is fp32.
+    Default keeps ``model(x, y)`` (logits + CE) under the same ctx.
+    GradScaler still only for float16+CUDA.
+    """
+    if _amp_forward_only:
+        # Hot body under autocast; CE outside in fp32 for numerical honesty.
+        with ctx:
+            logits, _ = model(x)
+        loss = torch.nn.functional.cross_entropy(
+            logits.float().reshape(-1, logits.size(-1)),
+            y.reshape(-1),
+        )
+    else:
+        with ctx:
+            _logits, loss = model(x, y)
     if _use_scaler:
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -589,7 +645,8 @@ def train_step(model, optimizer, x, y):
 if __name__ == "__main__":
     print(
         f"Using device: {device} amp_dtype={dtype} "
-        f"scaler={_use_scaler} (BDH_AMP_DTYPE)"
+        f"scaler={_use_scaler} forward_only={_amp_forward_only} "
+        f"amp_claim={amp_throughput_claim_device()} (BDH_AMP_DTYPE)"
     )
     fetch_data()
 
