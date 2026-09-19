@@ -304,8 +304,9 @@ def test_failed_backward_probe_falls_back_cleanly(
     assert "the compiled wrapper is discarded" in captured
 
 
+@pytest.mark.parametrize("caller_training", [False, True])
 def test_compile_failure_without_probe_preserves_caller_state(
-    monkeypatch, capsys
+    monkeypatch, capsys, caller_training
 ):
     """No-probe construction failure keeps the original module untouched."""
     import train as tr
@@ -324,7 +325,7 @@ def test_compile_failure_without_probe_preserves_caller_state(
 
     monkeypatch.setattr(tr.torch, "compile", fail_compile)
 
-    model = bdh.BDH(_small_cfg()).train()
+    model = bdh.BDH(_small_cfg()).train(caller_training)
     expected_grads = []
     for index, param in enumerate(model.parameters(), start=1):
         grad = torch.full_like(param, float(index))
@@ -340,7 +341,7 @@ def test_compile_failure_without_probe_preserves_caller_state(
     captured = capsys.readouterr().out
     assert compile_kwargs == {"mode": "default"}
     assert out is model
-    assert out.training
+    assert out.training is caller_training
     assert all(
         param.grad is not None and torch.equal(param.grad, expected)
         for param, expected in zip(model.parameters(), expected_grads)
