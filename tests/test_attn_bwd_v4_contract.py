@@ -825,6 +825,47 @@ def test_sequence_strided_self_attn_alias_preserves_backward_contract(impl):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_sequence_strided_storage_offset_inputs_preserve_backward_contract(impl):
+    """Backward must scatter through offset, sequence-strided input views."""
+    generator = torch.Generator().manual_seed(2050)
+    Q_base = torch.randn(
+        2, 3, 9, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K_base = torch.randn(
+        2, 3, 9, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V_base = torch.randn(
+        2, 1, 9, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    Q = Q_base[:, :, 1:9:2, :]
+    K = K_base[:, :, 1:9:2, :]
+    V = V_base[:, :, 1:9:2, :]
+    dO = torch.randn(2, 3, 4, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert Q.storage_offset() > 0 and Q.stride(2) == 2 * Q_base.stride(2)
+    assert K.storage_offset() > 0 and K.stride(2) == 2 * K_base.stride(2)
+    assert V.storage_offset() > 0 and V.stride(2) == 2 * V_base.stride(2)
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+
+    selected = slice(1, 9, 2)
+    assert torch.allclose(Q_base.grad[:, :, selected, :], Q_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(K_base.grad[:, :, selected, :], K_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(V_base.grad[:, :, selected, :], V_ref.grad, rtol=1e-12, atol=1e-12)
+    for base_grad in (Q_base.grad, K_base.grad, V_base.grad):
+        assert torch.equal(base_grad[:, :, :1, :], torch.zeros_like(base_grad[:, :, :1, :]))
+        assert torch.equal(base_grad[:, :, 2:9:2, :], torch.zeros_like(base_grad[:, :, 2:9:2, :]))
+        assert torch.equal(base_grad[:, :, 8:, :], torch.zeros_like(base_grad[:, :, 8:, :]))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 def test_self_attn_alias_with_broadcast_upstream_preserves_backward_contract(impl):
     """Aliased Q/K must reduce duplicate paths with broadcast upstream gradients."""
     generator = torch.Generator().manual_seed(2048)
