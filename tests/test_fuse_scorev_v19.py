@@ -653,3 +653,57 @@ def test_dispatch_preserves_batch_head_strided_distinct_qk_analytic_autograd_sto
         (got_v_grad, ref_v_grad),
     ):
         assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_strided_grad_output_score_v_autograd_contract(
+    impl, v_heads
+):
+    """Analytic score×V preserves gradients for a strided dO view."""
+    B, H, T, N, D = 2, 3, 23, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1934)
+    Q = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
+    K = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
+    V = torch.randn(B, v_heads, T, D, generator=generator, dtype=torch.float64)
+    dO_storage = torch.randn(
+        2 * B, 2 * H, T, 2 * D + 1, generator=generator, dtype=torch.float64
+    )
+    dO = dO_storage[::2, ::2, :, 1 : 2 * D : 2]
+
+    assert not dO.is_contiguous()
+    assert dO.stride(0) == 2 * dO_storage.stride(0)
+    assert dO.stride(1) == 2 * dO_storage.stride(1)
+    assert dO.stride(-1) == 2
+
+    def run(name, use_autograd_fn):
+        q = Q.detach().clone().requires_grad_(True)
+        k = K.detach().clone().requires_grad_(True)
+        v = V.detach().clone().requires_grad_(True)
+        out = bdh_attn(
+            q, k, v, impl=name, use_autograd_fn=use_autograd_fn
+        )
+        out.backward(dO)
+        return (
+            out.detach(),
+            q.grad.detach(),
+            k.grad.detach(),
+            v.grad.detach(),
+        )
+
+    ref, ref_q_grad, ref_k_grad, ref_v_grad = run(
+        "eager", use_autograd_fn=False
+    )
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_q_grad, got_k_grad, got_v_grad = run(
+        impl, use_autograd_fn=True
+    )
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in (
+        (got_q_grad, ref_q_grad),
+        (got_k_grad, ref_k_grad),
+        (got_v_grad, ref_v_grad),
+    ):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
