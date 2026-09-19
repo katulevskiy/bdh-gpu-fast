@@ -84,6 +84,10 @@ def test_single_query_backward_only_reaches_strict_past(impl, v_heads, query):
     )
     out.backward(dO)
 
+    # With no strict-past keys, the selected output and query gradient are zero.
+    if query == 0:
+        assert torch.equal(out[:, :, query, :], torch.zeros_like(out[:, :, query, :]))
+        assert torch.equal(Q.grad[:, :, query, :], torch.zeros_like(Q.grad[:, :, query, :]))
     # A single output row depends on its matching Q row only.
     assert torch.equal(Q.grad[:, :, :query, :], torch.zeros_like(Q.grad[:, :, :query, :]))
     assert torch.equal(Q.grad[:, :, query + 1 :, :], torch.zeros_like(Q.grad[:, :, query + 1 :, :]))
