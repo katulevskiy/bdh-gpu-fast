@@ -77,6 +77,34 @@ def test_online_blocked_match_eager_for_distinct_qk_and_per_head_v():
         assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
 
 
+def test_online_blocked_long_path_grad_matches_eager_for_distinct_qk_and_per_head_v():
+    """Long CPU score×V must preserve Q/K/V gradients for distinct tensors."""
+    B, H, T, N, D = 2, 3, 257, 5, 4
+    g = torch.Generator(device="cpu").manual_seed(34)
+    Q = torch.randn(B, H, T, N, generator=g, dtype=torch.float64)
+    K = torch.randn(B, H, T, N, generator=g, dtype=torch.float64)
+    V = torch.randn(B, H, T, D, generator=g, dtype=torch.float64)
+    dO = torch.randn(B, H, T, D, generator=g, dtype=torch.float64)
+
+    def run(fn):
+        q = Q.detach().clone().requires_grad_(True)
+        k = K.detach().clone().requires_grad_(True)
+        v = V.detach().clone().requires_grad_(True)
+        if fn is eager_tril_attn:
+            out = fn(q, k, v)
+        else:
+            out = fn(q, k, v, block_size=64)
+        out.backward(dO)
+        return out.detach(), tuple(x.grad.detach() for x in (q, k, v))
+
+    ref, ref_grads = run(eager_tril_attn)
+    for fn in (blocked_tril_attn, online_tril_attn):
+        got, got_grads = run(fn)
+        assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+        for got_grad, ref_grad in zip(got_grads, ref_grads):
+            assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+
+
 def test_online_blocked_grad_matches_eager_for_distinct_qk():
     """Score×V must preserve Q/K/V gradients for distinct Q and K."""
     Q, _, V = _make_qkv(
