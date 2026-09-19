@@ -133,3 +133,40 @@ def test_cpu_probe_covers_scaled_and_topk_sampler_signatures():
             # on the sampler-owned path: one (B,) result per generated token.
             assert shapes.count((2,)) == 2, (name, shapes)
             assert (2, cfg.vocab_size) not in shapes, (name, shapes)
+
+
+def test_sampler_idx_out_accepts_noncontiguous_decode_narrow():
+    """Sampler outputs must support the strided one-column decode view."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk", dict(scale=0.7, do_topk=True, top_k_n=8)),
+    )
+
+    for name, kwargs in cases:
+        destination = torch.empty(2, 3, dtype=torch.long)
+        idx_out = destination[:, 1:2]
+        assert not idx_out.is_contiguous(), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1:2], ref), name
