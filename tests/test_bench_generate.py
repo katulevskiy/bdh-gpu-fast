@@ -73,6 +73,23 @@ def test_should_run_labels_cpu_triton_fallback_without_gpu_claim(monkeypatch):
     ) == (True, "fallback effective=blocked (no CUDA Triton kernel)")
 
 
+def test_should_run_labels_available_cuda_triton_without_fallback(monkeypatch):
+    """A CUDA Triton probe reports its native effective backend."""
+    monkeypatch.setattr(
+        bench_generate,
+        "backend_info",
+        lambda: {
+            "effective": "triton",
+            "has_triton": True,
+            "has_cuda_ext": False,
+        },
+    )
+
+    assert bench_generate._should_run(
+        "triton", bench_generate.torch.device("cuda")
+    ) == (True, "effective=triton")
+
+
 def test_should_run_labels_cpu_cuda_fallback_without_gpu_claim(monkeypatch):
     """CPU CUDA probes stay runnable but report the pure-PyTorch fallback."""
     monkeypatch.setattr(
