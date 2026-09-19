@@ -581,3 +581,59 @@ dominates; `.item()` is cheap without a device). The sync reduction matters on
 .venv/bin/python -m pytest tests/ -q
 # 74 passed, 4 skipped
 ```
+
+## opt/decode-amp — decode path + optional AMP (on CacheManager)
+
+**Branch:** `opt/decode-amp` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `5242ad6` (cache-pack CacheManager on main).
+
+### Goals
+
+1. Incremental decode: Attention + blocked/triton stay correct for **single-token**
+   steps on top of packed `CacheManager` (no duplicate growth buffers).
+2. Optional AMP / autocast (fp16/bf16) for `forward` + `generate`; default **fp32**.
+3. Preserve `tril(diagonal=-1)` / no-softmax / no-scale semantics.
+
+### What landed (coherent with cache-pack)
+
+| Piece | Change |
+|-------|--------|
+| Cache growth | **Uses `bdh_cache.CacheManager`** (prealloc `max_seq`, slice writes). Dropped earlier doubling-dict helpers — overlapping with CacheManager. Legacy list path still cats. |
+| `Attention.forward` incremental | Hot path `T==1, S>0`: `QR @ past_kr.mT @ past_v`. Multi-token + past + non-eager: concat + `bdh_attn` so blocked/triton match cold path. |
+| AMP | `generate(..., amp_dtype=float16\|bfloat16)` wraps autocast; keeps `cache_dtype=` from cache-pack. Sampling logits cast to fp32. RoPE phases stay **float32**. Default `amp_dtype=None` → fp32. |
+| `tests/test_decode_amp.py` | Decode parity under eager/blocked/triton with CacheManager; AMP vs fp32 atol/rtol; generate smoke. |
+
+### Semantics (unchanged)
+
+```text
+out = tril(Q @ K.T, diagonal=-1) @ V   # no softmax, no 1/sqrt(d)
+```
+
+### AMP correctness (CPU autocast)
+
+| path | dtype | atol | rtol |
+|------|-------|------|------|
+| forward (full) | float16 / bfloat16 | 5e-2 | 5e-2 |
+| cached tokenwise decode | float16 / bfloat16 | 5e-1 | 5e-1 |
+
+Decode accumulates step error under CPU autocast (observed bf16 max up to ~0.3).
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 92 passed, 4 skipped on this CPU-only box
+```
+
+### Benchmarks (CPU — honest)
+
+AMP bf16 `generate` on this CPU is typically **slower** than fp32 (casts dominate).
+Cache no-realloc win is owned by cache-pack `CacheManager` (see section above).
+No GPU on this box — AMP is for CUDA throughput.
+
+### Non-goals
+
+- No Cursor cloud agents
+- No PRs to `pathwaycom/bdh`
+- No softmax / diagonal inclusion / scale
+- No duplicate doubling cache alongside CacheManager
