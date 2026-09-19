@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `fc9283d` / documented tip `16a15fb` (post #55–#58 decode-online-v2 + attn-auto + cache-page + layout-v2 + #59 profile-v5; #60–#63 docs, test repair, Triton decode scaffold, and compile-mode guidance), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `fc9283d` / documented tip `b126d77` (post #55–#58 decode-online-v2 + attn-auto + cache-page + layout-v2 + #59 profile-v5; #60–#66 docs, test repair, Triton/CUDA decode scaffolds, compile-mode guidance, and log-sync), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -73,6 +73,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Generate host-test repair (`opt/fix-gen-host-test` #61) — updated AUTO decode environ-get floor; semantics unchanged
 - Residual LN deepen: reuse inner LN out via `add_` (fewer add temps; `F.layer_norm` #30 path kept) (`opt/ln-deepen`) — CPU e2e ~noise
 - Compile reduce-overhead guidance (`opt/compile-reduce` #63) — CPU mode matrix and non-CUDA warning; GPU CUDA graphs still open
+- Docs matrix v6 refresh (`opt/docs-matrix-v6` #65) — docs-only through #64; documented tip `4558501`
 
 ## Ranked next work
 
