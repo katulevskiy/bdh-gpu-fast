@@ -47,6 +47,15 @@ def test_resolve_device_is_cpu_safe_when_cuda_is_unavailable(monkeypatch, capsys
     assert "torch.cuda.is_available() is False" in capsys.readouterr().out
 
 
+def test_resolve_device_honors_explicit_cpu_when_cuda_is_available(monkeypatch):
+    """Explicit CPU stays CPU instead of following CUDA availability."""
+    monkeypatch.setattr(bench_generate.torch.cuda, "is_available", lambda: True)
+
+    assert bench_generate._resolve_device(
+        argparse.Namespace(device="cpu")
+    ) == bench_generate.torch.device("cpu")
+
+
 def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
     """Each unique decode threshold runs once with a mirrored cold gate."""
     calls = []
