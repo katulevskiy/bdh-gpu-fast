@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 5
+    assert summary["schema_version"] == 6
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -49,12 +49,45 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert isinstance(summary["cuda_built"], bool)
     assert isinstance(summary["cuda_device_count"], int)
     assert summary["cuda_device_count"] >= 0
+    expected_state = (
+        "not_built"
+        if not summary["cuda_built"]
+        else (
+            "no_visible_device"
+            if summary["cuda_device_count"] == 0
+            else "runtime_unavailable"
+        )
+    )
+    assert summary["cuda_runtime_state"] == expected_state
+    assert f"cuda_runtime_state={expected_state}" in result.stdout
     assert summary["commands"]["cold"]
     assert summary["commands"]["decode"]
     assert summary["commands"]["dtype"] == [
         "python benchmarks/bench_gpu_attn.py --dtype bfloat16",
         "python benchmarks/bench_gpu_attn.py --dtype float16",
     ]
+
+
+def test_cuda_runtime_diagnostics_classify_states(monkeypatch):
+    """Skip diagnostics distinguish build, visibility, and runtime gaps."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    diagnostics = namespace["_cuda_runtime_diagnostics"]
+
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+    assert diagnostics(cuda_available=False)["cuda_runtime_state"] == "not_built"
+
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+    assert diagnostics(cuda_available=False)["cuda_runtime_state"] == "no_visible_device"
+
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    assert diagnostics(cuda_available=False)["cuda_runtime_state"] == "runtime_unavailable"
+    assert diagnostics(cuda_available=True)["cuda_runtime_state"] == "available"
 
 
 def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
@@ -90,7 +123,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 5
+    assert summary["schema_version"] == 6
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
@@ -463,6 +496,11 @@ def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
     assert isinstance(summary["cuda_built"], bool)
     assert isinstance(summary["cuda_device_count"], int)
     assert summary["cuda_device_count"] >= 0
+    assert summary["cuda_runtime_state"] in {
+        "not_built",
+        "no_visible_device",
+        "runtime_unavailable",
+    }
     assert summary["torch_version"]
     assert summary["cuda_version"] is None or isinstance(summary["cuda_version"], str)
     assert summary["backend_info"]
