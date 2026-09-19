@@ -6,7 +6,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `tril(diagonal=-1)` — **no softmax**, **no `1/√d`**, **no**
 `F.scaled_dot_product_attention`.
 
-Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), with profile-v20 counts unchanged: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, `cat=0`, and `contiguous=0`. Through tip `1b4e695`, #287–#295, #296 docs refresh, and #297 add CPU-safe contract/harness coverage only; none adds a CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation. Absolute ms are **profiler-inflated**; use `% self CPU` and call counts. Re-run on GPU before claiming kernel wins.
+Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), with profile-v20 counts unchanged: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, `cat=0`, and `contiguous=0`. Through tip `34c6d60`, #287–#295, #296 docs refresh, and #297–#298 add CPU-safe contract/harness coverage only; none adds a CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation. Absolute ms are **profiler-inflated**; use `% self CPU` and call counts. Re-run on GPU before claiming kernel wins.
 
 Post-#95 re-profile (`opt/profile-v9`, source `8e7a4d2`; current docs tip `1363794` after #96–#102): forward warmed harness `aten::copy_` is 48 over three active calls (16/call), while an isolated one-forward check reproduces #95's **18**; forward and generate remain `aten::cat=0` and `aten::contiguous=0`. Generate `aten::copy_` is 1,674 over three active calls (558/call), so generate remains copy_-heavy. CPU-only evidence; **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v9.
 
@@ -325,6 +325,8 @@ Post-#295 AUTO blank cold-threshold contract (`cde4388`): cover empty and whites
 
 Post-#297 tiled multi-query online decode contract (`1b4e695`): add CPU-only direct online-decode coverage across a decode score-tile boundary with signed raw QK scores and past-only per-head values. No GPU performance claim was added.
 
+Post-#298 aliased score-V dispatch gradient contract (`34c6d60`): extend CPU-only Q/K-alias gradient parity through blocked, online, Triton-fallback, and CUDA-reference dispatch paths. No GPU performance claim was added.
+
 Post-#284 PATH missing-nvcc contract (`8b562f4`): cover a stale non-executable `nvcc` entry on PATH as a clear CPU-safe no-op before CUDA extension setup, preserving CPU references. No GPU build or timing claim.
 
 Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU, #93 is an opt-in cold path at T≥256, and #95 adds only CPU copy-call evidence (forward `copy_` 24→18; QR contig copies 8→0). No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
@@ -432,7 +434,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 ## Ranked next work
 
-Current evidence boundary through `1b4e695`: #285–#286 are docs-only; #287 adds raw strict-tril backward contract coverage, #288 adds shared-V tiled decode autograd parity, #289 adds CPU-safe AMP forward-only configuration coverage, #290 keeps GPU-harness synchronization device-local, #291 adds global prefetch H2D opt-out coverage, #292 adds sparse guardrail threshold coverage, #293 adds CPU-only batched partial-tile strict-tril coverage, #294 adds CPU-safe fail-closed AUTO input validation, #295 adds CPU-safe empty/whitespace AUTO cold-threshold fallback coverage, #296 is docs-only, and #297 adds CPU-only tiled multi-query online decode coverage. No CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
+Current evidence boundary through `34c6d60`: #285–#286 are docs-only; #287 adds raw strict-tril backward contract coverage, #288 adds shared-V tiled decode autograd parity, #289 adds CPU-safe AMP forward-only configuration coverage, #290 keeps GPU-harness synchronization device-local, #291 adds global prefetch H2D opt-out coverage, #292 adds sparse guardrail threshold coverage, #293 adds CPU-only batched partial-tile strict-tril coverage, #294 adds CPU-safe fail-closed AUTO input validation, #295 adds CPU-safe empty/whitespace AUTO cold-threshold fallback coverage, #296 is docs-only, #297 adds CPU-only tiled multi-query online decode coverage, and #298 adds CPU-only aliased score-V dispatch gradient parity. No CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
@@ -660,6 +662,7 @@ Current evidence boundary through `1b4e695`: #285–#286 are docs-only; #287 add
 | AUTO blank cold-threshold contract #295 | **Landed** `cde4388` — CPU-safe empty/whitespace fallback coverage after live decode-threshold updates; no GPU performance claim
 | Docs refresh #296 | **Landed** `d8cc8d1` — docs-only refresh through #294
 | Tiled multi-query online decode contract #297 | **Landed** `1b4e695` — CPU-only decode score-tile-boundary coverage; no GPU performance claim
+| Aliased score-V dispatch gradients #298 | **Landed** `34c6d60` — CPU-only Q/K-alias gradient parity through public dispatch paths; no GPU performance claim
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
