@@ -329,6 +329,44 @@ def test_zero_stride_qk_inputs_reduce_base_gradients(impl):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_zero_stride_qk_batch_head_views_reduce_base_gradients(impl):
+    """Q/K views shared across batch and heads must reduce both axes."""
+    generator = torch.Generator().manual_seed(2036)
+    Q_base = torch.randn(
+        1, 1, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K_base = torch.randn(
+        1, 1, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    Q = Q_base.expand(2, 3, 5, 4)
+    K = K_base.expand(2, 3, 5, 4)
+    V = torch.randn(
+        2, 3, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO = torch.randn(2, 3, 5, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert Q.stride(0) == 0 and Q.stride(1) == 0
+    assert K.stride(0) == 0 and K.stride(1) == 0
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+
+    assert torch.allclose(
+        Q_base.grad, Q_ref.grad.sum(dim=(0, 1), keepdim=True), rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(
+        K_base.grad, K_ref.grad.sum(dim=(0, 1), keepdim=True), rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 def test_noncontiguous_upstream_gradient_preserves_backward_contract(impl):
     """Analytic backward must accept a strided upstream gradient."""
     generator = torch.Generator().manual_seed(2033)
