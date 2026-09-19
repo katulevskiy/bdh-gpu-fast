@@ -201,6 +201,18 @@ def test_amp_forward_only_env_gate_is_explicit(monkeypatch, env_value, expected)
         assert tr._amp_forward_only is expected
 
 
+@pytest.mark.parametrize("env_value", ["1", "true", "True"])
+def test_amp_forward_only_env_cannot_enable_mode_for_float32(monkeypatch, env_value):
+    """The logits-only opt-in cannot change the explicit fp32 contract."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        mp.setenv("BDH_AMP_FORWARD_ONLY", env_value)
+        tr.configure_amp("float32", forward_only=None)
+        assert tr.dtype == "float32"
+        assert tr._amp_forward_only is False
+        assert tr._use_scaler is False
+
+
 @pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
