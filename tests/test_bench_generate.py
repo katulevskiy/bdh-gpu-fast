@@ -73,6 +73,23 @@ def test_should_run_labels_cpu_triton_fallback_without_gpu_claim(monkeypatch):
     ) == (True, "fallback effective=blocked (no CUDA Triton kernel)")
 
 
+def test_should_run_labels_cpu_cuda_fallback_without_gpu_claim(monkeypatch):
+    """CPU CUDA probes stay runnable but report the pure-PyTorch fallback."""
+    monkeypatch.setattr(
+        bench_generate,
+        "backend_info",
+        lambda: {
+            "effective": "eager",
+            "has_triton": False,
+            "has_cuda_ext": False,
+        },
+    )
+
+    assert bench_generate._should_run(
+        "cuda", bench_generate.torch.device("cpu")
+    ) == (True, "effective=eager (pure-PyTorch ref; no native ext)")
+
+
 def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
     """Each unique decode threshold runs once with a mirrored cold gate."""
     calls = []
