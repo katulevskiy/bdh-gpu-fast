@@ -5795,3 +5795,69 @@ triangular `tril(-1)`.
 - No default attention/RoPE implementation change
 - No softmax / scale / SDPA / diagonal inclusion
 - No GPU claims from CPU profiler percentages or copy_ counts
+## opt/sparse-v2 — gated density re-smoke and keep-OFF guardrails (2026-09-19)
+
+**Branch:** `opt/sparse-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f34adc0` (`main`). Sparse remains P2 and default OFF.
+
+### Audit / deepen
+
+`bdh_sparse.py` remains an opt-in helper module; `BDH.forward` does not import
+or dispatch to it. The optional encoder materialization hook now has a clear
+runtime gate:
+
+```text
+BDH_SPARSE_PROBE unset / 0 / false:  sparse probe disabled (default)
+BDH_SPARSE_PROBE=1 (or true/on):    optional probe hook may run
+```
+
+An ungated `encoder_relu_matmul(..., use_sparse=True)` raises an actionable
+error instead of silently creating a second model path. The primitive sparse
+and masked-GEMM helpers remain directly testable for numerical equivalence.
+
+`benchmarks/bench_sparse_probe.py` uses the same gate and exits before corpus
+loading, training, or timing when it is unset. `--density-only` makes the
+short-train density re-smoke explicit; `--enforce-density-guardrail` checks a
+conservative floor below the prior observation (~27% `x`, ~12% `xy`) without
+claiming that a short CPU run reproduces the paper's ~5% trained density.
+
+### Density re-smoke (CPU-only)
+
+```bash
+BDH_SPARSE_PROBE=1 python benchmarks/bench_sparse_probe.py \
+  --steps 150 --log-every 150 --batch 8 --block 64 \
+  --density-only --enforce-density-guardrail
+```
+
+Observed at this tip:
+
+```text
+step=0    x=0.5018  y=0.4856  xy=0.2427
+step=150  x=0.2663  y=0.4269  xy=0.1137
+ density_guardrail=pass (x>=0.2000, xy>=0.0800)
+```
+
+The probe still observes density well above the paper reference at 150 steps.
+This is a local CPU density observation, not a GPU or trained-model claim.
+The prior CPU crossover conclusion remains unchanged: sparse paths did not
+beat dense at the measured workload, so no sparse path is enabled by default.
+
+### Tests
+
+```bash
+python -m pytest tests/test_sparse.py -q
+# 13 passed, 1 warning (PyTorch sparse CSR beta notice)
+BDH_SPARSE_PROBE=1 python benchmarks/bench_sparse_probe.py --steps 1 \
+  --log-every 1 --batch 2 --block 32 --density-only
+```
+
+Coverage includes the default-off gate, gated sparse round-trip smoke, dense
+BDH forward isolation, COO/CSR/masked equivalence, and decoder layout parity.
+No GPU was available; no GPU timing, kernel, or speedup claim is made.
+
+### Non-goals
+
+- No sparse wiring into `BDH.forward`; dense remains the default path.
+- No default enablement or threshold auto-selection; default BDH callers stay
+  unchanged. The optional encoder hook now intentionally requires the gate.
+- No GPU claims from CPU density or timing observations.

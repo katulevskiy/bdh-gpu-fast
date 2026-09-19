@@ -28,12 +28,34 @@ true ReLU support (zeros contribute nothing).
 
 from __future__ import annotations
 
+import os
 from typing import Literal, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 SparseLayout = Literal["coo", "csr"]
+SPARSE_PROBE_ENV = "BDH_SPARSE_PROBE"
+_TRUTHY = frozenset(("1", "true", "yes", "on"))
+
+
+def sparse_probe_enabled() -> bool:
+    """Return whether the explicitly opt-in sparse probe gate is enabled.
+
+    The production ``bdh.py`` path never consults this flag. It only protects
+    the optional model-hook round trip and the benchmark harness, so an
+    accidental ``use_sparse=True`` cannot silently become a default change.
+    """
+    return os.environ.get(SPARSE_PROBE_ENV, "").strip().lower() in _TRUTHY
+
+
+def require_sparse_probe_enabled() -> None:
+    """Raise an actionable error when an optional sparse hook is not gated on."""
+    if not sparse_probe_enabled():
+        raise RuntimeError(
+            f"sparse probe is gated off; set {SPARSE_PROBE_ENV}=1 "
+            "for the optional, non-production path"
+        )
 
 
 def relu_density(x: torch.Tensor, eps: float = 0.0) -> float:
@@ -276,6 +298,7 @@ def encoder_relu_matmul(
     act = F.relu(latent)
     if not use_sparse:
         return act
+    require_sparse_probe_enabled()
     # Round-trip: dense → sparse → dense must be exact for the ReLU support.
     sp = to_sparse_activation(act, layout=layout)
     restored = sp.to_dense().view_as(act)
