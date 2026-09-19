@@ -7107,7 +7107,6 @@ CPU change in this matched profile.
 - No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
   claimed; real GPU measurement and cold CUDA/Triton validation remain open.
 
-
 ## Sparse probe contract deepen (2026-09-19)
 
 - `benchmarks/bench_sparse_probe.py` now emits explicit `exit_code` / `reason`
@@ -7118,11 +7117,9 @@ CPU change in this matched profile.
   crossover sweep. `BDH_SPARSE_PROBE=1` remains the only opt-in; production
   sparse wiring is unchanged and this CPU-only run claims no sparse win.
 
-
 ## opt/auto-thr-v4 — deepen CPU AUTO threshold gate smoke (2026-09-19)
 
-**Branch:** `opt/auto-thr-v4` from `86ba7df` (private `katulevskiy/bdh-gpu-opt`
-only; no public PR and no PRs to `pathwaycom/*`).
+**Branch:** `opt/auto-thr-v4` from `86ba7df` (private repository only).
 
 The post-#149 sweep smoke now also checks that an omitted cold threshold mirrors
 each de-duplicated decode threshold independently, including the zero boundary.
@@ -7130,3 +7127,29 @@ Malformed dispatcher input is exercised as a CLI error and verified not to start
 an AUTO child run. This remains CPU-only control-flow coverage: eager and
 `BDH_ATTN_AUTO`-off defaults are unchanged, attention remains raw scores ×
 `tril(diagonal=-1)`, and no GPU timing, correctness, or win claim is made.
+
+## opt/gen-bench-v3 — fail-closed CPU generate checks (2026-09-19)
+
+**Branch:** `opt/gen-bench-v3` (private repository only). **Base tip:**
+`e7943ba` (`main`, post-#184).
+
+The generate harness now keeps `eager` first as the token reference for custom
+`--impls` orders, labels every impl/AUTO row `PASS` or `FAIL`, and exits
+non-zero on token mismatch or any non-zero `aten::cat` count. The AUTO summary
+shows separate `cat0`/`cat1` columns. A CPU-safe smoke test locks the strict
+threshold contract: equality stays eager and only `length > threshold` selects
+`blocked`/`triton`.
+
+### CPU validation
+
+```bash
+python -m pytest -q tests/test_bench_generate.py tests/test_auto_threshold_sweep.py
+python benchmarks/bench_generate.py --mode impls --prompt 4 --new 2 \
+  --layers 1 --d 32 --heads 4 --mlp-mult 4 --warmup 0 --iters 1
+python benchmarks/bench_generate.py --mode auto-ab --prompts 4,8 --new 1 \
+  --layers 1 --d 32 --heads 4 --mlp-mult 4 --warmup 0 --iters 1 \
+  --auto-threshold-sweep 4
+```
+
+Validation is CPU-only: no GPU timing or win claim is recorded. Defaults remain
+eager, and attention remains raw scores × strict `tril(diagonal=-1)`.
