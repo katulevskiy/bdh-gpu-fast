@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#59)
+# OPT status — landed work (#1–#61+)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `71ba3a4` (`#59` profile-v5 on `main`). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
+Tip documented here: `8182124` (`#61` fix-gen-host-test on `main`; after `#60` docs). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -47,7 +47,7 @@ Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-
 
 When set (`1|true|yes|on`) and `BDH_ATTN_IMPL` is `eager`, T=1 decode uses
 **blocked** once `past_len > BDH_ATTN_AUTO_THRESHOLD` (default **512**, from
-`#55` CPU benches). Cold / prefill always follows `BDH_ATTN_IMPL` only.
+`#55` CPU benches; triton-decode-v3 prefers Triton when CUDA+Triton). Cold / prefill always follows `BDH_ATTN_IMPL` only.
 Explicit `IMPL∈{blocked,online,triton,cuda}` is never overridden. Default
 (AUTO unset) = eager decode at every length.
 
@@ -207,6 +207,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **57** | `opt/cache-page` | Geometric CacheManager page growth + empty+prefix `copy_`; `ensure_capacity`; long-S grow stats | fewer grows/bytes vs linear; cats=0; defaults unchanged | GPU long-S peak still open |
 | **58** | `opt/layout-v2` | Eval cached contiguous encoder `(nh*N,D)` + `F.linear`; train einsum; compile traces einsum | T=1/32 eval ~1.3–1.4× vs train path; T=128 ~noise; gen uses cache | GPU layout still open |
 | **59** | `opt/profile-v5` | Re-profile tip after #55–#58; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #58 layout visible on generate | No GPU measurements; defaults unchanged |
+| *(pending)* | `opt/triton-decode-v3` | Deepen Triton T=1 decode scaffold (long-S tiles, Q-hoist); AUTO→triton when CUDA else #55 blocked | ≡ eager/blocked on CPU; CUDA tests skip; default eager | GPU `--mode decode` open |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
@@ -221,7 +222,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 |------|-------------------------|--------------|
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
-| `BDH_ATTN_AUTO` | off / unset | `1` for long-S decode→blocked (`THRESHOLD`, default 512; #55/#56) |
+| `BDH_ATTN_AUTO` | off / unset | `1` for long-S decode→triton (CUDA) or blocked (#55 CPU); `THRESHOLD` default 512 (#55/#56/#triton-decode-v3) |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` | `0` | CPU: `1` **only with `IMPL=eager`** (#46/#49); GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |

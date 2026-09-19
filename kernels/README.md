@@ -30,8 +30,8 @@ export BDH_ATTN_IMPL=cuda
 export BDH_ATTN_AUTOGRAD=1
 export BDH_ATTN_IMPL=blocked
 
-# opt-in: long-S T=1 decode → blocked (cold/prefill still BDH_ATTN_IMPL)
-# threshold from #55 CPU benches (mid-S stay eager; S≫512 prefer blocked)
+# opt-in: long-S T=1 decode → triton (CUDA) or blocked (CPU #55)
+# threshold from #55 CPU benches (mid-S stay eager; S≫512 prefer)
 export BDH_ATTN_AUTO=1
 export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when past_len > thr
 ```
@@ -39,13 +39,15 @@ export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when past_l
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` for **all**
 impls including eager (`_two_gemm_decode`). With `BDH_ATTN_AUTO=1` and
-default eager, decode switches to blocked when `past_len` exceeds
-`BDH_ATTN_AUTO_THRESHOLD` (default 512; #55 long-S). Cold/prefill is
-unchanged. Blocked/online/triton share
+default eager, decode switches when `past_len` exceeds
+`BDH_ATTN_AUTO_THRESHOLD` (default 512) to **triton** if CUDA+Triton are
+available (`triton_decode_available`), else **blocked** (#55 long-S).
+Cold/prefill is unchanged. Blocked/online/triton share
 `_tiled_score_v` (broadcast-V tight `_DECODE_ONESHOT_ELEMS`, `out.add_`
-tiles, peak ~Tq×tile on long S); Triton decode uses `V_BROADCAST` on CUDA
-(blocked fallback on CPU); CUDA decode uses `DECODE_TILE_N` + a dedicated
-**Tq=1** kernel when the ext is built. Default remains **eager**.
+tiles, peak ~Tq×tile on long S); Triton decode-v3 uses `V_BROADCAST` +
+long-S tiles (up to 512) + optional Q-hoist on CUDA (CPU → #55 blocked
+fallback); CUDA decode uses `DECODE_TILE_N` + a dedicated **Tq=1** kernel
+when the ext is built. Default remains **eager**.
 
 ## Modules
 

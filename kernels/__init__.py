@@ -10,6 +10,7 @@ from .attention_dispatch import (
     resolve_attn_impl,
     resolve_decode_impl,
 )
+from .attention import triton_decode_available
 from .rope_dispatch import (
     backend_info as rope_backend_info,
     bdh_rope_rotate,
@@ -44,6 +45,7 @@ __all__ = [
     "attn_auto_threshold",
     "attn_auto_enabled",
     "DEFAULT_ATTN_AUTO_THRESHOLD",
+    "triton_decode_available",
     "backend_info",
     "strict_tril_attn",
     "StrictTrilAttnFn",

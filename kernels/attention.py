@@ -420,6 +420,16 @@ def _can_use_triton(Q: torch.Tensor) -> bool:
     return True
 
 
+def triton_decode_available() -> bool:
+    """True when the fused Triton T=1 decode kernel can run (import + CUDA).
+
+    Used by ``BDH_ATTN_AUTO`` to prefer Triton over blocked on GPU boxes.
+    Does **not** require a live tensor — unlike ``_can_use_triton``. On CPU-only
+    boxes this is False, so AUTO keeps the #55 blocked long-S path.
+    """
+    return bool(_HAS_TRITON and torch.cuda.is_available())
+
+
 if _HAS_TRITON:
 
     @triton.jit
@@ -703,14 +713,19 @@ if _HAS_TRITON:
         D,
         H,
         V_BROADCAST: tl.constexpr,
+        HOIST_Q: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_D: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
-        """Fused decode: out[t] = sum_{j<S} (q_t·k_j) * v_j (all past keys valid).
+        """Fused T=1 decode: out[t] = sum_{j<S} (q_t·k_j) * v_j (all past keys valid).
 
         Grid: (Tq, B*H). ``V_BROADCAST`` indexes values by ``bh // H`` so host
         stages ``(B,S,D)`` instead of materializing ``(B,H,S,D)``.
+
+        ``HOIST_Q`` (when ``N <= BLOCK_K``): load Q once per output D-tile before
+        the past scan — fewer global loads on long ``S`` (pairs with #55 long-S
+        blocked wins on GPU). When ``N > BLOCK_K``, falls back to per-tile K-loop.
         """
         pid_m = tl.program_id(0)
         bh = tl.program_id(1)
@@ -731,21 +746,21 @@ if _HAS_TRITON:
             mask_d = offs_d < D
             acc = tl.zeros((1, BLOCK_D), dtype=tl.float32)
 
-            for j0 in range(0, S, BLOCK_N):
-                offs_n = j0 + tl.arange(0, BLOCK_N)
-                mask_n = offs_n < S
+            if HOIST_Q:
+                # Common BDH head dims (N<=64): one Q load for the whole past scan.
+                offs_k = tl.arange(0, BLOCK_K)
+                mask_k = offs_k < N
+                q = tl.load(
+                    q_bh
+                    + offs_m[:, None] * stride_qt
+                    + offs_k[None, :] * stride_qn,
+                    mask=mask_m[:, None] & mask_k[None, :],
+                    other=0.0,
+                ).to(tl.float32)
 
-                qk = tl.zeros((1, BLOCK_N), dtype=tl.float32)
-                for k0 in range(0, N, BLOCK_K):
-                    offs_k = k0 + tl.arange(0, BLOCK_K)
-                    mask_k = offs_k < N
-                    q = tl.load(
-                        q_bh
-                        + offs_m[:, None] * stride_qt
-                        + offs_k[None, :] * stride_qn,
-                        mask=mask_m[:, None] & mask_k[None, :],
-                        other=0.0,
-                    ).to(tl.float32)
+                for j0 in range(0, S, BLOCK_N):
+                    offs_n = j0 + tl.arange(0, BLOCK_N)
+                    mask_n = offs_n < S
                     k = tl.load(
                         k_bh
                         + offs_n[:, None] * stride_kt
@@ -753,17 +768,50 @@ if _HAS_TRITON:
                         mask=mask_n[:, None] & mask_k[None, :],
                         other=0.0,
                     ).to(tl.float32)
-                    qk += tl.dot(q, tl.trans(k))
+                    qk = tl.dot(q, tl.trans(k))
+                    qk = tl.where(mask_m[:, None] & mask_n[None, :], qk, 0.0)
+                    v = tl.load(
+                        v_bh
+                        + offs_n[:, None] * stride_vt
+                        + offs_d[None, :] * stride_vd,
+                        mask=mask_n[:, None] & mask_d[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    acc += tl.dot(qk.to(v.dtype), v)
+            else:
+                for j0 in range(0, S, BLOCK_N):
+                    offs_n = j0 + tl.arange(0, BLOCK_N)
+                    mask_n = offs_n < S
 
-                qk = tl.where(mask_m[:, None] & mask_n[None, :], qk, 0.0)
-                v = tl.load(
-                    v_bh
-                    + offs_n[:, None] * stride_vt
-                    + offs_d[None, :] * stride_vd,
-                    mask=mask_n[:, None] & mask_d[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                acc += tl.dot(qk.to(v.dtype), v)
+                    qk = tl.zeros((1, BLOCK_N), dtype=tl.float32)
+                    for k0 in range(0, N, BLOCK_K):
+                        offs_k = k0 + tl.arange(0, BLOCK_K)
+                        mask_k = offs_k < N
+                        q = tl.load(
+                            q_bh
+                            + offs_m[:, None] * stride_qt
+                            + offs_k[None, :] * stride_qn,
+                            mask=mask_m[:, None] & mask_k[None, :],
+                            other=0.0,
+                        ).to(tl.float32)
+                        k = tl.load(
+                            k_bh
+                            + offs_n[:, None] * stride_kt
+                            + offs_k[None, :] * stride_kn,
+                            mask=mask_n[:, None] & mask_k[None, :],
+                            other=0.0,
+                        ).to(tl.float32)
+                        qk += tl.dot(q, tl.trans(k))
+
+                    qk = tl.where(mask_m[:, None] & mask_n[None, :], qk, 0.0)
+                    v = tl.load(
+                        v_bh
+                        + offs_n[:, None] * stride_vt
+                        + offs_d[None, :] * stride_vd,
+                        mask=mask_n[:, None] & mask_d[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    acc += tl.dot(qk.to(v.dtype), v)
 
             tl.store(
                 o_bh
@@ -781,7 +829,12 @@ def _pick_triton_decode_tiles(
     *,
     block_n: int | None = None,
 ) -> tuple[int, int, int]:
-    """Power-of-2 past/Dk/Dv tiles for fused T=1 decode (decode-mm: up to 256)."""
+    """Power-of-2 past/Dk/Dv tiles for fused T=1 decode (long-S: up to 512).
+
+    Pairs with #55 blocked long-S wins: larger past tiles on long packed
+    caches (decode has no causal diagonal — every key is valid). Cap 512 for
+    register pressure on very long S; mid-S stays 64–256.
+    """
     def _p2_cap(x: int, lo: int, hi: int) -> int:
         x = max(lo, min(int(x), hi))
         p = 1
@@ -790,17 +843,19 @@ def _pick_triton_decode_tiles(
         return min(p, hi)
 
     if block_n is None:
-        # Prefer larger past tiles on long packed caches (decode has no causal
-        # diagonal — every key is valid). Cap 256 for register pressure.
+        # Prefer larger past tiles on long packed caches.
         if S <= 128:
             want = 64
         elif S <= 512:
             want = 128
-        else:
+        elif S <= 2048:
             want = min(256, DEFAULT_BLOCK_DECODE)
-        block_n = _p2_cap(min(max(S, 1), want), 16, 256)
+        else:
+            # Very long S: bigger tiles → fewer program iterations (GPU).
+            want = 512
+        block_n = _p2_cap(min(max(S, 1), want), 16, 512)
     else:
-        block_n = _p2_cap(block_n, 16, 256)
+        block_n = _p2_cap(block_n, 16, 512)
     block_d = _p2_cap(D if D > 0 else 1, 16, 64)
     block_k = _p2_cap(N if N > 0 else 1, 16, 64)
     return block_n, block_d, block_k
@@ -813,13 +868,15 @@ def triton_decode_attn(
     block_size: int = DEFAULT_BLOCK_DECODE,
     block_n: int | None = None,
 ) -> torch.Tensor:
-    """Decode against past KR/V. Triton fused on CUDA; else blocked.
+    """Decode against past KR/V. Triton fused on CUDA; else blocked (#55).
 
     On CPU (this box) and whenever Triton cannot run, uses
-    ``blocked_decode_attn`` so ``BDH_ATTN_IMPL=triton`` still gets the
-    no-full-TxT decode path. Dedicated decode kernel skips causal masking
-    (past keys are all valid under tril(-1)) and supports broadcast-V
-    staging (``(B,S,D)`` when ``V`` is ``(B,1,S,D)``).
+    ``blocked_decode_attn`` so ``BDH_ATTN_IMPL=triton`` and ``BDH_ATTN_AUTO``
+    still get the #55 tight-oneshot / long-S tiled decode path. Dedicated
+    decode kernel skips causal masking (past keys are all valid under
+    tril(-1)) and supports broadcast-V staging (``(B,S,D)`` when ``V`` is
+    ``(B,1,S,D)``). Long-S tile picker + optional Q-hoist deepen the CUDA
+    scaffold; **no GPU wins are claimed from CPU boxes**.
     """
     if not _can_use_triton(Q):
         return blocked_decode_attn(Q, K, V, block_size=block_size)
@@ -853,6 +910,7 @@ def triton_decode_attn(
     BLOCK_N, BLOCK_D, BLOCK_K = _pick_triton_decode_tiles(
         S, N, D, block_n=block_n
     )
+    hoist_q = 1 if N <= BLOCK_K else 0
     grid = (Tq, BH)
     _bdh_decode_fwd_kernel[grid](
         Qf,
@@ -877,6 +935,7 @@ def triton_decode_attn(
         D,
         H,
         V_BROADCAST=1 if v_broadcast else 0,
+        HOIST_Q=hoist_q,
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         BLOCK_K=BLOCK_K,
