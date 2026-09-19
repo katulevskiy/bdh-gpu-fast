@@ -76,6 +76,34 @@ def test_enforced_guardrail_empty_history_returns_distinct_exit(monkeypatch, cap
     assert "exit_code=3 reason=guardrail_no_samples" in captured.err
 
 
+def test_unenforced_empty_history_allows_crossover(monkeypatch, capsys):
+    """An empty diagnostic result stays non-blocking without enforcement."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(probe, "short_train_density", lambda **_: [])
+    calls = []
+
+    def fake_bench_matmul(M, K, N, density, seed=0):
+        calls.append((M, K, N, density, seed))
+        return {
+            "density_measured": density,
+            "dense_ms": 1.0,
+            "coo_ms": 2.0,
+            "csr_ms": 2.0,
+            "row_ms": 2.0,
+            "col_ms": 2.0,
+        }
+
+    monkeypatch.setattr(probe, "bench_matmul", fake_bench_matmul)
+    assert probe.main([]) == probe.EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "density_guardrail" not in captured.out
+    assert "density_guardrail" not in captured.err
+    assert "CPU sparse vs dense crossover" in captured.out
+    assert len(calls) == 3 * 8
+    assert "exit_code=0 reason=probe_complete" in captured.out
+
+
 def test_enforced_guardrail_failure_returns_distinct_exit(monkeypatch, capsys):
     """A failing sample must stop before CPU crossover work."""
     monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
