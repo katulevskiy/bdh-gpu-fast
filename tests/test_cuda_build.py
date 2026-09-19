@@ -527,6 +527,53 @@ def test_forced_cpu_ext_precedes_detected_cuda_and_valid_nvcc(tmp_path):
     assert "skipping CUDA extension build" not in output
 
 
+def test_forced_cpu_ext_does_not_require_nvcc_when_cuda_is_detected(tmp_path):
+    """CPU-only mode must not require a toolkit on a CUDA-enabled torch wheel."""
+    torch = tmp_path / "torch"
+    cpp_extension = torch / "utils" / "cpp_extension.py"
+    cpp_extension.parent.mkdir(parents=True)
+    (torch / "__init__.py").write_text(
+        "class _Cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available():\n"
+        "        return True\n"
+        "cuda = _Cuda()\n",
+        encoding="utf-8",
+    )
+    (torch / "utils" / "__init__.py").write_text("", encoding="utf-8")
+    cpp_extension.write_text(
+        "from setuptools import Extension\n"
+        "class BuildExtension: ...\n"
+        "def CppExtension(*args, **kwargs):\n"
+        "    return Extension(*args, **kwargs)\n"
+        "def CUDAExtension(*args, **kwargs):\n"
+        "    raise AssertionError('CUDAExtension should not be selected')\n",
+        encoding="utf-8",
+    )
+
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    env = os.environ.copy()
+    pythonpath = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "BDH_FORCE_CPU_EXT": "1",
+            "CUDA_HOME": str(tmp_path / "missing-cuda-home"),
+            "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
+            "PATH": str(empty_path),
+            "PYTHONPATH": pythonpath,
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "Building bdh_cuda_ext WITH CUDA" not in output
+    assert "skipping CUDA extension build" not in output
+
+
 def test_forced_cpu_ext_takes_precedence_over_cuda_flag():
     """The explicit CPU-only request wins when both native flags are set."""
     env = os.environ.copy()
