@@ -813,15 +813,17 @@ def triton_cold_skip_reason() -> str | None:
     ``None`` means the import and CUDA availability gates are both open. The
     diagnostic intentionally only inspects import state and
     ``torch.cuda.is_available()``; it does not allocate a CUDA tensor or try a
-    kernel launch, so pytest collection stays safe on CPU-only hosts.
+    kernel launch, so pytest collection stays safe on CPU-only hosts. Every
+    unavailable result carries the ``CPU-safe skip`` marker used by the native
+    cold diagnostics.
     """
     if not _HAS_TRITON:
         detail = ""
         if _TRITON_IMPORT_ERROR is not None:
             detail = f" ({type(_TRITON_IMPORT_ERROR).__name__})"
-        return f"Triton unavailable: import failed{detail}"
+        return f"Triton unavailable: import failed{detail} (CPU-safe skip)"
     if not torch.cuda.is_available():
-        return "CUDA unavailable: torch.cuda.is_available() is false"
+        return "CUDA unavailable: torch.cuda.is_available() is false (CPU-safe skip)"
     return None
 
 
