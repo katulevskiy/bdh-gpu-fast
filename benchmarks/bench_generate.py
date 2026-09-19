@@ -348,6 +348,25 @@ def _parse_threshold_sweep(raw: str | None) -> list[int]:
     return values
 
 
+def _parse_prompt_lengths(raw: str | None) -> list[int]:
+    """Parse non-empty, positive AUTO prompt lengths before model setup."""
+    if raw is None or not raw.strip():
+        raise ValueError("--prompts must list at least one positive length")
+    values: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            raise ValueError("prompt list contains an empty item")
+        try:
+            value = int(token)
+        except ValueError as exc:
+            raise ValueError(f"invalid prompt length {token!r}") from exc
+        if value <= 0:
+            raise ValueError(f"prompt lengths must be > 0, got {value}")
+        values.append(value)
+    return values
+
+
 def run_auto_ab_sweep(args, device: torch.device) -> int:
     """Run the full CPU-safe AUTO A/B harness once per requested threshold."""
     raw = getattr(args, "auto_threshold_sweep", None)
@@ -391,12 +410,10 @@ def run_auto_ab_sweep(args, device: torch.device) -> int:
 
 def run_auto_ab(args, device: torch.device) -> int:
     """E2E generate A/B: BDH_ATTN_AUTO=0 vs 1 at long past lengths (#55/#56)."""
-    prompts = [int(x) for x in args.prompts.split(",") if x.strip()]
-    if not prompts:
-        print("ERROR: --prompts must list at least one positive length")
-        return 2
-    if any(p <= 0 for p in prompts):
-        print(f"ERROR: prompt lengths must be > 0, got {prompts}")
+    try:
+        prompts = _parse_prompt_lengths(args.prompts)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
         return 2
 
     thr = int(args.auto_threshold)
