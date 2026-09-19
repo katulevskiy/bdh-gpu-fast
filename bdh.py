@@ -168,7 +168,7 @@ class Attention(torch.nn.Module):
             # to itself. blocked/triton use tiled decode vs packed KR/V slices
             # (no full TxT); eager keeps the simple two-GEMM form.
             if impl == "eager":
-                scores = QR @ past_kr.transpose(-2, -1)  # (B, nh, 1, S)
+                scores = QR @ past_kr.mT  # (B, nh, 1, S)
                 out = scores @ past_v
             else:
                 from kernels.attention_dispatch import bdh_attn_decode
@@ -190,9 +190,9 @@ class Attention(torch.nn.Module):
 
         parts = []
         if S > 0:
-            parts.append(QR @ past_kr.transpose(-2, -1))  # (B, nh, T, S)
+            parts.append(QR @ past_kr.mT)  # (B, nh, T, S)
         if T > 1:
-            self_scores = QR @ QR.transpose(-2, -1)
+            self_scores = QR @ QR.mT
             self_scores.tril_(diagonal=-1)
             parts.append(self_scores)  # (B, nh, T, T)
 
@@ -233,6 +233,11 @@ class BDH(nn.Module):
         nh = config.n_head
         D = config.n_embd
         N = config.mlp_internal_dim_multiplier * D // nh
+        # Weight layouts (baseline shapes preserved for state_dict / tests):
+        #   encoder / encoder_v: (nh, D, N) — used via einsum → contiguous (B,T,nh,N)
+        #   decoder: (nh*N, D) — F.linear with .T view (no hot-path .contiguous())
+        #   lm_head: (D, vocab) — same F.linear pattern
+        # Optional biases registered as None; F.linear / add fuse when present.
         self.decoder = nn.Parameter(torch.zeros((nh * N, D)).normal_(std=0.02))
         self.encoder = nn.Parameter(torch.zeros((nh, D, N)).normal_(std=0.02))
 
@@ -249,6 +254,12 @@ class BDH(nn.Module):
         self.lm_head = nn.Parameter(
             torch.zeros((D, config.vocab_size)).normal_(std=0.02)
         )
+
+        # Optional fused biases (absent by default — not in baseline checkpoints).
+        self.register_parameter("encoder_bias", None)
+        self.register_parameter("encoder_v_bias", None)
+        self.register_parameter("decoder_bias", None)
+        self.register_parameter("lm_head_bias", None)
 
         self.apply(self._init_weights)
 
@@ -280,6 +291,40 @@ class BDH(nn.Module):
         y.add_(x)
         return F.layer_norm(y, self._ln_shape, eps=self._ln_eps)
 
+    @staticmethod
+    def _linear(x: torch.Tensor, weight_in_out: torch.Tensor, bias=None) -> torch.Tensor:
+        """``x @ weight_in_out`` (+ bias) via ``F.linear`` on a transpose *view*.
+
+        ``weight_in_out`` is stored ``(in, out)`` (baseline decoder / lm_head).
+        Never calls ``.contiguous()`` on the transpose — BLAS gets an op(A) flag.
+        When ``bias`` is not None it is fused into the GEMM epilogue.
+        """
+        return F.linear(x, weight_in_out.transpose(-2, -1), bias)
+
+    @staticmethod
+    def _encoder_relu(
+        x_btd: torch.Tensor, weight_hdn: torch.Tensor, bias=None
+    ) -> torch.Tensor:
+        """Project ``(B,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU.
+
+        Einsum avoids broadcasting ``(B,1,T,D) @ (nh,D,N)`` (extra expand/copy on
+        CPU). Output layout is decoder-friendly: ``view(B,T,nh*N)`` is a free view.
+        """
+        out = torch.einsum("btd,hdn->bthn", x_btd, weight_hdn)
+        if bias is not None:
+            out = out + bias
+        return F.relu(out, inplace=True)
+
+    @staticmethod
+    def _encoder_v_relu(
+        y_bhtd: torch.Tensor, weight_hdn: torch.Tensor, bias=None
+    ) -> torch.Tensor:
+        """Project ``(B,nh,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU."""
+        out = torch.einsum("bhtd,hdn->bthn", y_bhtd, weight_hdn)
+        if bias is not None:
+            out = out + bias
+        return F.relu(out, inplace=True)
+
     def forward(
         self,
         idx,
@@ -302,8 +347,9 @@ class BDH(nn.Module):
         nh = C.n_head
         N = D * C.mlp_internal_dim_multiplier // nh
 
-        x = self.embed(idx).unsqueeze(1)
-        x = self._ln(x)
+        # Keep activations as (B, T, D) — avoid a permanent unsqueeze(1) that forces
+        # broadcast GEMMs and a later permute+contiguous before the decoder.
+        x = self._ln(self.embed(idx))
 
         packed = isinstance(cache, CacheManager)
         rope_start = 0
@@ -319,8 +365,9 @@ class BDH(nn.Module):
         grad_enabled = torch.is_grad_enabled()
 
         for level in range(C.n_layer):
-            # Q/K latent: fuse ReLU in-place onto encoder GEMM output (no 2nd buffer).
-            x_sparse = self._proj_relu(x, self.encoder)
+            # Contiguous (B, T, nh, N): decoder merge is a view; attn gets a permute view.
+            x_bthn = self._encoder_relu(x, self.encoder, self.encoder_bias)
+            x_sparse = x_bthn.permute(0, 2, 1, 3)  # (B, nh, T, N) — view, no copy
 
             past_kr = past_v = None
             if packed:
@@ -332,7 +379,7 @@ class BDH(nn.Module):
             yKV, new_kr, new_v = self.attn(
                 Q=x_sparse,
                 K=x_sparse,
-                V=x,
+                V=x.unsqueeze(1),
                 rope_start=rope_start,
                 past_kr=past_kr,
                 past_v=past_v,
@@ -351,26 +398,27 @@ class BDH(nn.Module):
 
             yKV = self._ln(yKV)
 
-            # encoder_v projection + in-place ReLU (same fuse as Q path)
-            y_sparse = self._proj_relu(yKV, self.encoder_v)
+            # encoder_v -> (B, T, nh, N); mul stays in decoder-friendly layout
+            y_bthn = self._encoder_v_relu(yKV, self.encoder_v, self.encoder_v_bias)
             if grad_enabled:
-                xy_sparse = x_sparse * y_sparse
+                xy_bthn = x_bthn * y_bthn
             else:
-                # Reuse x_sparse storage; ReLU outputs not needed for backward.
-                x_sparse.mul_(y_sparse)
-                xy_sparse = x_sparse
-            xy_sparse = self.drop(xy_sparse)
+                # Reuse x_bthn storage; ReLU outputs are not needed for backward.
+                x_bthn.mul_(y_bthn)
+                xy_bthn = x_bthn
+            xy_bthn = self.drop(xy_bthn)
 
-            # Contiguous (B, T, nh, N) before merge — friendlier for compile/GEMM
-            xy = xy_sparse.permute(0, 2, 1, 3).contiguous().view(B, 1, T, N * nh)
-            yMLP = xy @ self.decoder
+            # Free view when contiguous (B,T,nh,N); reshape safe if dropout flips layout.
+            yMLP = self._linear(
+                xy_bthn.reshape(B, T, nh * N), self.decoder, self.decoder_bias
+            )
             # Residual + double LN: reuse inner LN buffer for (x + LN(yMLP)).
             x = self._residual_ln(x, yMLP)
 
         if packed:
             cache.commit()
 
-        logits = x.view(B, T, D) @ self.lm_head
+        logits = self._linear(x, self.lm_head, self.lm_head_bias)
         loss = None
         if targets is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))

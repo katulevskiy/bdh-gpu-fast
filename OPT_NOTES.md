@@ -787,7 +787,66 @@ Default `BDH_ATTN_IMPL` remains **eager** (unchanged training / cold path).
   vs the eager two-GEMM for modest S.
 - Still no softmax / no scale / no SDPA.
 
+## opt/weight-layout — contiguous encoder/decoder layouts (2026-09-19)
+
+**Branch:** `opt/weight-layout` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `efb6b80` (attn-unify on main).
+
+### Goal
+
+Cut encoder / decoder / `mm` overhead from bad activation layouts and hot-path
+`transpose` / `contiguous` copies, without changing `tril(diagonal=-1)` math,
+`BDH_ATTN_IMPL`, `CacheManager`, or attn-bwd hooks. Parameter **shapes** stay
+baseline-compatible (`encoder`/`encoder_v` `(nh,D,N)`, `decoder` `(nh*N,D)`,
+`lm_head` `(D,V)`) so `load_state_dict` from `bdh_baseline` remains strict.
+
+### What changed (`bdh.py`)
+
+1. **Activations stay `(B, T, D)`** — drop the permanent `unsqueeze(1)` that
+   forced broadcast GEMMs against `(nh,D,N)` and a later `permute+contiguous`
+   before the decoder.
+2. **Encoder / encoder_v via einsum** — `_encoder_relu` /
+   `_encoder_v_relu` produce contiguous `(B, T, nh, N)`. Attention still sees
+   `(B, nh, T, N)` as a **permute view** (no copy). `CacheManager.append` still
+   `copy_`s into packed buffers.
+3. **Decoder merge is a free view** — `xy_bthn.reshape(B, T, nh*N)` then
+   `_linear` (`F.linear` on `weight.T` **view**, never `.contiguous()` on the
+   transpose). Removes the per-layer `permute→contiguous→view` copy.
+4. **Bias fusion hooks** — `encoder_bias` / `encoder_v_bias` / `decoder_bias` /
+   `lm_head_bias` registered as `None` (not in checkpoints). When set,
+   `F.linear` / add fuses them.
+5. **Decode scores** — `past_kr.mT` / `QR.mT` (view) instead of
+   `.transpose(-2, -1)`.
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 110 passed, 4 skipped (CUDA/native/Triton GPU) on CPU-only box
+# vs baseline: train/eval logits bit-identical; grads atol 1e-5
+# tril(-1), CacheManager, BDH_ATTN_IMPL, attn-bwd hooks unchanged
+```
+
+### Benchmarks (CPU — honest)
+
+```text
+.venv/bin/python benchmarks/bench_forward.py
+# device=cpu  layers=4 d=128 B=4 T=128  (torch 2.14.0+cu130, cuda=False)
+# forward baseline median: ~32 ms → optimized ~32 ms  (~1.0× vs frozen baseline;
+#   cumulative RoPE/cache already in tip — layout delta is alloc-path, not a new kernel)
+# generate(32) baseline median: ~91 ms → optimized ~47 ms  (~1.9×; mostly prior KV cache)
+
+# Quiet A/B vs main tip `bdh.py` (same weights): logits bit-identical; wall ~noise
+# Profiler (1× forward, 4 layers): no `aten::contiguous` on decoder path;
+#   `aten::einsum`×8 + `aten::linear`×5 (4× decoder + lm_head)
+```
+
+**No GPU on this box** — expect layout friendliness to matter more under
+`torch.compile` / CUDA GEMM than in CPU wall medians.
+
 ### Non-goals
 
 - No PRs to `pathwaycom/bdh`
 - Do not default `BDH_ATTN_IMPL=blocked` on CPU
+- No Parameter shape migration / checkpoint break
+- No softmax / diagonal / SDPA
