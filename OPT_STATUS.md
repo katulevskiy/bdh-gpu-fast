@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#175; #160 docs scope retained)
+# OPT status — landed work (#1–#179; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `4e13111` (`opt/blocked-tile-v4` CPU wide-head cold parity follows `#175` docs through #174, `#174` cuda-cold-v5, `#173` attn-bwd-v3, `#172` docs refresh through #170, `#171` docs refresh through #169, `#170` online-decode v4, `#169` prefetch H2D v3, and `#168` fused RoPE scaffold v3; `#167` docs refresh through #165, `#166` compile-train-v4 fallback guidance, `#165` shared-V decode epilogue, `#164` packed T=1 decode views, `#163` structured GPU-attention measurement, `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2 remain documented below). The requested through-#160 documentation is retained, with #161 profile-v16 carried forward, #163 structured GPU measurement scaffolding, #164 packed-view decode deepening, #165 shared-V decode accumulation deepening, #166 actionable compile-probe fallback guidance, #168 actionable Triton skip reasons plus strided T=1 RoPE output parity, #169 expanded CPU no-op coverage plus explicit CUDA staged-buffer lifetime guidance, #170 packed-key-view online-decode parity coverage, #173 CPU analytic-attention parity-matrix coverage, #174 explicit CPU-only extension smoke coverage, #175 docs alignment, and the current blocked-tile-v4 CPU parity follow-up. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163, #164, #165, #166, #168, #169, #170, #173, #174, #175, and the blocked-tile follow-up add no CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `0983326` (`opt/amp-train-v4` CPU-safe dtype and scaler contracts follows `#179` AMP coverage, `#178` triton-cold-v5, `#177` docs through the `#176` blocked-tile-v4 tip, `#176` blocked-tile-v4 CPU wide-head cold parity, `#175` docs through #174, `#174` cuda-cold-v5, `#173` attn-bwd-v3, `#172` docs refresh through #170, `#171` docs refresh through #169, `#170` online-decode v4, `#169` prefetch H2D v3, and `#168` fused RoPE scaffold v3; `#167` docs refresh through #165, `#166` compile-train-v4 fallback guidance, `#165` shared-V decode epilogue, `#164` packed T=1 decode views, `#163` structured GPU-attention measurement, `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2 remain documented below). The requested through-#160 documentation is retained, with #161 profile-v16 carried forward, #163 structured GPU measurement scaffolding, #164 packed-view decode deepening, #165 shared-V decode accumulation deepening, #166 actionable compile-probe fallback guidance, #168 actionable Triton skip reasons plus strided T=1 RoPE output parity, #169 expanded CPU no-op coverage plus explicit CUDA staged-buffer lifetime guidance, #170 packed-key-view online-decode parity coverage, #173 CPU analytic-attention parity-matrix coverage, #174 explicit CPU-only extension smoke coverage, #175 docs alignment, #176 blocked-tile-v4 CPU parity, #177 docs refresh through #176, #178 triton-cold-v5 CPU skip/parity coverage, and the current #179 amp-train-v4 CPU contract follow-up. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163, #164, #165, #166, #168, #169, #170, #173, #174, #175, #176, #177, #178, and #179 add no CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#175)
+## Landed opts (#1–#179)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -353,7 +353,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **173** | `opt/attn-bwd-v3` | Deepen the CPU analytic-attention parity matrix across eager/blocked/online/triton/cuda, AUTOGRAD off/on, shared/full-head V layouts, non-tile sequence shape, and randomized output gradients; make expected native CUDA-backend skips explicit | CPU parity/skip coverage only; no GPU timing or training claim | **P2** GPU analytic-attention train measure remains open |
 | **174** | `opt/cuda-cold-v5` | Add explicit CPU-only native-extension setup smoke while preserving no-CUDA/no-nvcc skips, strict raw `tril(-1)` references, and unchanged defaults | CPU: 21 passed, 5 skipped focused; full suite: 575 passed, 19 skipped, 3 warnings; no GPU timing | **P0** GPU measure / cold CUDA validation remains open |
 | **175** | `opt/docs-v43` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #174 while preserving profile-v16 counts and the real-GPU P0 blocker | Docs only | — |
-| **tip** | `opt/blocked-tile-v4` | Add bounded wide-head CPU blocked-tile parity at the partial 128-row tile boundary for shared-V and head-matched-V layouts; defaults and raw strict-tril math unchanged | CPU-only parity at `B=2,H=3,T=257,N=160,D=192`; no GPU timing or win claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **176** | `opt/blocked-tile-v4` | Add bounded wide-head CPU blocked-tile parity at the partial 128-row tile boundary for shared-V and head-matched-V layouts; defaults and raw strict-tril math unchanged | CPU-only parity at `B=2,H=3,T=257,N=160,D=192`; no GPU timing or win claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **177** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #176 while preserving profile-v16 counts and the real-GPU P0 blocker | Docs only | — |
+| **178** | `opt/triton-cold-v5` | Mark unavailable cold Triton paths with an explicit CPU-safe skip marker and add long-T blocked-fallback parity for shared-V and per-head-V layouts; defaults and raw strict-tril math unchanged | CPU: 39 passed, 3 skipped focused; full suite: 593 passed, 19 skipped, 3 warnings; no CUDA allocation, launch, timing, or win claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **179** | `opt/amp-train-v4` | Add CPU-safe `float32|bfloat16|float16` AMP contract coverage, actionable unsupported-CPU skips, and the CUDA-only float16 GradScaler gate; preserve fp32 / AMP-off defaults | CPU-only contract coverage; no GPU timing or throughput claim | **P3** GPU AMP train measurement remains open |
 
 ### Concurrent main updates
 
@@ -371,7 +374,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#173** `opt/attn-bwd-v3` merged as `f95c143`; deepens the CPU analytic-attention parity matrix with explicit expected CUDA-backend skips and no GPU claim.
 - **#174** `opt/cuda-cold-v5` merged as `bc3967b`; adds explicit CPU-only extension setup smoke while preserving actionable no-CUDA/no-nvcc skips and strict CPU references, with no GPU claim.
 - **#175** `opt/docs-v43` merged as `0af0690`; refreshes the status/backlog docs through #174 while preserving profile-v16 counts and the real-GPU blocker.
-- **Current tip** `opt/blocked-tile-v4` at `4e13111`; adds CPU-only wide-head partial-tile parity coverage with no GPU timing or win claim.
+- **#176** `opt/blocked-tile-v4` is at `4e13111`; adds CPU-only wide-head partial-tile parity coverage with no GPU timing or win claim.
+- **#177** docs refresh is at `5507747`; carries the matrix through the blocked-tile tip.
+- **#178** `opt/triton-cold-v5` is at `f72033e`; adds CPU-safe cold-Triton skip markers and long-T fallback parity with no CUDA timing or win claim.
+- **Current tip #179** `opt/amp-train-v4` is at `0983326`; adds CPU-only AMP dtype/scaler contracts with no GPU timing or throughput claim.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
