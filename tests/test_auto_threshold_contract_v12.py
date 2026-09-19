@@ -80,6 +80,22 @@ def test_explicit_cold_threshold_is_strict_and_decode_scoped(monkeypatch):
     assert resolve_decode_impl(7) == "blocked"
 
 
+def test_zero_threshold_switches_both_gates_after_equality(monkeypatch):
+    """A zero threshold keeps equality eager and switches at the next length."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "0")
+    monkeypatch.setattr(
+        "kernels.attention_dispatch.triton_decode_available", lambda: False
+    )
+
+    assert resolve_decode_impl(0) == "eager"
+    assert resolve_cold_impl(0) == "eager"
+    assert resolve_decode_impl(1) == "blocked"
+    assert resolve_cold_impl(1) == "blocked"
+
+
 def test_valid_cold_threshold_isolates_invalid_shared_threshold(monkeypatch):
     """A valid cold override keeps prefill usable when decode config is invalid."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
