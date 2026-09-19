@@ -523,20 +523,42 @@ def test_zero_stride_batch_head_upstream_gradient_preserves_backward_contract(im
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
-@pytest.mark.parametrize("query", [63, 64])
-def test_backward_preserves_strict_past_at_default_tile_boundary(impl, query):
-    """Rows on both sides of the 64-row tile boundary exclude self/future."""
+@pytest.mark.parametrize(
+    ("sequence_length", "query"), [(65, 63), (65, 64), (128, 127)]
+)
+def test_backward_preserves_strict_past_at_default_tile_boundary(
+    impl, sequence_length, query
+):
+    """Rows across the first and second 64-row tiles exclude self/future."""
     generator = torch.Generator().manual_seed(2031)
     Q = torch.randn(
-        1, 2, 65, 3, generator=generator, dtype=torch.float64, requires_grad=True
+        1,
+        2,
+        sequence_length,
+        3,
+        generator=generator,
+        dtype=torch.float64,
+        requires_grad=True,
     )
     K = torch.randn(
-        1, 2, 65, 3, generator=generator, dtype=torch.float64, requires_grad=True
+        1,
+        2,
+        sequence_length,
+        3,
+        generator=generator,
+        dtype=torch.float64,
+        requires_grad=True,
     )
     V = torch.randn(
-        1, 1, 65, 4, generator=generator, dtype=torch.float64, requires_grad=True
+        1,
+        1,
+        sequence_length,
+        4,
+        generator=generator,
+        dtype=torch.float64,
+        requires_grad=True,
     )
-    dO = torch.zeros(1, 2, 65, 4, dtype=torch.float64)
+    dO = torch.zeros(1, 2, sequence_length, 4, dtype=torch.float64)
     dO[:, :, query, :] = torch.randn(
         1, 2, 4, generator=generator, dtype=torch.float64
     )
