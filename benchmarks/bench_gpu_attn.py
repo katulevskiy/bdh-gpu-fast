@@ -119,7 +119,7 @@ def _select_device(*, cuda_available: bool, force_cpu: bool) -> torch.device:
     return torch.device("cuda" if cuda_available and not force_cpu else "cpu")
 
 
-def _skip_summary() -> dict[str, Any]:
+def _skip_summary(*, mode: str) -> dict[str, Any]:
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": "skip",
@@ -132,6 +132,7 @@ def _skip_summary() -> dict[str, Any]:
                 "detail": "torch.cuda.is_available() is false",
             }
         ],
+        "mode": mode,
         "device": "cpu",
         "timing_scope": "none",
         "cuda_available": False,
@@ -226,7 +227,7 @@ def main() -> int:
 
     cuda_ok = torch.cuda.is_available()
     if not cuda_ok and not args.force_cpu:
-        summary = _skip_summary()
+        summary = _skip_summary(mode=args.mode)
         print(
             "GPU_ATTN_SKIP status=skip reason=cuda_unavailable device=cpu\n"
             "CUDA is required for Triton/CUDA timing; no CPU timings were substituted."
