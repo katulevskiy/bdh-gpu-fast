@@ -173,3 +173,23 @@ def test_force_cpu_bench_does_not_synchronize_cuda(monkeypatch):
         warmup=0,
         iters=1,
     )
+
+
+def test_no_cuda_skip_returns_before_measurement(monkeypatch):
+    """Unavailable CUDA must not enter device selection or timing code."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("CUDA-unavailable skip entered measurement")
+
+    monkeypatch.setitem(namespace, "_select_device", fail_if_called)
+    monkeypatch.setitem(namespace, "_bench", fail_if_called)
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT)])
+
+    assert namespace["main"]() == 0
