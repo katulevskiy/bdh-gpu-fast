@@ -4097,3 +4097,98 @@ score-MiB columns.
 - No change to default `BDH_ATTN_IMPL=eager`
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No GPU / CUDA speedup claims from these CPU medians
+
+## opt/prefill-blocked — deepen blocked cold/prefill (2026-09-19)
+
+**Branch:** `opt/prefill-blocked` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `5d63bc2` (main after `#74` docs matrix through #73).
+
+### Goal
+
+After `#72` showed e2e `BDH_ATTN_AUTO` ~parity because **eager cold/prefill
+dominates**, deepen blocked/online cold for `T ≥ 256` (no full `T×T`) and let
+opt-in AUTO apply the **same** length gate to cold/prefill so long-S
+`generate` can win e2e when AUTO switches. Hard constraints: `tril(diagonal=-1)`,
+`aten::cat=0`, default eager, AUTO still opt-in / off by default.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `pick_cold_block_size(T)` → BS=128 at `T≥256`; `_cold_score_budget` grows oneshot for long prefill; broadcast-V unexpanded; `out.add_` on diag; skip dtype `.to` when already fp32 |
+| `kernels/attention_dispatch.py` | `resolve_cold_impl(T)` mirrors `resolve_decode_impl` (same AUTO knobs); `bdh_attn` uses it |
+| `tests/test_prefill_blocked.py` | Long-T parity; adaptive BS; AUTO cold≡decode thr; default eager |
+| `tests/test_attn_auto.py` | Short cold stays eager under AUTO; long cold switches |
+| `benchmarks/bench_generate.py` | `auto-ab` reports `cold@S` + `decode@S` |
+| `benchmarks/bench_blocked_vec.py` | T sweep through 1024; adaptive peak bound |
+
+```bash
+export BDH_ATTN_IMPL=eager          # default — unchanged
+export BDH_ATTN_AUTO=1              # opt-in; cold+decode switch when length > thr
+export BDH_ATTN_AUTO_THRESHOLD=512  # default
+export BDH_ATTN_IMPL=blocked        # always blocked cold+decode (alias: online)
+```
+
+### Semantics
+
+```text
+tril(Q @ K.T, diagonal=-1) @ V     # no softmax / scale / SDPA
+AUTO off / T≤thr:  eager cold + eager decode
+AUTO on  / T>thr:  blocked (or triton if CUDA+Triton) for cold AND decode
+explicit IMPL≠eager: never overridden by AUTO
+aten::cat in generate / CacheManager: 0
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_prefill_blocked.py tests/test_attn_auto.py \
+  tests/test_fuse_scorev.py tests/test_attn_mem.py tests/test_inc_decode.py \
+  tests/test_gen_sample.py -q
+# prefill/AUTO/parity suite green; pos0==0; default eager; cats=0
+```
+
+### Honest CPU benches (2026-09-19 Europe/Podgorica / CEST)
+
+`OMP_NUM_THREADS=2`, `torch 2.14.0+cu130`, `cuda=False`.
+
+**Cold score×V** (`bench_blocked_vec.py`, B=1 H=2 N=32 D=64):
+
+| T | eager ms | blocked ms | e/b | peak elems | T×T |
+|---|----------|------------|-----|------------|-----|
+| 256 | 0.127 | 0.162 | 0.79× | 32640 | 65536 |
+| 512 | 1.148 | 0.356 | **3.23×** | 65408 | 262144 |
+| 1024 | 5.023 | 1.050 | **4.78×** | 130944 | 1048576 |
+
+**Generate AUTO 0 vs 1** (`--mode auto-ab`, layers=4 d=128 nh=4 B=1, `--new 8`):
+
+| prompt | AUTO=0 ms | AUTO=1 ms | spd | match | cats | cold@S / decode@S |
+|--------|-----------|-----------|-----|-------|------|-------------------|
+| 256 | 35.72 | 38.04 | 0.94× | yes | 0 | eager / eager |
+| 1024 | 235.43 | 187.52 | **1.26×** | yes | 0 | **blocked / blocked** |
+| 2048 | 863.10 | 622.02 | **1.39×** | yes | 0 | **blocked / blocked** |
+
+**Contrast IMPL=blocked** (`--mode impls`, AUTO off): 1.23× @1024 / 1.43× @2048
+(same direction as AUTO now that cold tiles too).
+
+### Verdict
+
+| Claim | Result (CPU tip `5d63bc2`) |
+|-------|----------------------------|
+| Blocked cold no full T×T @ T≥256 | **Yes** — adaptive BS=128; peak ≪ T×T |
+| AUTO long-T cold switch | **Yes** — same thr/knobs as decode |
+| E2E AUTO wall win (long S) | **Yes direction** — 1.26× @1024 / 1.39× @2048 |
+| Short-T / default eager | **Preserved** — S=256 under AUTO stays eager; AUTO off |
+| Tokens / cat | **Yes** — match; `aten::cat=0` |
+| GPU | **Unmeasured** — re-tune thr on A100/H100 |
+
+Defaults unchanged (`BDH_ATTN_AUTO` off, `BDH_ATTN_IMPL=eager`). Do **not** claim
+GPU wins from these CPU medians.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No re-introducing `aten::cat` in generate / CacheManager
+

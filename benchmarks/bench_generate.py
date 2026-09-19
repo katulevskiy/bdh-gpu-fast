@@ -6,10 +6,11 @@ Modes
 * ``impls`` (default): end-to-end autoregressive ``generate`` under
   **eager | blocked | triton | cuda** when each backend is available.
   Soft-skips / labels fallbacks that cannot run on this device.
-* ``auto-ab``: validate ``#55``/``#56`` wins **outside** score×V microbench —
-  prompt lengths ``S ∈ {256, 1024, 2048}`` (configurable) with
-  ``BDH_ATTN_AUTO=0`` vs ``1`` (default threshold 512). Cold/prefill stays
-  ``BDH_ATTN_IMPL=eager``; only T=1 decode switches when ``past_len > thr``.
+* ``auto-ab``: validate ``#55``/``#56``/``#74`` wins **outside** score×V
+  microbench — prompt lengths ``S ∈ {256, 1024, 2048}`` (configurable) with
+  ``BDH_ATTN_AUTO=0`` vs ``1`` (default threshold 512). With AUTO=1 and
+  ``S > thr``, cold/prefill **and** T=1 decode switch to triton|blocked
+  (``opt/prefill-blocked``); short S stays eager.
 
 Honest CPU numbers: this sandbox is often ``cuda=False``. Report wall medians
 and tokens-match flags — **do not** claim GPU / kernel wins from CPU medians.
@@ -49,6 +50,7 @@ from kernels.attention_dispatch import (  # noqa: E402
     attn_auto_threshold,
     backend_info,
     resolve_attn_impl,
+    resolve_cold_impl,
     resolve_decode_impl,
 )
 
@@ -323,8 +325,8 @@ def run_auto_ab(args, device: torch.device) -> int:
         f"(IMPL=eager; AUTO 0 vs 1; thr={thr}) ---"
     )
     print(
-        "Semantics: cold/prefill always eager; T=1 decode → blocked "
-        f"(or triton on CUDA) only when AUTO=1 and past_len > {thr}."
+        "Semantics: AUTO=1 + length > thr → cold/prefill AND T=1 decode "
+        f"switch to blocked (or triton on CUDA); short S stays eager (thr={thr})."
     )
 
     # Force eager IMPL for the whole A/B (AUTO only applies when base=eager).
@@ -347,14 +349,17 @@ def run_auto_ab(args, device: torch.device) -> int:
                 with _attn_auto(auto_on, threshold=thr):
                     assert attn_auto_enabled() is auto_on
                     assert attn_auto_threshold() == thr
-                    # Sanity: resolve_decode_impl at past_len=S
+                    # Sanity: cold + decode resolve at length=S
                     dec = resolve_decode_impl(S)
+                    cold = resolve_cold_impl(S)
                     if auto_on and fires:
                         # CUDA+Triton → triton; else #55 blocked (CPU / no Triton).
                         ok_dec = dec in ("blocked", "triton")
+                        ok_cold = cold in ("blocked", "triton")
                         expected = dec  # whatever resolve picked is the contract
                     else:
                         ok_dec = dec == "eager"
+                        ok_cold = cold == "eager"
                         expected = "eager"
 
                     def one_generate(seed: int = 0) -> torch.Tensor:
@@ -389,15 +394,17 @@ def run_auto_ab(args, device: torch.device) -> int:
                     "match": match,
                     "aten_cat": cats,
                     "decode_at_S": dec,
+                    "cold_at_S": cold,
                     "decode_ok": ok_dec,
+                    "cold_ok": ok_cold,
                     "expected_decode": expected,
                 }
                 tok_s = (
                     (args.batch * args.new) / (med / 1000.0) if med > 0 else float("inf")
                 )
                 fire_note = (
-                    f"decode@{S}={dec}"
-                    + (f" (expect {expected})" if not ok_dec else "")
+                    f"cold@{S}={cold} decode@{S}={dec}"
+                    + (f" (expect {expected})" if not (ok_dec and ok_cold) else "")
                 )
                 if crossover and auto_on:
                     fire_note += f"; mid-gen may cross thr={thr}"
@@ -442,14 +449,14 @@ def run_auto_ab(args, device: torch.device) -> int:
         )
 
     print(
-        "NOTE: AUTO A/B keeps cold/prefill on eager IMPL — unlike IMPL=blocked "
-        "A/B (#55), which also tiles prefill. Long-S win here is decode-only "
-        f"after past_len > {thr}. Default BDH_ATTN_AUTO stays off."
+        "NOTE: AUTO=1 + S>thr switches cold/prefill AND decode to "
+        "triton|blocked (opt/prefill-blocked); short S stays eager. "
+        f"Default BDH_ATTN_AUTO stays off (thr={thr})."
     )
     if device.type != "cuda":
         print(
             "NOTE: cuda=False on this box — AUTO→blocked (#55 CPU path). "
-            "On CUDA+Triton, AUTO prefers triton decode (triton-decode-v3). "
+            "On CUDA+Triton, AUTO prefers triton cold+decode (triton-decode-v3). "
             "Re-tune threshold on A100/H100 before claiming GPU wins."
         )
     # Fail the process if any parity / cat / decode-resolve check broke.
@@ -460,6 +467,8 @@ def run_auto_ab(args, device: torch.device) -> int:
         or r["auto0"]["aten_cat"] != 0
         or r["auto1"]["aten_cat"] != 0
         or (not r["auto0"]["decode_ok"])
+        or (not r["auto0"].get("cold_ok", True))
+        or (not r["auto1"].get("cold_ok", True))
         or (not r["auto1"]["decode_ok"])
     ]
     if bad:

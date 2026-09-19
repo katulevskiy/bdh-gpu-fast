@@ -30,19 +30,20 @@ export BDH_ATTN_IMPL=cuda
 export BDH_ATTN_AUTOGRAD=1
 export BDH_ATTN_IMPL=blocked
 
-# opt-in: long-S T=1 decode → triton (CUDA) or blocked (CPU #55)
+# opt-in: long-T cold + long-S decode → triton (CUDA) or blocked (CPU)
 # threshold from #55 CPU benches (mid-S stay eager; S≫512 prefer)
 export BDH_ATTN_AUTO=1
-export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when past_len > thr
+export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when length > thr
 ```
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` for **all**
-impls including eager (`_two_gemm_decode`). With `BDH_ATTN_AUTO=1` and
-default eager, decode switches when `past_len` exceeds
-`BDH_ATTN_AUTO_THRESHOLD` (default 512) to **triton** if CUDA+Triton are
-available (`triton_decode_available`), else **blocked** (#55 long-S).
-Cold/prefill is unchanged. Blocked/online/triton share
+impls including eager (`_two_gemm_decode`). With `BDH_ATTN_AUTO=1` and default eager, length above
+`BDH_ATTN_AUTO_THRESHOLD` (default 512) switches **cold/prefill** (`T`) and
+**T=1 decode** (`past_len`) to **triton** if CUDA+Triton are available
+(`triton_decode_available`), else **blocked** (#55 / `opt/prefill-blocked`).
+Short sequences stay eager; explicit non-eager `IMPL` is never overridden.
+Blocked/online/triton share
 `_tiled_score_v` (broadcast-V tight `_DECODE_ONESHOT_ELEMS`, `out.add_`
 tiles, peak ~Tq×tile on long S); Triton decode-v3 uses `V_BROADCAST` +
 long-S tiles (up to 512) + optional Q-hoist on CUDA (CPU → #55 blocked
@@ -55,7 +56,7 @@ when the ext is built. Default remains **eager**.
 | Path | Role |
 |------|------|
 | `attention.py` | cold tril + decode: `_two_gemm_decode`, `blocked_*` / `online_*`, `triton_*`, `_tiled_score_v` |
-| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()`; opt-in `BDH_ATTN_AUTO` long-S decode |
+| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()`; opt-in `BDH_ATTN_AUTO` long-T cold + long-S decode |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`); dense M-recompute for eager, **tiled** analytic for blocked/online/triton/cuda (no full T×T) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |
 | `rope.py` | RoPE rotate: eager / fused PyTorch / optional Triton |

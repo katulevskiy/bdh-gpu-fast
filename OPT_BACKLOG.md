@@ -50,7 +50,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Decode GEMM polish: blocked/Triton/CUDA T=1 score×V vs packed KR/V — broadcast-V, Triton staging, tiled CUDA (`opt/decode-gemm`)
 - Decode-mm: `_two_gemm_decode` + CUDA Tq=1/`DECODE_TILE_N` + B=1 lm_head `mv`; default eager (`opt/decode-mm`)
 - Decode-online-v2: blocked/online T=1 tight oneshot + long-S tiles; peak helper (`opt/decode-online-v2`)
-- Attn-auto: opt-in `BDH_ATTN_AUTO` long-S T=1 decode → blocked (thr=512 from #55); cold stays IMPL (`opt/attn-auto`)
+- Attn-auto + prefill-blocked: opt-in `BDH_ATTN_AUTO` long-T cold + long-S decode → blocked|triton (thr=512); (`opt/attn-auto` / `opt/prefill-blocked`)
 - Triton decode-v3: long-S tiles + Q-hoist scaffold; AUTO prefers triton when CUDA+Triton else #55 blocked (`opt/triton-decode-v3`)
 - CUDA decode-v3: adaptive DECODE_TILE_N (32/64/128 GPU; CPU refs ≤512) + TQ1 Q-hoist; ≡ blocked parity (`opt/cuda-decode-v3`)
 - Online fused strict-tril score×V (no full T×T) under `blocked`/`online` (`opt/fuse-scorev` #21)
@@ -89,7 +89,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v6): attn `mul`~26% `bmm`~23% `copy_`~16% `tril`~0.8%; forward `copy_`~25% `mm`~19% `bmm`~18% `mul`~12%. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` via `benchmarks/bench_train_step.py` | Low |
-| **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** scaffold (AUTO→triton when CUDA; cuda adaptive tiles). CPU long-S **IMPL=blocked** e2e win; opt-in AUTO thr=512. **`opt/gen-long-bench`**: e2e AUTO 0/1 @ S∈{256,1024,2048} — AUTO fires + parity, but AUTO e2e wall ~parity on CPU (eager prefill dominates); IMPL=blocked still 1.14–1.22×. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
+| **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** + **`opt/prefill-blocked`**: AUTO long-T cold+decode (adaptive blocked cold @T≥256). CPU e2e AUTO **1.26×@1024 / 1.39×@2048**; IMPL=blocked ~1.23–1.43×. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | **Density measured** `opt/sparse-probe`: short-train x~27% xy~12% @150 steps (≫ paper 5%); CPU sparse **never reliably beat dense** → **keep OFF**. GPU sparse still open. | GPU sparse bench if density ≪10% | Speculative |
@@ -122,8 +122,9 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Decode-mm T=1 / lm_head mv | **Landed** `opt/decode-mm` — `_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`, B=1 `mv`; CPU wall ~noise; GPU open |
 | Decode-online-v2 blocked T=1 | **Landed** `opt/decode-online-v2` — tight broadcast oneshot; long-S peak↓ + wall↑ on CPU; GPU open |
-| Attn-auto long-S decode | **Landed** `opt/attn-auto` — `BDH_ATTN_AUTO` + thr=512; default eager; GPU threshold re-tune open |
-| Long-S generate AUTO A/B | **Landed** `opt/gen-long-bench` — AUTO fires @ S>512; e2e AUTO ~parity (CPU); IMPL=blocked 1.14–1.22×; GPU open |
+| Attn-auto long-S decode | **Landed** `opt/attn-auto` — `BDH_ATTN_AUTO` + thr=512; deepened by `opt/prefill-blocked` (cold too); default eager; GPU thr re-tune open |
+| Long-S generate AUTO A/B | **Landed** `opt/gen-long-bench` — harness; deepened by `opt/prefill-blocked` e2e AUTO 1.26–1.39×; GPU open |
+| Prefill-blocked cold AUTO | **Landed** `opt/prefill-blocked` — adaptive cold BS@T≥256; AUTO cold+decode; e2e AUTO 1.26–1.39×; GPU open |
 | Triton decode-v3 | **Landed** `opt/triton-decode-v3` — long-S tiles/Q-hoist scaffold; AUTO prefers triton when avail; CPU→#55 blocked; GPU measure open |
 | CUDA decode-v3 | **Landed** `opt/cuda-decode-v3` — adaptive DECODE_TILE_N + TQ1 Q-hoist; ≡ blocked parity; GPU measure open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
@@ -212,7 +213,7 @@ End-to-end `BDH.generate` (packed KR/V CacheManager, cat-free) across
 ext). Prints median ms, tok/s, tokens-match-eager, `aten::cat` count.
 
 `--mode auto-ab` (`opt/gen-long-bench`): prompt `S∈{256,1024,2048}` ×
-`BDH_ATTN_AUTO=0|1` (thr=512). Cold stays eager; decode switches when
+`BDH_ATTN_AUTO=0|1` (thr=512). Cold+decode switch when
 `past_len > thr`. Validates `#55`/`#56` outside score×V microbench.
 
 ```bash
@@ -227,7 +228,8 @@ python benchmarks/bench_generate.py --mode auto-ab --device cuda
 
 **CPU honesty (this box / tip `962a3b6`):**
 - `--mode impls` short prompt: medians ~noise vs eager; match; `aten::cat=0`
-- `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO wall ~parity**
-  (eager prefill dominates); **IMPL=blocked** still **1.14× @1024 / 1.22× @2048**
+- `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO**
+  **1.26× @1024 / 1.39× @2048** after `opt/prefill-blocked` (cold+decode);
+  IMPL=blocked ~1.23–1.43×
 - **Do not** claim Triton/CUDA / AUTO e2e wins from CPU. GPU thr re-tune = P1.
 Private repo only — never `pathwaycom/*`.
