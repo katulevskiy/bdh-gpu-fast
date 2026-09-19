@@ -307,10 +307,11 @@ class BDH(nn.Module):
 
         self.attn = Attention(config)
 
+        # Keep nn.LayerNorm for baseline API parity (no affine params → empty
+        # state_dict). Hot path never calls self.ln — only F.layer_norm.
         self.ln = nn.LayerNorm(D, elementwise_affine=False, bias=False)
-        # Cached for F.layer_norm (same eps / shape as self.ln; no affine params).
         self._ln_shape = (D,)
-        self._ln_eps = 1e-5
+        self._ln_eps = float(self.ln.eps)
         self.embed = nn.Embedding(config.vocab_size, D)
         # Float p + F.dropout (not nn.Dropout): torch RNG only, compile-friendly.
         # p==0 is a true identity (no RNG op) — bit-identical to baseline Dropout(0).
@@ -344,8 +345,15 @@ class BDH(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def _ln(self, x: torch.Tensor) -> torch.Tensor:
-        """Affine-free LayerNorm over the last dim (bit-identical to ``self.ln``)."""
-        return F.layer_norm(x, self._ln_shape, eps=self._ln_eps)
+        """Affine-free LayerNorm over the last dim via ``F.layer_norm``.
+
+        Prefer ``F.layer_norm`` over ``self.ln(x)`` (``nn.Module.__call__`` /
+        hooks) so Dynamo sees a single ATen op. Explicit ``weight=None`` /
+        ``bias=None`` — no affine Python optionality. Bit-identical to ``self.ln``.
+        """
+        return F.layer_norm(
+            x, self._ln_shape, weight=None, bias=None, eps=self._ln_eps
+        )
 
     @staticmethod
     def _proj_relu(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -388,15 +396,17 @@ class BDH(nn.Module):
         return F.linear(h, w.transpose(0, 1), bias)
 
     def _residual_ln(self, x: torch.Tensor, y_mlp: torch.Tensor) -> torch.Tensor:
-        """``LN(x + LN(y_mlp))`` reusing the inner LN buffer for the residual sum.
+        """``LN(x + LN(y_mlp))`` via ``F.layer_norm`` only — compile-friendly.
 
-        Avoids a separate ``x + y`` temporary. Autograd-safe: in-place add into the
-        inner LN *output* (backward still has ``y_mlp``); bit-identical to
-        ``self.ln(x + self.ln(y_mlp))``.
+        Pure functional (out-of-place ``x + y``): no in-place ``add_`` aliasing
+        for AOTAutograd functionalization, and no Python control flow. Prefer
+        ``F.layer_norm`` over ``nn.LayerNorm`` module calls. Bit-identical to
+        ``self.ln(x + self.ln(y_mlp))`` and to the prior in-place reuse form.
         """
-        y = F.layer_norm(y_mlp, self._ln_shape, eps=self._ln_eps)
-        y.add_(x)
-        return F.layer_norm(y, self._ln_shape, eps=self._ln_eps)
+        shape = self._ln_shape
+        eps = self._ln_eps
+        y = F.layer_norm(y_mlp, shape, weight=None, bias=None, eps=eps)
+        return F.layer_norm(x + y, shape, weight=None, bias=None, eps=eps)
 
     def _dropout(self, x: torch.Tensor) -> torch.Tensor:
         """Compile-friendly dropout via ``F.dropout`` (ATen / torch RNG only).
@@ -481,7 +491,7 @@ class BDH(nn.Module):
         # One cos/sin for all layers (same T, rope_start) — cuts RoPE trig allocs.
         cos_sin = self.attn.rope_cos_sin(T, rope_start, x.device)
 
-        # Inference-only: safe in-place mul on ReLU buffers (training needs ReLU mask).
+        # Used only for packed-cache in-place RoPE safety (not for sparse product).
         grad_enabled = torch.is_grad_enabled()
 
         for level in range(C.n_layer):
@@ -540,14 +550,11 @@ class BDH(nn.Module):
 
             yKV = self._ln(yKV)
 
-            # encoder_v -> (B, T, nh, N); mul stays in decoder-friendly layout
+            # encoder_v -> (B, T, nh, N); mul stays in decoder-friendly layout.
+            # Always out-of-place product: avoid ``torch.is_grad_enabled()`` Python
+            # branch (would specialize train vs no_grad into two Dynamo graphs).
             y_bthn = self._encoder_v_relu(yKV, self.encoder_v, self.encoder_v_bias)
-            if grad_enabled:
-                xy_bthn = x_bthn * y_bthn
-            else:
-                # Reuse x_bthn storage; ReLU outputs are not needed for backward.
-                x_bthn.mul_(y_bthn)
-                xy_bthn = x_bthn
+            xy_bthn = x_bthn * y_bthn
             # Dropout then decoder: F.dropout keeps (or restores) contiguity;
             # p==0 is identity so (B,T,nh,N) stays a free view into nh*N.
             xy_bthn = self._dropout(xy_bthn)
@@ -555,7 +562,7 @@ class BDH(nn.Module):
             yMLP = self._linear(
                 xy_bthn.view(B, T, nh * N), self.decoder, self.decoder_bias
             )
-            # Residual + double LN: reuse inner LN buffer for (x + LN(yMLP)).
+            # Residual + double LN: F.layer_norm only (see _residual_ln).
             x = self._residual_ln(x, yMLP)
 
         if packed:

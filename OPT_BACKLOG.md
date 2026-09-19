@@ -35,6 +35,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
 - Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold`) — GPU measure still P0
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
+- Compile-friendly LN+residual: `F.layer_norm` only, functional residual, no `is_grad_enabled` product branch (`opt/ln-compile`)
 - CPU train-step `BDH_COMPILE=0` vs `1` microbench via `maybe_compile` (soft-skip if inductor missing) (`opt/compile-bench`)
 
 ## Ranked next work
