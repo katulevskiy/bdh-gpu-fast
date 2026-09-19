@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#201; #160 docs scope retained)
+# OPT status — landed work (#1–#204; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `c25aa9f` (`opt/gpu-measure-v3`, #201) follows #200 docs refresh through #198 and #199 packed per-head decode GEMM parity. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, #188 adds CPU-only sampler-layout probe coverage, #189 adds CPU-only packed shared-V decode parity coverage, #190 is docs-only, #191 adds CPU-only RoPE cache correctness/parity coverage, #193 is docs-only, #194 adds CPU-only B=1 shared-V epilogue coverage, #195 adds CPU-only compile-probe fallback diagnostics, #196 adds CPU-only missing-nvcc setup-skip coverage, #197 is docs-only, #198 adds CPU-only T=1 strict-tril backward contract coverage, #199 adds CPU-only packed per-head decode GEMM parity coverage, #200 is docs-only, and #201 marks forced-CPU smoke output with an explicit CPU timing scope; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `5995a7c` (`opt/profile-v18`, #204) follows #203 `opt/prefetch-v4` and #202 docs refresh through #201. Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #202 is docs-only, #203 adds CPU-only unavailable-CUDA H2D skip gating before stream/event construction, and #204 records the profile-v18 counts; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -137,13 +137,16 @@ BDH_PREFETCH_ASYNC=0 python train.py  # sync debug / A-B
 |-----|---------|---------|
 | `BDH_PREFETCH_H2D` | `1` | On CUDA, stage one pinned batch ahead on a dedicated side stream and hand it to the caller stream via an event; `0` keeps H2D on the caller stream |
 
-This flag is a CPU no-op. #139 makes that contract explicit: device type is
-checked before any CUDA stream/event construction, no staged device lookahead
-is created on CPU, and `_to_device` preserves the original CPU tensor objects.
-It applies to the async host-prefetch path; `BDH_PREFETCH_ASYNC=0` remains the
-synchronous debug/A-B mode. GPU H2D overlap and throughput are unmeasured.
-The `cuda_staging=` constructor override is available for tests/A-B and is
-ignored on CPU.
+This flag is a CPU no-op. #139 makes that contract explicit, and #203 extends it
+to an unavailable CUDA runtime: the device/runtime gate runs before any CUDA
+stream/event construction, CPU reports `device-not-cuda: cpu`, and a requested
+CUDA device without a live runtime reports `CUDA unavailable:
+torch.cuda.is_available() is false`. No staged device lookahead is created on
+CPU or unavailable-CUDA paths, and `_to_device` preserves the original CPU
+tensor objects. It applies to the async host-prefetch path;
+`BDH_PREFETCH_ASYNC=0` remains the synchronous debug/A-B mode. GPU H2D
+overlap and throughput are unmeasured. The `cuda_staging=` constructor override
+is available for tests/A-B and is ignored on CPU or unavailable-CUDA paths.
 
 ```bash
 BDH_PREFETCH_H2D=1 python train.py  # default on CUDA
@@ -175,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#201)
+## Landed opts (#1–#204)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -378,6 +381,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **199** | `opt/decode-gemm-v4` | Add CPU parity coverage for T=1 packed, capacity-strided per-head K/V views at and just above the decode oneshot boundary; lock the per-head decode GEMM flattening shape/stride and view-preserving contract | CPU-only parity/stride coverage; no GPU timing or performance claim | **P0** GPU decode measure / cold CUDA-Triton validation remains open |
 | **200** | `opt/docs-v50` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #198 while preserving profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
 | **201** | `opt/gpu-measure-v3` | Distinguish real CUDA summaries from `--force-cpu` smoke output in schema version 2; report actual device, timing scope, and reason, with CPU contract coverage and an explicit measurement boundary | CPU-only smoke/contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **202** | `opt/docs-v51` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #201 while preserving the real-GPU P0 blocker | Docs only | — |
+| **203** | `opt/prefetch-v4` | Gate opt-in H2D staging on both CUDA device type and live CUDA availability; expose actionable CPU-safe skip reasons before stream/event construction | CPU-only skip/identity coverage; no H2D timing or correctness claim | **P1** GPU H2D overlap/throughput remains unmeasured |
+| **204** | `opt/profile-v18` | Re-profile the #199–#201 tip with the matched profile-v17 schedule; record unchanged attention/forward/generate `copy_` counts and `cat`/`contiguous` floors | CPU-only: `copy_`=2/12/394 per call; `cat=0`; `contiguous=0`; flat versus v17 | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 
 ### Concurrent main updates
 
@@ -418,7 +424,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#199** `opt/decode-gemm-v4` merged as `269eb2d`; adds CPU-only packed per-head T=1 decode GEMM parity and stride/view contract coverage, with no GPU timing or performance claim.
 - **#200** docs refresh merged as `e253bba`; carries the matrix through #198 while preserving profile-v17 counts and the real-GPU P0 blocker.
 - **#201** `opt/gpu-measure-v3` merged as `c25aa9f`; marks forced-CPU smoke summaries with schema version 2, actual device, timing scope, and reason, with no GPU timing or speedup claim.
-- **Current tip #201** `opt/gpu-measure-v3` is at `c25aa9f`; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#202** docs refresh merged as `3d3d1fe`; carries the matrix through #201 and preserves the real-GPU P0 blocker.
+- **#203** `opt/prefetch-v4` merged as `9669e06`; gates unavailable-CUDA H2D staging before stream/event construction and adds CPU-safe skip-reason coverage, with no GPU timing or overlap claim.
+- **#204** `opt/profile-v18` merged as `5995a7c`; matched CPU counts remain flat versus profile-v17 (`copy_`=2/12/394 per call, `cat=0`, `contiguous=0`), with no GPU timing or speedup claim.
+- **Current tip #204** `opt/profile-v18` is at `5995a7c`; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
