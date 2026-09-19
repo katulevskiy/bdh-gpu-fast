@@ -313,6 +313,21 @@ def test_invalid_threshold_raises(monkeypatch):
         attn_auto_threshold()
 
 
+@pytest.mark.parametrize(
+    "env_name,getter",
+    [
+        ("BDH_ATTN_AUTO_THRESHOLD", attn_auto_threshold),
+        ("BDH_ATTN_AUTO_COLD_THRESHOLD", attn_auto_cold_threshold),
+    ],
+)
+def test_negative_thresholds_raise(monkeypatch, env_name, getter):
+    """The two AUTO gates reject negative thresholds rather than dispatching."""
+    monkeypatch.setenv(env_name, "-1")
+    _bump_caches()
+    with pytest.raises(ValueError, match=env_name):
+        getter()
+
+
 def test_auto_prefers_triton_when_available(monkeypatch):
     """Document AUTO → triton on CUDA+Triton, else blocked (#55 CPU path)."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
@@ -340,4 +355,3 @@ def test_backend_info_auto_decode_fields(monkeypatch):
     assert info["auto_decode_prefers"] in ("triton", "blocked")
     assert "auto_cold_prefers" in info
     assert info["auto_cold_prefers"] == info["auto_decode_prefers"]
-
