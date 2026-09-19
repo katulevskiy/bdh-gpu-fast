@@ -229,6 +229,33 @@ def test_forced_cpu_ext_takes_precedence_over_cuda_flag():
     assert "pure-Python install" not in output
 
 
+def test_forced_cpu_ext_precedes_valid_nvcc(tmp_path):
+    """CPU-only mode must win even when an executable nvcc is discoverable."""
+    cuda_home = tmp_path / "cuda-home"
+    nvcc = cuda_home / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "BDH_FORCE_CPU_EXT": "1",
+            "CUDA_HOME": str(cuda_home),
+            "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
+            "PATH": str(nvcc.parent),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "Building bdh_cuda_ext WITH CUDA" not in output
+    assert "skipping CUDA extension build" not in output
+
+
 @pytest.mark.parametrize("value", ["0", "true", "yes"])
 def test_non_one_extension_flag_remains_pure_python_noop(value):
     """Only the exact opt-in value may enter native extension setup."""
