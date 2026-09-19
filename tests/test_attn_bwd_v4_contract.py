@@ -63,6 +63,26 @@ def test_t1_excludes_self_attention_in_output_and_backward(impl, v_heads):
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 @pytest.mark.parametrize("v_heads", [1, 3])
+def test_empty_sequence_preserves_zero_shape_and_backward_contract(impl, v_heads):
+    """An empty strict-tril sequence stays empty with zero-shaped gradients."""
+    Q = torch.empty(2, 3, 0, 4, dtype=torch.float64, requires_grad=True)
+    K = torch.empty(2, 3, 0, 4, dtype=torch.float64, requires_grad=True)
+    V = torch.empty(2, v_heads, 0, 5, dtype=torch.float64, requires_grad=True)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    assert out.shape == (2, 3, 0, 5)
+    assert out.numel() == 0
+
+    out.sum().backward()
+    assert Q.grad is not None and K.grad is not None and V.grad is not None
+    assert Q.grad.shape == Q.shape
+    assert K.grad.shape == K.shape
+    assert V.grad.shape == V.shape
+    assert Q.grad.numel() == K.grad.numel() == V.grad.numel() == 0
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
 @pytest.mark.parametrize("query", [0, 3, 4])
 def test_single_query_backward_only_reaches_strict_past(impl, v_heads, query):
     """A loss at query q can reach Q[q], but only K/V positions j < q."""
