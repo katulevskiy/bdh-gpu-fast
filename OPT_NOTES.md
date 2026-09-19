@@ -306,11 +306,15 @@ python benchmarks/profile_forward.py --mode generate --new-tokens 32
 Same cfg as `bench_forward.py` (4 layers, d=128, B=4, T=128; gen 16→+32).
 Use **percentages**, not absolute ms (profiler inflates wall time heavily).
 
+**Superseded for ranking:** early-day snapshot below still useful historically;
+**post-#19–#22** numbers (cats gone, RoPE cached, fuse-scorev landed under
+`blocked`) live in **§ opt/profile-v2** at tip `3d3ed2b`.
+
 | Mode | Top self-CPU ops (approx) | Takeaway |
 |------|---------------------------|----------|
 | Attention | `mul` ~28%, `copy_` ~20%, `bmm` ~12%, RoPE trig ~20%, `tril_` ~6% | Full TxT `bmm` then mask; RoPE + copies expensive on CPU |
 | Forward | `copy_` ~23%, `mul` ~16%, `bmm` ~13%, LN ~9%, `mm` ~7%, ReLU ~7% | Matmul + memory movement; compile/fuse candidates |
-| Generate | `bmm` ~42%, `mm` ~28%, LN ~11%, `cat` ~10% | Incremental GEMM dominates; **cache `cat` is the memory tax** |
+| Generate | `bmm` ~42%, `mm` ~28%, LN ~11%, `cat` ~10% | Incremental GEMM dominates; **cache `cat` was the memory tax** (gone after #20) |
 
 ## opt/cache-pack — packed KR/V cache (2026-09-19)
 
@@ -1413,3 +1417,43 @@ Inductor CPU can differ from eager at ~1e-7–1e-6; tests use `atol=1e-5`, not
 - No attention math / Parameter layout changes
 - No default `BDH_COMPILE=1` on `train.py` (stays opt-in; `train_fast` still
   setdefaults to 1)
+
+## opt/profile-v2 — re-profile after #19–#22 (2026-09-19)
+
+**Branch:** `opt/profile-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `3d3ed2b` (main after triton-decode2 #19, cache-v2 #20, fuse-scorev #21, compile-harden #22).
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+Absolute ms are **profiler-inflated**. Rank by **% self CPU** (and call counts).
+Chrome traces under `benchmarks/traces/` (gitignored).
+
+### New % breakdown (self CPU)
+
+| Mode | Top self-CPU ops | Takeaway vs pre-#19 snapshot |
+|------|------------------|------------------------------|
+| Attention | `bmm` ~36%, `mul` ~19%, `copy_` ~11%, `tril` ~7%, `sub` ~5% | Still full T×T eager score×V; RoPE trig no longer a top line (table cache #18) |
+| Forward | `bmm` ~29%, `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, `clamp_min_` ~4%, LN ~3.5%, `tril` ~3% | GEMM + copies dominate; compile (#22) / GPU fuse still the lever |
+| Generate | `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3% | **`aten::cat` = 0** (was ~10% self / hundreds of calls). Remaining tax is decode GEMM + host copies |
+
+### Confirmed landed (profile-visible)
+
+- **#20 cache-v2:** generate mode has **no `aten::cat` events** in the full profiler table.
+- **#21 fuse-scorev:** online/blocked path in-tree; **default `BDH_ATTN_IMPL=eager`**, so this re-profile still shows eager `bmm`+`tril` (expected).
+- **#18 rope-cache / #22 compile-harden:** docs + CPU parity; not claimed as GPU wins.
+
+### Ranked follow-ups
+
+See updated `OPT_BACKLOG.md`: P0 = GPU measure of fused score×V; P1 = compile GPU + decode GEMM/copy; cache-cat / fuse-scorev / compile-CPU rows struck as done.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal / SDPA
+- No GPU speedup claims from these CPU % figures
