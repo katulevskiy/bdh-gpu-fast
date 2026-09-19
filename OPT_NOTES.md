@@ -5227,9 +5227,55 @@ isolated `copy_` remains 18. Defaults are unchanged (`BDH_ATTN_IMPL=eager`,
 lower-triangular `tril(-1)`. This box has no GPU, so no GPU timing, kernel win,
 or speedup is claimed.
 
+## opt/ln-resid-v2 — residual/LN audit probe (2026-09-19)
+
+**Branch:** `opt/ln-resid-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `6f91417` (`main`, #104 profile-v10).
+
+### Audit verdict
+
+This is a **probe-only** revision: the tip already contains the safe #51
+residual deepen (`LN(yMLP)` → `y.add_(x)` → `LN(y)`). On CPU with torch
+2.14.0+cu130, the residual-only profile is exactly **2×
+`aten::native_layer_norm` + 1× `aten::add_`**, with no `aten::add`,
+`aten::copy_`, `aten::cat`, `aten::to`, or `aten::_to_copy`. The model inputs
+remain unmodified.
+
+The remaining two LayerNorm calls each necessarily return a fresh normalized
+output; the native schema is:
+
+```text
+aten::native_layer_norm(Tensor, SymInt[], Tensor?, Tensor?, float)
+  -> (Tensor, Tensor, Tensor)
+```
+
+There is no eager affine-free fused add+LayerNorm or out-buffer LayerNorm API
+in this torch build. A manual in-place LayerNorm would change accumulation /
+gradient behavior and is not a safe default. The fp32, fp16, and bf16 probes
+show no explicit dtype bounce on the existing path.
+
+### What landed
+
+- `tests/test_ln_resid_probe.py` locks the operator-count and dtype audit.
+- No model/default/attention behavior changed; no fake optimization was landed.
+- Existing `F.layer_norm` + inner-output reuse remains the recommended path
+  until a validated fused kernel or newer safe API is available.
+
+### Correctness / limits
+
+```bash
+python -m pytest tests/test_ln_resid_probe.py tests/test_compile.py \
+  tests/test_vs_baseline.py -q
+```
+
+The box is CPU-only (`cuda=False`), so this records no GPU claim.
+
 ### Non-goals
 
 - No PRs to `pathwaycom/*`; private repo only; no public PR
 - No default attention/RoPE implementation change
 - No softmax / scale / SDPA / diagonal inclusion
 - No GPU claims from CPU profiler percentages or copy_ counts
+- No RMSNorm / affine-LN semantic change
+- No attention math or default change
+- No GPU claims from CPU operator counts
