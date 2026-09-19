@@ -97,8 +97,12 @@ class Attention(torch.nn.Module):
     def rope(phases, v, out: Optional[torch.Tensor] = None, cos_sin=None):
         """Rotate adjacent pairs into ``out`` (or a fresh empty_like).
 
-        Avoids a full-size ``v_rot`` temporary. When ``cos_sin`` is provided,
-        skips recomputing cos/sin (shared across layers in one forward).
+        When ``cos_sin`` is provided, skips recomputing cos/sin (shared across
+        layers / ``rope_cos_sin`` cache). Dispatch via ``BDH_ROPE_IMPL``:
+
+        - ``eager`` (default): strided even/odd path (historical; bit-identical)
+        - ``fused``: pair-contiguous pure PyTorch; Triton on CUDA when usable
+
         Skips redundant casts when dtypes already match ``v``.
         """
         if cos_sin is None:
@@ -106,26 +110,9 @@ class Attention(torch.nn.Module):
         else:
             phases_cos, phases_sin = cos_sin
 
-        if out is None:
-            out = torch.empty_like(v)
-        elif out is v:
-            raise ValueError("rope out= must not alias v")
+        from kernels.rope_dispatch import bdh_rope_rotate
 
-        ve = v[..., 0::2]
-        vo = v[..., 1::2]
-        ce = phases_cos[..., 0::2]
-        se = phases_sin[..., 0::2]
-        co = phases_cos[..., 1::2]
-        so = phases_sin[..., 1::2]
-
-        if v.dtype != phases_cos.dtype:
-            # Match baseline cast-then-add rounding when phases are fp32 and v is not.
-            out[..., 0::2] = (ve * ce).to(v.dtype) + ((-vo) * se).to(v.dtype)
-            out[..., 1::2] = (vo * co).to(v.dtype) + (ve * so).to(v.dtype)
-        else:
-            out[..., 0::2] = ve * ce - vo * se
-            out[..., 1::2] = vo * co + ve * so
-        return out
+        return bdh_rope_rotate(v, phases_cos, phases_sin, out=out)
 
     def _rope_phases(self, T: int, rope_start: int, device):
         assert self.freqs.dtype == torch.float32

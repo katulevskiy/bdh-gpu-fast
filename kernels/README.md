@@ -40,6 +40,8 @@ Default remains **eager**.
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref (full + decode) |
+| `rope.py` | RoPE rotate: eager / fused PyTorch / optional Triton |
+| `rope_dispatch.py` | `BDH_ROPE_IMPL` → `bdh_rope_rotate()` |
 
 ## Python API (`kernels/cuda_attn.py`)
 
@@ -73,3 +75,12 @@ skip CUDA paths and still validate the CPU reference.
 - Shared Q/K/V tiles; accumulate `score×V` in registers — **no global T×T**
 - Falls back to a per-element fused loop if dynamic smem would exceed 48 KiB
 - Decode kernel unchanged (packed past; see `opt/cuda-decode`)
+
+## RoPE rotate (`BDH_ROPE_IMPL`)
+
+| Value | Backend |
+|-------|---------|
+| `eager` (default) | Strided even/odd (historical `Attention.rope`) |
+| `fused` | Pair-contiguous pure PyTorch; Triton on CUDA when usable |
+
+`rope_cos_sin` caching stays in `bdh.Attention`. Modules: `rope.py`, `rope_dispatch.py`.
