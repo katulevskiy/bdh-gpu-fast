@@ -82,6 +82,34 @@ def test_enforced_guardrail_failure_returns_distinct_exit(monkeypatch, capsys):
     assert "exit_code=2 reason=guardrail_failed" in captured.err
 
 
+def test_enforced_guardrail_checks_final_sample(monkeypatch, capsys):
+    """An earlier passing sample must not hide a failing final sample."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [
+            {"x": 0.20, "y": 0.25, "xy": 0.08},
+            {"x": 0.19, "y": 0.25, "xy": 0.07},
+        ],
+    )
+
+    def unexpected_crossover(**_):
+        raise AssertionError("a failing final sample must stop crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(["--enforce-density-guardrail"])
+        == probe.EXIT_DENSITY_GUARDRAIL
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=fail" in captured.out
+    assert "final_x=0.1900 final_xy=0.0700" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=2 reason=guardrail_failed" in captured.err
+
+
 def test_enforced_guardrail_fails_when_only_xy_misses_floor(monkeypatch, capsys):
     """Both final density floors are required; one miss must still stop work."""
     monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
