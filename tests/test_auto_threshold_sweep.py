@@ -46,6 +46,43 @@ def test_threshold_sweep_smoke_dedupes_and_preserves_cold_gate(monkeypatch, caps
     assert "cold_thr=256" in output
 
 
+def test_threshold_sweep_mirrors_decode_gate_when_cold_is_unset(monkeypatch):
+    """Each child gets its own strict cold gate when no override is supplied."""
+    seen: list[tuple[int, int | None, str | None]] = []
+
+    def fake_run_auto_ab(args, device):
+        assert device.type == "cpu"
+        seen.append(
+            (args.auto_threshold, args.auto_cold_threshold, args.auto_threshold_sweep)
+        )
+        return 0
+
+    monkeypatch.setattr(bench_generate, "run_auto_ab", fake_run_auto_ab)
+    args = argparse.Namespace(
+        auto_threshold_sweep="0, 8, 0",
+        auto_cold_threshold=None,
+    )
+
+    assert bench_generate.run_auto_ab_sweep(args, torch.device("cpu")) == 0
+    assert seen == [(0, 0, None), (8, 8, None)]
+
+
+def test_threshold_sweep_reports_malformed_input_without_dispatch(monkeypatch, capsys):
+    """Malformed input is a CLI error and never starts an AUTO child run."""
+
+    def unexpected_run_auto_ab(*args):
+        raise AssertionError("malformed sweep must not dispatch")
+
+    monkeypatch.setattr(bench_generate, "run_auto_ab", unexpected_run_auto_ab)
+    args = argparse.Namespace(
+        auto_threshold_sweep="16,,32",
+        auto_cold_threshold=8,
+    )
+
+    assert bench_generate.run_auto_ab_sweep(args, torch.device("cpu")) == 2
+    assert "ERROR: threshold sweep contains an empty item" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("raw", ["", "1,,2", "-1,2", "nope,2"])
 def test_threshold_sweep_rejects_malformed_values(raw):
     with pytest.raises(ValueError):

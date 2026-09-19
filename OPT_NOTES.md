@@ -7117,3 +7117,16 @@ CPU change in this matched profile.
 - Added a CPU smoke proving the default-off path does not call training or the
   crossover sweep. `BDH_SPARSE_PROBE=1` remains the only opt-in; production
   sparse wiring is unchanged and this CPU-only run claims no sparse win.
+
+
+## opt/auto-thr-v4 — deepen CPU AUTO threshold gate smoke (2026-09-19)
+
+**Branch:** `opt/auto-thr-v4` from `86ba7df` (private `katulevskiy/bdh-gpu-opt`
+only; no public PR and no PRs to `pathwaycom/*`).
+
+The post-#149 sweep smoke now also checks that an omitted cold threshold mirrors
+each de-duplicated decode threshold independently, including the zero boundary.
+Malformed dispatcher input is exercised as a CLI error and verified not to start
+an AUTO child run. This remains CPU-only control-flow coverage: eager and
+`BDH_ATTN_AUTO`-off defaults are unchanged, attention remains raw scores ×
+`tril(diagonal=-1)`, and no GPU timing, correctness, or win claim is made.
