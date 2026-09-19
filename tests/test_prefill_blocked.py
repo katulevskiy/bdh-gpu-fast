@@ -135,6 +135,28 @@ def test_batched_strict_tril_raw_score_contract_partial_tile(impl, value_heads):
     assert torch.equal(got, expected)
 
 
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_bdh_attn_long_prefill_keeps_exact_raw_score_contract(impl, value_heads):
+    """Dispatcher-selected long prefill keeps strict-tril raw-score math."""
+    B, H, T, N, D = 2, 2, 257, 1, 2
+    Q = torch.arange(1, 1 + B * H * T * N, dtype=torch.float64).view(
+        B, H, T, N
+    )
+    K = torch.arange(3, 3 + B * H * T * N, dtype=torch.float64).view(
+        B, H, T, N
+    )
+    V = torch.arange(5, 5 + B * value_heads * T * D, dtype=torch.float64).view(
+        B, value_heads, T, D
+    )
+    expected = torch.tril(Q @ K.transpose(-2, -1), diagonal=-1) @ V
+
+    got = bdh_attn(Q, K, V, impl=impl)
+
+    assert torch.equal(got, expected)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 @pytest.mark.parametrize("T", [256, 512, 1024])
 def test_blocked_online_parity_long_t(T):
     Q, K, V = _qkv(T, seed=T)
