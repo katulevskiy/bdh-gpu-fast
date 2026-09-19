@@ -36,6 +36,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold`) — GPU measure still P0
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
 - Compile-friendly LN+residual: `F.layer_norm` only, functional residual, no `is_grad_enabled` product branch (`opt/ln-compile`)
+- CPU train-step `BDH_COMPILE=0` vs `1` microbench via `maybe_compile` (soft-skip if inductor missing) (`opt/compile-bench`)
 
 ## Ranked next work
 
@@ -43,7 +44,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + cold CUDA **tiled** scaffold (`opt/cuda-cold`) + Triton scaffolds in-tree; **harness landed** `benchmarks/bench_gpu_attn.py` — **no CUDA on this box**. | A100/H100 microbench vs eager; bit-identical | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
-| **P1** | **`torch.compile` GPU parity / train bench** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. Compile path hardened (#22); **GPU inductor / CUDA graphs unmeasured**. | GPU compile train step vs eager | Low |
+| **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU** `BDH_COMPILE=0` vs `1` train-step bench landed (`opt/compile-bench`, soft-skip if inductor missing). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` (+ `reduce-overhead`) via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). **`opt/decode-copy`:** CacheManager `reserve` + in-place RoPE → generate `Tensor.copy_` **265→133** (V-only + prompt); still cat-free / `tril(-1)`. Remaining: decode GEMM kernel. | GPU decode kernel bench; keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
@@ -57,7 +58,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 |-----|--------|
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21 under `BDH_ATTN_IMPL=blocked\|online` (CPU slower; GPU measure = P0) |
-| `torch.compile` / inductor CPU harden | **Landed** #17+#22; remaining = GPU measure (P1) |
+| `torch.compile` / inductor CPU harden | **Landed** #17+#22; CPU 0-vs-1 train bench `opt/compile-bench`; remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
 
@@ -72,7 +73,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 ## Suggested order
 
 1. GPU: bench eager vs blocked/online vs Triton vs CUDA fused score×V (cold + T=1 decode)
-2. GPU: `BDH_COMPILE=1` train-step vs eager (after #22 probe)
+2. GPU: `BDH_COMPILE=0` vs `1` train-step (CPU harness ready in `bench_train_step.py`; try `reduce-overhead` on CUDA)
 3. ~~Cache preallocate / cat-free generate~~ (**done** `opt/cache-v2` #20)
 4. ~~RoPE fuse~~ (**done** `opt/rope-fuse`) / sparsity density / dtype
 
@@ -105,3 +106,23 @@ python benchmarks/bench_gpu_attn.py
 Record: GPU name, torch/CUDA versions, median ms per backend, `bit_identical`
 and `max|Δ|` vs eager. **Do not** claim wins from CPU medians; keep default
 `BDH_ATTN_IMPL=eager` until GPU data lands. Private repo only — not pathwaycom.
+
+## GPU next step — `BDH_COMPILE` train-step (after CPU harness)
+
+CPU sandbox now has an **honest** A/B in `benchmarks/bench_train_step.py`
+(`BDH_COMPILE=0` vs `1` via `train.maybe_compile`; soft-skip if inductor/CXX
+missing). **Do not** treat CPU medians as GPU wins.
+
+On an A100/H100 box:
+
+```bash
+# eager vs compiled train-step (default mode=default, probe=train)
+BDH_BENCH_COMPILE=1 python benchmarks/bench_train_step.py
+
+# CUDA-graph-oriented (static B×T; see train_fast.py)
+BDH_BENCH_COMPILE=1 BDH_COMPILE_MODE=reduce-overhead python benchmarks/bench_train_step.py
+```
+
+Record: GPU name, torch/CUDA, median ms for `BDH_COMPILE=0` and `=1`, whether
+`_orig_mod` stuck (true compile) vs soft fallback, and `reduce-overhead` note.
+Private repo only — never `pathwaycom/*`.

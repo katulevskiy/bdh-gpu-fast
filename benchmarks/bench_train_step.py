@@ -1,10 +1,15 @@
 """Microbench: train-step variants (fused AdamW, set_to_none, compile path).
 
-Also used by opt/train-fuse to document CPU honesty after sync-light logging.
+Also used by opt/train-fuse / opt/compile-bench to document CPU honesty.
 
 CPU-honest: no CUDA on the default runner. Measures median step time for a
-tiny BDH config. Compile is opt-in (BDH_BENCH_COMPILE=1) because inductor
-warmup is long on CPU.
+tiny BDH config.
+
+BDH_COMPILE=0 vs 1 (opt/compile-bench):
+  Always attempted unless BDH_BENCH_COMPILE=0. Uses train.maybe_compile so
+  inductor / CXX / probe failures soft-skip (print + return) instead of
+  crashing. Same weights, same AdamW path, same fixed batch — honest A/B.
+  Absolute ms are CPU-only; do not claim GPU / CUDA-graph wins here.
 """
 
 from __future__ import annotations
@@ -61,6 +66,11 @@ def _batch(device, B=4, T=64):
     return x, y
 
 
+def _is_dynamo_compiled(model: torch.nn.Module) -> bool:
+    """True when torch.compile wrapped the module (OptimizedModule._orig_mod)."""
+    return getattr(model, "_orig_mod", None) is not None
+
+
 def make_legacy_step(model, device):
     """Upstream-ish: plain AdamW, zero_grad() (zeros), no set_to_none."""
     opt = torch.optim.AdamW(
@@ -97,6 +107,103 @@ def make_opt_step(model, device, fused=True):
         return loss
 
     return step
+
+
+def bench_compile_vs_eager(cfg, device, fused_ok: bool) -> None:
+    """Honest BDH_COMPILE=0 vs 1 train-step medians via maybe_compile.
+
+    Soft-skips (prints reason, no exception) if inductor/CXX/probe unavailable.
+    CPU box: report wall medians only — GPU / reduce-overhead is OPT_BACKLOG next.
+    """
+    print("--- BDH_COMPILE=0 vs 1 (honest train-step) ---")
+    print(
+        f"device={device} mode={os.environ.get('BDH_COMPILE_MODE', tr.COMPILE_MODE)} "
+        f"probe={os.environ.get('BDH_COMPILE_PROBE', tr.COMPILE_PROBE)} "
+        f"cuda={torch.cuda.is_available()}"
+    )
+
+    torch.manual_seed(0)
+    m_eager = bdh.BDH(cfg).to(device)
+    m_eager.train()
+    x, y = _batch(device)
+    assert not _is_dynamo_compiled(m_eager)
+
+    # --- eager (BDH_COMPILE=0): plain module, no maybe_compile ---
+    opt0 = torch.optim.AdamW(
+        m_eager.parameters(),
+        lr=tr.LEARNING_RATE,
+        weight_decay=tr.WEIGHT_DECAY,
+        fused=fused_ok,
+    )
+
+    def step0():
+        return tr.train_step(m_eager, opt0, x, y)
+
+    t0 = timed(step0, warmup=3, reps=12)
+    print(f"BDH_COMPILE=0 (eager) train_step median: {t0*1000:.2f} ms")
+
+    # --- compiled (BDH_COMPILE=1): maybe_compile soft-fallback ---
+    torch.manual_seed(0)
+    m1_src = bdh.BDH(cfg).to(device)
+    m1_src.load_state_dict(m_eager.state_dict())
+    m1_src.train()
+
+    was = tr.USE_COMPILE
+    tr.USE_COMPILE = True
+    try:
+        m1 = tr.maybe_compile(m1_src, example_x=x, example_y=y)
+    except Exception as e:
+        tr.USE_COMPILE = was
+        print(
+            f"skip compile bench: maybe_compile raised "
+            f"{type(e).__name__}: {e}"
+        )
+        return
+    tr.USE_COMPILE = was
+
+    if not _is_dynamo_compiled(m1):
+        print(
+            "skip compile bench: torch.compile unavailable or probe fell back "
+            "to eager (see maybe_compile log above). Soft-skip — not a hard fail."
+        )
+        return
+
+    opt1 = torch.optim.AdamW(
+        m1.parameters(),
+        lr=tr.LEARNING_RATE,
+        weight_decay=tr.WEIGHT_DECAY,
+        fused=fused_ok,
+    )
+
+    def step1():
+        return tr.train_step(m1, opt1, x, y)
+
+    # Inductor first steps already probed inside maybe_compile; short extra warm.
+    try:
+        t1 = timed(step1, warmup=2, reps=10)
+    except Exception as e:
+        print(
+            f"skip compile bench: compiled train_step failed "
+            f"({type(e).__name__}: {e}). Soft-skip."
+        )
+        return
+
+    ratio = t0 / t1 if t1 > 0 else float("inf")
+    print(f"BDH_COMPILE=1 (compiled) train_step median: {t1*1000:.2f} ms")
+    print(
+        f"ratio eager/compiled: {ratio:.2f}x  "
+        f"(>1 means compile faster on this device)"
+    )
+    if device.type != "cuda":
+        print(
+            "honest: CPU inductor medians only — no CUDA-graph / GPU claim. "
+            "Next: GPU BDH_COMPILE=0 vs 1 (see OPT_BACKLOG)."
+        )
+    else:
+        print(
+            "GPU box: also try BDH_COMPILE_MODE=reduce-overhead for CUDA graphs "
+            "(static B×T; see train_fast.py)."
+        )
 
 
 def main():
@@ -157,33 +264,15 @@ def main():
     print(f"zero_grad fill median:      {t_fill*1000:.2f} ms")
     print(f"zero_grad set_to_none median: {t_none*1000:.2f} ms  ({t_fill/t_none:.2f}x)")
 
-    if os.environ.get("BDH_BENCH_COMPILE", "0") in ("1", "true", "True"):
-        print("BDH_BENCH_COMPILE=1 — warming torch.compile (can take minutes on CPU)...")
-        torch.manual_seed(0)
-        m_c = torch.compile(
-            bdh.BDH(cfg).to(device),
-            mode=os.environ.get("BDH_COMPILE_MODE", "default"),
-        )
-        opt_c = torch.optim.AdamW(
-            m_c.parameters(), lr=1e-3, weight_decay=0.1, fused=fused_ok
-        )
-        x, y = _batch(device)
-
-        def step_c():
-            return tr.train_step(m_c, opt_c, x, y)
-
-        for _ in range(2):
-            step_c()
-        t_c = timed(step_c, warmup=2, reps=10)
-        print(
-            f"train_step compiled median: {t_c*1000:.2f} ms  "
-            f"({t_fused/t_c:.2f}x vs fused eager)"
-        )
+    # Default on: honest BDH_COMPILE=0 vs 1. Opt out with BDH_BENCH_COMPILE=0
+    # (legacy fused/zero_grad-only runs). Soft-skip inside if inductor missing.
+    if os.environ.get("BDH_BENCH_COMPILE", "1") in ("1", "true", "True"):
+        bench_compile_vs_eager(cfg, device, fused_ok)
     else:
-        print("skip compile bench (set BDH_BENCH_COMPILE=1 to enable)")
+        print("skip compile bench (set BDH_BENCH_COMPILE=1 to enable; default is on)")
 
     print(
-        "Note: CUDA graphs / reduce-overhead need a GPU; see train_fast.py comments."
+        "Note: CUDA graphs / reduce-overhead need a GPU; see train_fast.py + OPT_BACKLOG."
     )
 
 
