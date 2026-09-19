@@ -244,3 +244,41 @@ If `bdh.py` is contended: keep calling `kernels.attention_dispatch.bdh_attn` fro
 - No Cursor cloud agents
 - No PRs to `pathwaycom/bdh`
 - No softmax / diagonal inclusion
+
+## opt/cuda-ext — native tril score×V scaffold (2026-09-19)
+
+### Goal
+CUDA/C++ extension scaffold for BDH’s strict lower-triangular attention
+`(Q@K.T).tril(diagonal=-1) @ V` — **no softmax, no scale, diagonal excluded**.
+
+### What landed
+- `csrc/` — `tril_attn_cuda.cu` (naive fused kernel), CPU C++ path, pybind
+- `kernels/cuda_attn.py` — public API: `tril_score_v_ref` (always) + `tril_score_v` (dispatch)
+- `setup.py` / `pyproject.toml` — optional package; native compile **opt-in**
+- `tests/test_cuda_attn.py` — CPU ref always asserted; CUDA/native skipped if absent
+- `kernels/README.md` — build docs
+
+### Build
+```bash
+pip install -e .                                 # pure Python (default)
+BDH_BUILD_EXT=1 pip install -e . --no-build-isolation
+BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+```
+
+### Correctness (this box)
+```text
+.venv/bin/python -m pytest tests/ -v
+# 20 passed, 3 skipped
+#   test_cuda_attn: 6 passed (CPU ref), 3 skipped (no bdh_cuda_ext / no CUDA)
+```
+
+### Honest status
+- **Positive:** CPU reference is correct and ready; CUDA `.cu` scaffold is in-tree
+  for a real GPU + matching nvcc/torch toolchain.
+- **This machine:** CPU-only (`cuda=False`). Default `pip install -e .` does not
+  compile. `BDH_BUILD_EXT=1` fails here (torch 2.14 headers vs g++ 14
+  `at::symint::sizes` error) — documented, not blocking.
+- **Not wired into `bdh.py` cold path yet** — call
+  `from kernels.cuda_attn import tril_score_v` when integrating; keeps default
+  training path unchanged until GPU validation.
+- Still **do not** use `F.scaled_dot_product_attention`.
