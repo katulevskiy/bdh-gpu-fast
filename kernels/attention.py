@@ -38,7 +38,14 @@ def eager_tril_attn(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.
 DEFAULT_BLOCK_COLD = 64
 DEFAULT_BLOCK_DECODE = 256
 # Soft cap on score elements (Tq * tile) before preferring another tile split.
+# Cold blocked past-region keeps this large budget (BLAS-friendly oneshot).
 _SCORE_ELEMS_BUDGET = 256 * 256
+# Decode-online-v2: tighter oneshot for T=1 vs packed KR/V. Above this many
+# score elements (Tq*S), blocked/online decode *tiles* so peak score mem is
+# ~Tq×tile (not Tq×S). Also avoids a CPU broadcast-V oneshot cliff at long S
+# (measured ~8–10× vs tiled at S=4096, B=4 H=4). Per-head V still oneshots
+# under the large cold budget (BH-bmm likes big GEMMs).
+_DECODE_ONESHOT_ELEMS = 2048
 
 
 def _expand_v_heads(V: torch.Tensor, B: int, H: int, S: int, D: int) -> torch.Tensor:
@@ -92,19 +99,28 @@ def _pick_triton_cold_tiles(
     return block_m, block_n, block_d, block_k
 
 
-def _pick_tile_size(S: int, Tq: int, block_size: int) -> int:
+def _pick_tile_size(
+    S: int,
+    Tq: int,
+    block_size: int,
+    *,
+    score_budget: int | None = None,
+) -> int:
     """Choose a past-axis tile width: larger tiles ⇒ fewer Python loop trips.
 
-    Still bounds peak score memory roughly by ``Tq * tile`` via ``_SCORE_ELEMS_BUDGET``.
+    Bounds peak score memory roughly by ``Tq * tile`` via ``score_budget``
+    (default ``_SCORE_ELEMS_BUDGET``; decode passes ``_DECODE_ONESHOT_ELEMS``).
     """
     BS = max(1, int(block_size))
+    budget = _SCORE_ELEMS_BUDGET if score_budget is None else max(1, int(score_budget))
     if S <= BS:
         return S if S > 0 else BS
     # Aim for a modest number of tiles on the hot Tq=1 decode path.
+    # Long past: fewer tiles (larger GEMMs) — better CPU wall + still ≪ Tq×S peak.
     if Tq <= 4:
-        target_tiles = 8
+        target_tiles = 4 if S >= 4096 else (6 if S >= 2048 else 8)
         want = max(BS, (S + target_tiles - 1) // target_tiles)
-        max_by_budget = max(BS, _SCORE_ELEMS_BUDGET // max(Tq, 1))
+        max_by_budget = max(BS, budget // max(Tq, 1))
         return min(S, want, max_by_budget)
     return min(S, BS)
 
@@ -143,12 +159,14 @@ def _tiled_score_v(
     K: torch.Tensor,
     Vh: torch.Tensor,
     block_size: int,
+    *,
+    oneshot_elems: int | None = None,
 ) -> torch.Tensor:
     """``(Q @ K.mT) @ Vh`` tiled over the past axis (no tril — all keys valid).
 
     Shared by ``blocked_decode_attn`` and the past region of ``blocked_tril_attn``.
-    One-shots when the full ``(Tq × S)`` score fits the budget; otherwise loops
-    over adaptive tiles (fewer trips than a fixed small BS).
+    One-shots when the full ``(Tq × S)`` score fits ``oneshot_elems`` (default
+    ``_SCORE_ELEMS_BUDGET`` for cold); otherwise loops over adaptive tiles.
 
     ``Vh`` may be ``(B, H, S, D)`` or broadcast ``(B, 1, S, D)`` — matmul
     broadcasts heads, so decode can skip an expand copy into ``(B, H, S, D)``.
@@ -160,13 +178,28 @@ def _tiled_score_v(
     if S == 0:
         return Q.new_zeros(B, H, Tq, D)
 
-    BS = _pick_tile_size(S, Tq, block_size)
+    budget = (
+        _SCORE_ELEMS_BUDGET if oneshot_elems is None else max(1, int(oneshot_elems))
+    )
+    BS = _pick_tile_size(S, Tq, block_size, score_budget=budget)
     # Modest past / small score: single two-GEMM (same as eager decode).
     # Ephemeral ``(Tq × S)`` only — never ``(S+Tq)×(S+Tq)``.
-    if S <= BS or Tq * S <= _SCORE_ELEMS_BUDGET:
+    if S <= BS or Tq * S <= budget:
         return _two_gemm_decode(Q, K, Vh)
 
     out = Q.new_zeros(B, H, Tq, D)
+    # Tq=1: flatten Q once; reuse across past tiles (decode-online-v2).
+    if Tq == 1 and Vh.size(1) == H:
+        Qf = Q.reshape(B * H, 1, _N)
+        for j0 in range(0, S, BS):
+            j1 = min(j0 + BS, S)
+            tile = j1 - j0
+            Kj = K[:, :, j0:j1, :].reshape(B * H, tile, _N)
+            Vj = Vh[:, :, j0:j1, :].reshape(B * H, tile, D)
+            scores = torch.bmm(Qf, Kj.transpose(1, 2))
+            out.add_(torch.bmm(scores, Vj).view(B, H, 1, D))
+        return out
+
     for j0 in range(0, S, BS):
         j1 = min(j0 + BS, S)
         Kj = K[:, :, j0:j1, :]
@@ -201,6 +234,28 @@ def max_score_tile_elems(T: int, block_size: int = DEFAULT_BLOCK_COLD) -> int:
     past = min(BS * max(T - 1, 0), budget)
     diag = BS * BS
     return max(past, diag, max(0, BS - 1))
+
+
+def max_decode_score_elems(
+    S: int,
+    Tq: int = 1,
+    block_size: int = DEFAULT_BLOCK_DECODE,
+    *,
+    oneshot_elems: int = _DECODE_ONESHOT_ELEMS,
+) -> int:
+    """Upper bound on score elements for blocked/online T=1 decode vs packed KR/V.
+
+    Eager decode allocates ``Tq * S``. Blocked/online oneshots while
+    ``Tq * S <= oneshot_elems``, else tiles with peak ``Tq * tile`` where
+    ``tile = _pick_tile_size(...)``. Never ``(S+Tq)×(S+Tq)``.
+    """
+    if S <= 0 or Tq <= 0:
+        return 0
+    budget = max(1, int(oneshot_elems))
+    if Tq * S <= budget:
+        return Tq * S
+    tile = _pick_tile_size(S, Tq, block_size, score_budget=budget)
+    return Tq * tile
 
 
 def _accumulate_qk_v(
@@ -587,6 +642,11 @@ def blocked_decode_attn(
 
     Never materializes an ``(S+Tq) x (S+Tq)`` score matrix (unlike concat + full
     tril attn). Default tile is larger than cold blocked (fewer Python trips).
+
+    Decode-online-v2: broadcast-V (CacheManager layout ``(B,1,S,D)``) uses a
+    tight ``_DECODE_ONESHOT_ELEMS`` so long ``S`` tiles — lower peak score mem
+    than eager ``Tq×S``, and better CPU wall than eager oneshot when ``S`` is
+    long. Per-head ``V`` keeps the large oneshot budget (BH-bmm).
     """
     B, H, Tq, N = Q.shape
     S = K.size(2)
@@ -600,8 +660,21 @@ def blocked_decode_attn(
         return Q.new_zeros(B, H, Tq, D)
 
     # Keep broadcast V as (B,1,S,D) — matmul broadcasts heads; no expand copy.
-    # Online tiles via ``_tiled_score_v`` bound peak score memory to ~Tq×tile.
-    return _tiled_score_v(Q, K, V, block_size)
+    # Broadcast-V (generate hot path): tight oneshot → tile long S.
+    # Per-head V: large budget → BH-bmm oneshot (decode-mm).
+    broadcast_v = bool(V.size(1) == 1 and H != 1)
+    oneshot = _DECODE_ONESHOT_ELEMS if broadcast_v else _SCORE_ELEMS_BUDGET
+    return _tiled_score_v(Q, K, V, block_size, oneshot_elems=oneshot)
+
+
+def online_decode_attn(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    block_size: int = DEFAULT_BLOCK_DECODE,
+) -> torch.Tensor:
+    """Alias for deepened blocked T=1 decode (OPT / bench name)."""
+    return blocked_decode_attn(Q, K, V, block_size=block_size)
 
 
 if _HAS_TRITON:

@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#54)
+# OPT status — landed work (#1–#55)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `6e23cfe` (`#53` decode-mm on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49–#53). This PR adds `#54` amp-deepen.
+Tip documented here: `dbf2c21` (`#54` amp-deepen on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49–#54). This PR adds `#55` decode-online-v2.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -20,7 +20,7 @@ Hard constraint (all opts): attention stays **raw scores** × **strict lower-tri
 | Algorithmic wins measured on CPU | **Yes** — KV / CacheManager generate (~2.5–3×), vectorized `get_batch`, cat-free decode path, compile-friendly structure |
 | Kernel wins (Triton / CUDA fused score×V, fused RoPE, AMP train throughput) | **Not measured** — scaffolds + harnesses in-tree; GPU benches skip cleanly |
 | Default train / attn path | Still **eager** + **fp32** — opt-in env flags only |
-| CPU `blocked` / `triton` (→blocked) attn | Usually **slower** than eager (Python tile loop); keep for parity / peak-memory, not default |
+| CPU `blocked` / `triton` (→blocked) attn | Mid-S often **slower**; **long S** decode/generate can beat eager (#55); keep for peak-mem / long-S, not default |
 | CPU `BDH_COMPILE=1` | **Only with `IMPL=eager`**: ~1.5× warm train-step (#46: 5.25 vs 7.76 ms). `COMPILE=1`+blocked|online|triton = measured regression (~70–100×); `maybe_compile` warns. GPU compile still open |
 | CPU AMP (`BDH_AMP_DTYPE`) | Correctness smoke (#24+#54); often **slower** than fp32 on CPU; **throughput claim = GPU-only** |
 | Sparse ReLU | **Default OFF**; short-train densifies but not to paper ~5%; CPU sparse≪dense |
@@ -37,7 +37,7 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 | Value | Cold / prefill | T=1 decode vs packed KR/V | Notes |
 |-------|----------------|---------------------------|-------|
 | `eager` | Full `T×T` then `tril_(diagonal=-1)` | `_two_gemm_decode` (Tq=1 BH-bmm / 4D @) | **Default**; reference math |
-| `blocked` | Online / tiled fused score×V (no full `T×T`) | Tiled decode, `out.add_`, broadcast V | Lower peak score mem; CPU often slower |
+| `blocked` | Online / tiled fused score×V (no full `T×T`) | Online tiled decode (tight oneshot; peak ~Tq×tile) | Lower peak; long-S CPU wall can beat eager |
 | `triton` | Triton fused on CUDA; else blocked | Triton decode + `V_BROADCAST`; else blocked | Needs CUDA + Triton to run kernel |
 | `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` Tq=1 + `DECODE_TILE_N` | Scaffold; GPU measure open |
 
@@ -132,7 +132,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#54)
+## Landed opts (#1–#55)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -190,6 +190,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **52** | `opt/docs-matrix` (docs refresh) | Refresh OPT matrix / backlog through #51 | Docs only | — |
 | **53** | `opt/decode-mm` | T=1 decode deepen (`_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`); B=1 lm_head `mv` | ≡ eager last row; cats=0; CPU wall ~noise | GPU `--mode decode` open |
 | **54** | `opt/amp-deepen` | Harden opt-in AMP: fp16 CPU smoke, `BDH_AMP_FORWARD_ONLY`, honest AMP train_step bench, GPU-only claim | CPU smoke + bench; often ≲/≳ fp32 | GPU train AMP still open |
+| **55** | `opt/decode-online-v2` | Deepen blocked/online T=1 decode (`_DECODE_ONESHOT_ELEMS`, peak helper) | ≡ eager; cats=0; long-S peak↓ + wall↑ | GPU `--mode decode` open |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 

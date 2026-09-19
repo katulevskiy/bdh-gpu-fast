@@ -16,12 +16,15 @@ import bdh
 from bdh_cache import CacheManager
 from kernels.attention import (
     DEFAULT_BLOCK_DECODE,
+    _DECODE_ONESHOT_ELEMS,
     _pick_tile_size,
     _tiled_score_v,
     blocked_decode_attn,
     blocked_tril_attn,
     eager_decode_attn,
     eager_tril_attn,
+    max_decode_score_elems,
+    online_decode_attn,
     triton_decode_attn,
 )
 from kernels.attention_dispatch import bdh_attn_decode, resolve_attn_impl
@@ -408,3 +411,67 @@ def test_attention_t1_unified_decode_dispatch(monkeypatch):
         Q, Q, V, rope_start=0, past_kr=past_kr[:, :, :0], past_v=past_v[:, :, :0]
     )
     assert torch.all(out0 == 0)
+
+
+
+def test_online_decode_alias_matches_blocked():
+    Q, K, V = _make_decode_qkv(S=96, Tq=1, seed=5)
+    assert torch.allclose(
+        online_decode_attn(Q, K, V, block_size=32),
+        blocked_decode_attn(Q, K, V, block_size=32),
+        atol=0,
+    )
+
+
+@pytest.mark.parametrize("S", [64, 256, 1024, 4096])
+def test_blocked_decode_long_s_broadcast_v_parity(S):
+    """Decode-online-v2: long packed past, broadcast V ≡ eager (tril -1 last row)."""
+    B, H, N, D = 2, 4, 16, 32
+    g = torch.Generator().manual_seed(300 + S)
+    past_k = torch.randn(B, H, S, N, generator=g)
+    past_v = torch.randn(B, 1, S, D, generator=g)  # CacheManager layout
+    q = torch.randn(B, H, 1, N, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    last = eager_tril_attn(
+        torch.cat([past_k, q], dim=2),
+        torch.cat([past_k, q], dim=2),
+        torch.cat([past_v, v_new], dim=2),
+    )[:, :, -1:, :]
+    got = blocked_decode_attn(q, past_k, past_v)
+    online = online_decode_attn(q, past_k, past_v)
+    assert torch.allclose(got, last, rtol=1e-4, atol=1e-5)
+    assert torch.allclose(online, last, rtol=1e-4, atol=1e-5)
+
+
+def test_max_decode_score_elems_bound_vs_eager():
+    """Blocked/online decode peak score elems ≤ eager Tq×S; tiles when long S."""
+    assert _DECODE_ONESHOT_ELEMS >= DEFAULT_BLOCK_DECODE
+    for S in (64, 256, 1024, 2048, 4096):
+        peak = max_decode_score_elems(S, Tq=1)
+        eager_peak = 1 * S
+        assert peak <= eager_peak
+        if S > _DECODE_ONESHOT_ELEMS:
+            assert peak < eager_peak
+            assert peak <= _DECODE_ONESHOT_ELEMS
+
+
+def test_decode_tiles_when_past_exceeds_oneshot_budget():
+    """S > _DECODE_ONESHOT_ELEMS with broadcast V must take the tile path (parity)."""
+    S = _DECODE_ONESHOT_ELEMS + 512
+    B, H, N, D = 1, 2, 8, 16
+    g = torch.Generator().manual_seed(401)
+    Q = torch.randn(B, H, 1, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    V = torch.randn(B, 1, S, D, generator=g)
+    ref = eager_decode_attn(Q, K, V)
+    # Default block_size — policy must tile (peak bound) and match eager
+    got = blocked_decode_attn(Q, K, V)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
+    assert max_decode_score_elems(S) < S
+
+
+def test_pick_tile_size_honors_decode_score_budget():
+    """Decode budget caps tile width so Tq*tile stays within oneshot elems."""
+    tile = _pick_tile_size(8192, 1, 256, score_budget=_DECODE_ONESHOT_ELEMS)
+    assert tile <= _DECODE_ONESHOT_ELEMS
+    assert tile >= 256

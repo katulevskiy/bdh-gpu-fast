@@ -33,11 +33,11 @@ export BDH_ATTN_IMPL=blocked
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` for **all**
-impls including eager (`_two_gemm_decode`). Blocked/triton share
-`_tiled_score_v` (broadcast-V, `out.add_` tiles); Triton decode uses
-`V_BROADCAST` on CUDA (blocked fallback on CPU); CUDA decode uses
-`DECODE_TILE_N` + a dedicated **Tq=1** kernel when the ext is built.
-Default remains **eager**.
+impls including eager (`_two_gemm_decode`). Blocked/online/triton share
+`_tiled_score_v` (broadcast-V tight `_DECODE_ONESHOT_ELEMS`, `out.add_`
+tiles, peak ~Tq×tile on long S); Triton decode uses `V_BROADCAST` on CUDA
+(blocked fallback on CPU); CUDA decode uses `DECODE_TILE_N` + a dedicated
+**Tq=1** kernel when the ext is built. Default remains **eager**.
 
 ## Modules
 
