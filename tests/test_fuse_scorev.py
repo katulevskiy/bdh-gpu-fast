@@ -60,6 +60,34 @@ def test_online_blocked_match_eager_for_distinct_qk():
     assert torch.allclose(got_o, ref, rtol=1e-4, atol=1e-4)
 
 
+def test_online_blocked_grad_matches_eager_for_distinct_qk():
+    """Score×V must preserve Q/K/V gradients for distinct Q and K."""
+    Q, _, V = _make_qkv(
+        B=2, H=3, T=19, N=7, D=5, seed=41, dtype=torch.float64
+    )
+    g = torch.Generator(device="cpu").manual_seed(42)
+    K = torch.randn(Q.shape, generator=g, dtype=Q.dtype)
+    dO = torch.randn(2, 3, 19, 5, generator=g, dtype=Q.dtype)
+
+    def run(fn):
+        q = Q.detach().clone().requires_grad_(True)
+        k = K.detach().clone().requires_grad_(True)
+        v = V.detach().clone().requires_grad_(True)
+        if fn is eager_tril_attn:
+            out = fn(q, k, v)
+        else:
+            out = fn(q, k, v, block_size=7)
+        out.backward(dO)
+        return out.detach(), tuple(x.grad.detach() for x in (q, k, v))
+
+    ref, ref_grads = run(eager_tril_attn)
+    for fn in (blocked_tril_attn, online_tril_attn):
+        got, got_grads = run(fn)
+        assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10)
+        for got_grad, ref_grad in zip(got_grads, ref_grads):
+            assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+
+
 def test_pos0_zero_and_no_softmax():
     Q, K, V = _make_qkv(T=12, seed=11)
     out = online_tril_attn(Q, K, V, block_size=5)
