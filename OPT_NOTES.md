@@ -2609,10 +2609,6 @@ python benchmarks/bench_generate.py --warmup 2 --iters 5 --impls eager
 ## opt/compile-blocked — compile × blocked × autograd train matrix (2026-09-19)
 
 **Branch:** `opt/compile-blocked` (private `katulevskiy/bdh-gpu-opt` only).
-**Base tip:** `f7c69bf` (main after #45 docs refresh through #44).
-
-### Goal
-
 Prove or harden the **CPU-honest** train path for
 `torch.compile` × `BDH_ATTN_IMPL=blocked` × optional `BDH_ATTN_AUTOGRAD=1`.
 Extend the train-step harness with a full matrix; fix cheap Dynamo graph
@@ -2684,3 +2680,78 @@ of ms); use **ratios**, not absolute ms, and never as GPU claims.
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No PRs to `pathwaycom/*`
 - No GPU / CUDA-graph claims from this CPU matrix
+
+## opt/encoder-fuse — fewer encoder einsum temporaries (2026-09-19)
+
+**Branch:** `opt/encoder-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `8d56385` (main after #46 compile-blocked).
+
+### Goal
+
+Cut encoder / encoder_v `einsum` + bias+ReLU temporaries on the hot forward
+path. Try a fused linear-style path while staying bit-identical at `dropout=0`.
+Hard constraints: `tril(diagonal=-1)` unchanged; Parameter shapes / `state_dict`
+unchanged; defaults unchanged.
+
+### Attempt
+
+| Candidate | Result (CPU, `OMP=2`) |
+|-----------|------------------------|
+| Always-on `F.linear` for `_encoder_relu` via `(nh,D,N)→(nh*N,D)` | **Loses** — transpose+reshape copies weight each call; full forward ~9.6 ms vs einsum ~9.0 ms |
+| `matmul` + `permute→contiguous` for `_encoder_v_relu` | **Loses** — extra activation contig copy (~0.32 vs ~0.21 ms) |
+| Cached / pre-transposed `(nh*N,D)` Parameter | **Rejected** — would change `state_dict` shapes vs baseline |
+
+### What landed (`bdh.py`)
+
+1. **`_hdn_as_linear_weight`** — documented `(nh,D,N)→(nh*N,D)` helper for the
+   optional bias path / benches.
+2. **`_encoder_relu` hybrid**
+   - **Default (`bias is None`)** — keep `einsum("btd,hdn->bthn")` + in-place
+     ReLU (writes contiguous `(B,T,nh,N)` without a weight transpose-copy).
+   - **Optional bias** — `F.linear` with bias fused in the GEMM epilogue, then
+     `view(B,T,nh,N)` + in-place ReLU. Bit-identical to `F.relu(einsum+bias)`.
+3. **`_encoder_v_relu`** — stays on einsum + `_bias_relu_` (matmul+contig lost).
+
+Preserved: `tril(diagonal=-1)`, `CacheManager`, `BDH_ATTN_IMPL`, RoPE / dropout /
+LN paths, baseline Parameter shapes / `state_dict` (biases remain `None`).
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_encoder_fuse.py tests/test_mlp_fuse.py \
+  tests/test_vs_baseline.py tests/test_correctness.py -q
+# encoder-fuse: linear helper, default/bias paths, encoder_v, vs baseline,
+#   state_dict shapes, attn pos0==0
+```
+
+No intentional numerical approximations at `dropout=0`.
+
+### Honest CPU numbers (`OMP_NUM_THREADS=2`, Europe/Podgorica)
+
+```text
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_encoder_fuse.py
+# device=cpu torch=2.14.0+cu130 cuda=False OMP=2
+# micro B=4 T=64 D=128 nh=4 N=256
+#   encoder einsum (default)             0.266 ms
+#   encoder F.linear + weight copy       0.328 ms  (always-on loses)
+#   encoder einsum + add_ bias           0.291 ms
+#   encoder F.linear fused bias          0.387 ms  (epilogue cleaner; wall no win)
+#   encoder_v einsum                     0.270 ms
+#   encoder_v matmul+contig              0.337 ms  (loses)
+#   full forward (landed / hybrid)       9.076 ms
+# always-on F.linear full forward       ~9.6 ms  (earlier A/B; regression — not landed)
+# pytest tests/ — 313 passed, 9 skipped
+```
+
+**Verdict:** no reliable default-path CPU wall win (einsum already best for
+`bias=None`). Land hybrid for optional fused-bias epilogue + docs of the
+always-on linear attempt. Expect GPU `F.linear` epilogue to matter more when
+biases are registered; unmeasured here.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No Parameter shape / checkpoint migration
+- No default `BDH_ATTN_IMPL` change
+- No softmax / diagonal inclusion / scale
+- No fake GPU speedups from CPU medians
