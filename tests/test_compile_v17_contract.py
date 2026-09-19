@@ -126,3 +126,55 @@ def test_backward_probe_without_targets_preserves_training_grads(
     )
     assert "probe=train_bwd requires example_y" in captured
     assert "no backward probe was attempted" in captured
+
+
+def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
+    monkeypatch, capsys
+):
+    """An omitted example batch returns an unprobed wrapper without mutation."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    class UnprobedWrapper(torch.nn.Module):
+        def forward(self, *args, **kwargs):
+            raise AssertionError("the wrapper must not run without example_x")
+
+    wrapper = UnprobedWrapper()
+
+    def compile_spy(model, **kwargs):
+        compile_kwargs.update(kwargs)
+        return wrapper
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    model = bdh.BDH(_small_cfg()).train()
+    expected_grads = []
+    for index, param in enumerate(model.parameters(), start=1):
+        grad = torch.full_like(param, float(index))
+        param.grad = grad
+        expected_grads.append(grad.clone())
+    try:
+        out = tr.maybe_compile(model)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert out is wrapper
+    assert model.training
+    assert all(
+        param.grad is not None and torch.equal(param.grad, expected)
+        for param, expected in zip(model.parameters(), expected_grads)
+    )
+    assert "without a first probe" in captured
+    assert "probe=train_bwd" in captured
+    assert "first probe failed" not in captured
