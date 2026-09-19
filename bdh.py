@@ -355,11 +355,6 @@ class BDH(nn.Module):
             x, self._ln_shape, weight=None, bias=None, eps=self._ln_eps
         )
 
-    @staticmethod
-    def _proj_relu(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """Encoder / encoder_v GEMM + in-place ReLU (one buffer, no 2nd ReLU alloc)."""
-        return F.relu(x @ weight, inplace=True)
-
     def _embed_tokens(self, idx: torch.Tensor) -> torch.Tensor:
         """Token embed → LN → (B, 1, T, D) for the residual body.
 
@@ -432,6 +427,18 @@ class BDH(nn.Module):
         return F.linear(x, weight_in_out.transpose(-2, -1), bias)
 
     @staticmethod
+    def _bias_relu_(out: torch.Tensor, bias=None) -> torch.Tensor:
+        """Optional bias into a fresh GEMM buffer, then in-place ReLU.
+
+        ``out`` must be a buffer we own (einsum / matmul result). When ``bias``
+        is set, ``add_`` fuses into that buffer — no ``out + bias`` temporary.
+        Bit-identical to ``F.relu(out + bias, inplace=True)`` / ``F.relu(out)``.
+        """
+        if bias is not None:
+            out.add_(bias)
+        return F.relu(out, inplace=True)
+
+    @staticmethod
     def _encoder_relu(
         x_btd: torch.Tensor, weight_hdn: torch.Tensor, bias=None
     ) -> torch.Tensor:
@@ -439,21 +446,41 @@ class BDH(nn.Module):
 
         Einsum avoids broadcasting ``(B,1,T,D) @ (nh,D,N)`` (extra expand/copy on
         CPU). Output layout is decoder-friendly: ``view(B,T,nh*N)`` is a free view.
+        Optional ``bias`` is fused via in-place add before ReLU (no add temp).
         """
         out = torch.einsum("btd,hdn->bthn", x_btd, weight_hdn)
-        if bias is not None:
-            out = out + bias
-        return F.relu(out, inplace=True)
+        return BDH._bias_relu_(out, bias)
 
     @staticmethod
     def _encoder_v_relu(
         y_bhtd: torch.Tensor, weight_hdn: torch.Tensor, bias=None
     ) -> torch.Tensor:
-        """Project ``(B,nh,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU."""
+        """Project ``(B,nh,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU.
+
+        Optional ``bias`` fused via in-place add before ReLU (same as encoder).
+        """
         out = torch.einsum("bhtd,hdn->bthn", y_bhtd, weight_hdn)
-        if bias is not None:
-            out = out + bias
-        return F.relu(out, inplace=True)
+        return BDH._bias_relu_(out, bias)
+
+    def _mlp_merge(
+        self,
+        x_bthn: torch.Tensor,
+        y_bthn: torch.Tensor,
+        B: int,
+        T: int,
+        nh: int,
+        N: int,
+    ) -> torch.Tensor:
+        """Sparse product → dropout → free ``view`` → decoder ``F.linear``.
+
+        Expects contiguous ``(B,T,nh,N)`` from the encoder paths so
+        ``view(B,T,nh*N)`` is a zero-copy reshape (no ``permute→contiguous``).
+        Decoder bias (if set) fuses in the ``F.linear`` epilogue. Always
+        out-of-place ``x*y`` (no ``is_grad_enabled`` branch — one Dynamo graph).
+        """
+        xy = self._dropout(x_bthn * y_bthn)
+        # Hot path: contiguous (B,T,nh,N) → view. Never unconditional .contiguous().
+        return self._linear(xy.view(B, T, nh * N), self.decoder, self.decoder_bias)
 
     def forward(
         self,
@@ -550,18 +577,9 @@ class BDH(nn.Module):
 
             yKV = self._ln(yKV)
 
-            # encoder_v -> (B, T, nh, N); mul stays in decoder-friendly layout.
-            # Always out-of-place product: avoid ``torch.is_grad_enabled()`` Python
-            # branch (would specialize train vs no_grad into two Dynamo graphs).
+            # encoder_v -> contiguous (B,T,nh,N); _mlp_merge does product/dropout/view/linear.
             y_bthn = self._encoder_v_relu(yKV, self.encoder_v, self.encoder_v_bias)
-            xy_bthn = x_bthn * y_bthn
-            # Dropout then decoder: F.dropout keeps (or restores) contiguity;
-            # p==0 is identity so (B,T,nh,N) stays a free view into nh*N.
-            xy_bthn = self._dropout(xy_bthn)
-
-            yMLP = self._linear(
-                xy_bthn.view(B, T, nh * N), self.decoder, self.decoder_bias
-            )
+            yMLP = self._mlp_merge(x_bthn, y_bthn, B, T, nh, N)
             # Residual + double LN: F.layer_norm only (see _residual_ln).
             x = self._residual_ln(x, yMLP)
 

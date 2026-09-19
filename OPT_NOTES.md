@@ -2075,3 +2075,58 @@ python benchmarks/bench_generate.py --warmup 2 --iters 5
 - No default `BDH_ATTN_IMPL` change
 - No re-introducing `aten::cat` in generate / CacheManager
 - No fake GPU speedups from CPU medians
+## opt/mlp-fuse — MLP temps + optional fused bias+ReLU (2026-09-19)
+
+**Branch:** `opt/mlp-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f005b3f` (main after sparse-probe).
+
+### Goal
+
+Tighten the MLP `permute→view→linear` path further: fewer contiguous copies on
+the decoder merge, and optional fused bias+ReLU on encoder / encoder_v when
+biases are set. Keep default (bias=`None`) numerics bit-identical vs tip /
+`bdh_baseline`, and preserve `tril(diagonal=-1)`.
+
+### What changed (`bdh.py`)
+
+1. **`_bias_relu_`** — optional `out.add_(bias)` into a fresh einsum buffer, then
+   in-place ReLU. Avoids the `out + bias` temporary. Bit-identical to
+   `F.relu(out + bias, inplace=True)`. Default `bias=None` is plain in-place ReLU.
+2. **`_encoder_relu` / `_encoder_v_relu`** — call `_bias_relu_` after einsum
+   (still produce contiguous `(B,T,nh,N)` for a free decoder view).
+3. **`_mlp_merge`** — consolidates `x*y` → `_dropout` → `.view(B,T,nh*N)` →
+   `_linear` (`F.linear` + optional `decoder_bias` epilogue). Never calls
+   unconditional `.contiguous()`; hot path stays a zero-copy view.
+4. **Removed unused `_proj_relu`** — old broadcast `@` helper superseded by
+   weight-layout einsum path.
+
+Preserved: `tril(diagonal=-1)`, `CacheManager`, `BDH_ATTN_IMPL`, RoPE /
+dropout / LN-compile paths, baseline Parameter shapes / `state_dict`.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 265 passed, 9 skipped (CUDA/native/Triton GPU) on CPU-only box
+# tests/test_mlp_fuse.py — 8 passed (bias+ReLU, view/no-contiguous,
+#   decoder bias fuse, vs baseline, attn pos0==0)
+```
+
+No intentional numerical approximations (fp32 bit-identical vs baseline when
+biases unset / dropout=0).
+
+### Honest limits
+
+- No GPU on this box — bias+ReLU / view wins are alloc/epilogue cleanliness for
+  eager + `torch.compile`; not a new CUDA/Triton MLP kernel.
+- Optional biases remain **absent** in baseline checkpoints (`None`); fuse only
+  engages when a caller registers them.
+- Product `x*y` stays out-of-place (no `is_grad_enabled` branch) so Dynamo keeps
+  one train/eval graph.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No softmax / diagonal inclusion / scale
+- No re-introducing `aten::cat` in generate / CacheManager
