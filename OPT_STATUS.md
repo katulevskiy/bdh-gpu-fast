@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#181; #160 docs scope retained)
+# OPT status — landed work (#1–#182; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `f34d908` (`main`, #181 cache-bench-v3 follows #180 docs through #179 and #179 amp-train-v4; #178 triton-cold-v5, #177 docs through #176, #176 blocked-tile-v4, and earlier landings remain documented below). Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #181 and the earlier scaffolds/docs/contracts add no CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `4eea9ad` (`opt/profile-v17`, #182) follows `#181` cache-bench-v3 initial packed-footprint accounting, `#180` docs refresh through #179, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #180 is docs-only and #181 adds CPU-only packed-cache capacity/allocation accounting; neither adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#179)
+## Landed opts (#1–#182)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -357,7 +357,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **177** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #176 while preserving profile-v16 counts and the real-GPU P0 blocker | Docs only | — |
 | **178** | `opt/triton-cold-v5` | Mark unavailable cold Triton paths with an explicit CPU-safe skip marker and add long-T blocked-fallback parity for shared-V and per-head-V layouts; defaults and raw strict-tril math unchanged | CPU: 39 passed, 3 skipped focused; full suite: 593 passed, 19 skipped, 3 warnings; no CUDA allocation, launch, timing, or win claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **179** | `opt/amp-train-v4` | Add CPU-safe `float32|bfloat16|float16` AMP contract coverage, actionable unsupported-CPU skips, and the CUDA-only float16 GradScaler gate; preserve fp32 / AMP-off defaults | CPU-only contract coverage; no GPU timing or throughput claim | **P3** GPU AMP train measurement remains open |
-| **181** | `opt/cache-bench-v3` | Expose initial and final packed KR+V allocation in the CPU page sweep and enforce the capacity/allocation invariant without changing cache, attention, or generate defaults | CPU accounting only; no GPU memory, timing, or speedup claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **180** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #179 while preserving profile-v16 counts and the real-GPU P0 blocker | Docs only | — |
+| **181** | `opt/cache-bench-v3` | Expose initial→final packed-cache capacity and final packed KR/V allocation in KiB in the page sweep; assert the capacity/allocation invariant before and after CPU page growth without changing defaults | CPU-only packed-footprint/accounting evidence; generate smoke matches fixed-capacity output with `aten::cat=0`; no GPU claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **182** | `opt/profile-v17` | Re-profile the #176–#181 tip with the profile-v15/v16 schedule and record self-CPU percentages plus `copy_`, `cat`, and `contiguous` counts without changing semantics | Flat versus profile-v16: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; CPU-only evidence | **P0** GPU measure / cold CUDA-Triton validation remains open |
 
 ### Concurrent main updates
@@ -379,7 +380,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#176** `opt/blocked-tile-v4` is at `4e13111`; adds CPU-only wide-head partial-tile parity coverage with no GPU timing or win claim.
 - **#177** docs refresh is at `5507747`; carries the matrix through the blocked-tile tip.
 - **#178** `opt/triton-cold-v5` is at `f72033e`; adds CPU-safe cold-Triton skip markers and long-T fallback parity with no CUDA timing or win claim.
-- **Current tip #179** `opt/amp-train-v4` is at `0983326`; adds CPU-only AMP dtype/scaler contracts with no GPU timing or throughput claim.
+- **#179** `opt/amp-train-v4` is at `0983326`; adds CPU-only AMP dtype/scaler contracts with no GPU timing or throughput claim.
+- **#180** docs refresh is at `f92090f`; carries the matrix through #179 and preserves profile-v16 counts.
+- **#181** `opt/cache-bench-v3` is at `f34d908`; adds CPU-only initial→final packed-cache footprint accounting with no GPU memory, timing, or speedup claim.
+- **Current tip #182** `opt/profile-v17` is at `4eea9ad`; matched CPU evidence is flat versus profile-v16 with `copy_` counts 2/12/394 and `cat=0`, `contiguous=0`.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
