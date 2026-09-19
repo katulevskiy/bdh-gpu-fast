@@ -213,6 +213,23 @@ def test_amp_forward_only_env_cannot_enable_mode_for_float32(monkeypatch, env_va
         assert tr._use_scaler is False
 
 
+def test_float32_switch_clears_active_amp_forward_only_state(monkeypatch):
+    """Switching back to fp32 clears a previously active AMP mode."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        mp.setattr(tr, "cpu_bf16_available", lambda: True)
+        tr.configure_amp("bfloat16", forward_only=True)
+        assert tr._amp_forward_only is True
+
+        mp.setenv("BDH_AMP_FORWARD_ONLY", "1")
+        tr.configure_amp("float32", forward_only=None)
+        assert tr.dtype == "float32"
+        assert tr.ptdtype is torch.float32
+        assert tr._amp_forward_only is False
+        assert tr._use_scaler is False
+        assert tr.scaler.is_enabled() is False
+
+
 @pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
