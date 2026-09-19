@@ -776,3 +776,30 @@ def test_packed_cache_t1_decode_oneshot_boundary_cpu_parity(S, B):
     assert max_decode_score_elems(S) <= S
     if S > _DECODE_ONESHOT_ELEMS:
         assert max_decode_score_elems(S) < S
+
+
+@pytest.mark.parametrize("S", [_DECODE_ONESHOT_ELEMS, _DECODE_ONESHOT_ELEMS + 1])
+@pytest.mark.parametrize("B", [1, 2])
+def test_packed_per_head_t1_decode_oneshot_boundary_cpu_parity(S, B):
+    """Per-head packed K/V views keep the decode GEMM shape contract."""
+    H, N, D, capacity = 4, 8, 16, S + 17
+    torch.manual_seed(600 + B + S)
+    k_buf = torch.randn(B, H, capacity, N)
+    v_buf = torch.randn(B, H, capacity, D)
+    K = k_buf.narrow(2, 0, S)
+    V = v_buf.narrow(2, 0, S)
+    assert K.stride() == (H * capacity * N, capacity * N, N, 1)
+    assert V.stride() == (H * capacity * D, capacity * D, D, 1)
+
+    Q = torch.randn(B, H, 1, N)
+    ref = eager_decode_attn(Q, K, V)
+    for impl in ("eager", "blocked", "online", "triton"):
+        got = bdh_attn_decode(Q, K, V, impl=impl)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+            f"impl={impl} B={B} S={S} "
+            f"maxdiff={(got - ref).abs().max().item()}"
+        )
+    # The T=1 per-head GEMM flattening remains a view for capacity-strided
+    # packed storage; no staging copy is part of this shape contract.
+    assert K.reshape(B * H, S, N).data_ptr() == K.data_ptr()
+    assert V.reshape(B * H, S, D).data_ptr() == V.data_ptr()
