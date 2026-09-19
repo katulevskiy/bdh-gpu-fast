@@ -209,3 +209,18 @@ def test_online_decode_multi_query_preserves_offset_packed_kv_views():
     )
     assert torch.equal(K, K_before)
     assert torch.equal(V, V_before)
+
+
+def test_decode_empty_past_returns_typed_zeros_for_all_backends():
+    """An empty past is a zero score×V result with the query's shape and dtype."""
+    B, H, Tq, N, D = 2, 3, 4, 5, 7
+    Q = torch.randn(B, H, Tq, N, dtype=torch.float32)
+    K_past = torch.empty(B, H, 0, N, dtype=Q.dtype)
+    V_past = torch.empty(B, 1, 0, D, dtype=Q.dtype)
+    expected = torch.zeros(B, H, Tq, D, dtype=Q.dtype)
+
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K_past, V_past, impl=impl)
+        assert got.shape == expected.shape
+        assert got.dtype == expected.dtype
+        assert torch.equal(got, expected), f"impl={impl} returned {got}"
