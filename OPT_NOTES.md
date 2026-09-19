@@ -6233,3 +6233,46 @@ OMP_NUM_THREADS=2 /workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/ -q
 - No default prefetch or H2D flag changes.
 - No GPU timing or throughput claims.
 - No public PR and no PRs to `pathwaycom/*`.
+
+## opt/blocked-tile-v3 — wide-head CPU cold parity (2026-09-19)
+
+**Branch:** `opt/blocked-tile-v3` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no `pathwaycom/*`).
+**Base tip:** `6fd7950` (`main`, after #139).
+
+### Audit / deepen
+
+The default `BDH_ATTN_IMPL=eager` path is unchanged. The long CPU cold branch
+(`T >= 256`) continues to flatten the query/key batch to `B*H` dense `bmm`
+inputs. For shared `V=(B,1,T,D)`, it preserves the `(B,T,D)` view and
+broadcasts it only for each score×V tile; head-matched `V=(B,H,T,D)` remains a
+dense flattened batch. The implementation doc now states this tile-bound and
+staging behavior explicitly.
+
+CPU parity coverage now includes the wide-head shape `N=128`, `D=256` at
+`T=512`, for both shared-V and head-matched-V layouts. This exercises the
+long-T blocked path while retaining strict raw-score × `tril(diagonal=-1)` and
+position-zero semantics. The Triton/CUDA wide-head tile policy and explicit
+overrides remain unchanged; no GPU timing or claim is added.
+
+### Tests (CPU-only; no GPU claims)
+
+```text
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_prefill_blocked.py tests/test_triton_attn.py -q
+# 47 passed, 3 skipped in 4.39s
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest -q
+# 541 passed, 19 skipped, 3 warnings in 101.13s
+```
+
+Defaults remain eager and AUTO-off; no attention math, cache, generate, or
+GPU behavior is claimed to change.
+
+### Non-goals
+
+- No default eager or AUTO behavior change.
+- No softmax, scaling, diagonal inclusion, or full-score materialization.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.

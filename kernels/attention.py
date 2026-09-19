@@ -628,8 +628,9 @@ def blocked_tril_attn(
       ``(Qi @ K[:,:,:i0].mT) @ V[:,:,:i0]`` when ``Bi·i0`` fits the score
       budget; otherwise chunked bmm under the same budget. Ephemeral scores
       are ``Bi × chunk``, never ``T × T``. Broadcast ``V=(B,1,T,D)`` stays
-      unexpanded on the device-generic path; the CPU long-T bmm path expands
-      it once while flattening heads.
+      unexpanded on the device-generic path; the CPU long-T bmm path keeps it
+      as a ``(B,T,D)`` view while flattening heads and broadcasts it per
+      score×V tile.
     * **Diagonal** — ``Bi × Bi`` scores with ``tril(diagonal=-1)`` then ``@ Vi``
       (torch ops, not a Python row loop); ``out.add_`` into the past accum.
 
