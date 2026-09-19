@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `ca5038f` / documented tip `03bc30b` (post #75–#77 prefill-blocked + docs + auto-tune; #78 docs refresh; #79 cuda-cold-v2; #80 profile-v7; #81 docs align; #82 triton-cold-v2), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `ca5038f` / documented code tip `006de27` (post #75–#77 prefill-blocked + docs + auto-tune; #78 docs refresh; #79 cuda-cold-v2; #80 profile-v7; #81 docs align; #82 triton-cold-v2; #83 docs matrix; #84 compile-fullgraph), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -76,6 +76,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Profile-v4 docs refresh (`opt/profile-v4` #50) — tip `527ead2`; profile source `c7a7471`; cats=0; contiguous=0; no GPU measurement
 - Profile-v5 docs refresh (`opt/profile-v5`) — tip `fc9283d`; profile source `fc9283d`; cats=0; contiguous=0; no GPU measurement
 - Docs matrix v7 refresh (`opt/docs-matrix-v7` #67) — docs-only through #66; documented tip `8439c06`
+- Docs matrix v12 refresh (`opt/docs-matrix-v12` #83) — docs-only through #82; documented tip `03bc30b`
 - Profile-v6 docs refresh (`opt/profile-v6` #68) — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; no GPU measurement
 - Profile-v7 docs refresh (`opt/profile-v7`) — tip `b8067f5`; profile source `ca5038f`; cats=0; contiguous=0; no GPU measurement
 - T=1 RoPE apply deepen (`opt/rope-decode` #69) — `rope_rotate_t1` pair stores; table-pair / last-position cis reuse; CPU wall ~0.83× (no win claim); GPU fused/Triton T=1 open
@@ -236,7 +237,7 @@ python benchmarks/bench_generate.py --device cuda --warmup 5 --iters 20
 python benchmarks/bench_generate.py --mode auto-ab --device cuda
 ```
 
-**CPU honesty (this box / tip `ca5038f`):**
+**CPU honesty (this box / profile source `ca5038f`; documented code tip `006de27`):**
 - `--mode impls` short prompt: medians ~noise vs eager; match; `aten::cat=0`
 - `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO**
   **1.26× @1024 / 1.39× @2048** after `opt/prefill-blocked` (cold+decode);
