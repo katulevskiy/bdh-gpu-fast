@@ -127,3 +127,27 @@ def test_explicit_cold_threshold_does_not_shadow_decode_threshold(monkeypatch):
     assert resolve_cold_impl(3) != "eager"
     assert resolve_decode_impl(8) == "eager"
     assert resolve_decode_impl(9) != "eager"
+
+
+@pytest.mark.parametrize(
+    ("impl", "expected"),
+    [
+        ("blocked", "blocked"),
+        ("triton", "triton"),
+        ("cuda", "cuda"),
+        ("online", "blocked"),
+    ],
+)
+def test_explicit_non_eager_impl_stays_selected_on_both_auto_gates(
+    monkeypatch, impl, expected
+):
+    """AUTO never overrides an explicit backend on cold or decode paths."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "0")
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+
+    assert resolve_cold_impl(1) == expected
+    assert resolve_decode_impl(1) == expected
+    assert resolve_cold_impl(1, requested=impl) == expected
+    assert resolve_decode_impl(1, requested=impl) == expected
