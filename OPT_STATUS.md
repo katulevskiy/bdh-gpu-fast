@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `16a15fb` (`#63` compile-reduce on `main`; after `#62` triton-decode-v3, `#61` fix-gen-host-test, and `#60` docs-matrix-v5). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
+Tip documented here: `4558501` (`#65` docs matrix refresh on `main`; after `#64` cuda-decode-v3 / `#63` compile-reduce). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -214,6 +214,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **62** | `opt/triton-decode-v3` | Deepen Triton T=1 decode scaffold (long-S tiles, Q-hoist); AUTO→triton when CUDA else #55 blocked | ≡ eager/blocked on CPU; CUDA tests skip; default eager | GPU `--mode decode` open |
 | **63** | `opt/compile-reduce` | Document/measure `BDH_COMPILE_MODE=reduce-overhead` vs `default` on CPU; warn no CUDA graphs | CPU MODE A/B in `bench_train_step`; reduce-overhead not useful on CPU | GPU CUDA graphs still P1 |
 | **64** | `opt/cuda-decode-v3` | Deepen CUDA T=1 decode tiles (adaptive DECODE_TILE_N 32/64/128 + TQ1 Q-hoist); ≡ blocked parity | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode decode` open |
+| **66** | `opt/log-sync` | Further cut train logging host sync (`TrainLossLogger`; CUDA deferred D2H; `BDH_LOG_FREQ`/`BDH_LOG_ASYNC`) | CPU: sync path tested; e2e ~noise | CUDA defer unmeasured |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

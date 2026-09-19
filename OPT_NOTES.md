@@ -3686,3 +3686,61 @@ out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
 - No softmax / scale / SDPA
 - No fake GPU speedups from CPU medians
 
+## opt/log-sync — cut train logging host sync further (2026-09-19)
+
+**Branch:** `opt/log-sync` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `4558501` (`#65` docs matrix refresh; after `#64` cuda-decode-v3).
+
+### Goal
+
+Follow-up to `#11` / `opt/train-fuse` (already deferred `.item()` to `LOG_FREQ`).
+Further cut the logging host-sync tax without changing loss math, defaults, or
+`tril(diagonal=-1)`.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `TrainLossLogger` | On-device fp32 `detach().float()` + in-place `add_`; no per-step `.item()` |
+| CUDA async (default) | At `LOG_FREQ`: `non_blocking` D2H into pinned host scalar + event; `.item()`/print on *next* boundary / `close()` so sync overlaps following steps |
+| CPU / `BDH_LOG_ASYNC=0` | Print at boundary (CPU has no device sync to hide; matches train-fuse timing) |
+| `run_train_loop` | Shared by `train.py` + `train_fast.py`; prefetch before rare log sync |
+| Env | `BDH_LOG_FREQ` (default **100**), `BDH_LOG_ASYNC` (default **1**) |
+
+```bash
+# defaults unchanged:
+python train.py
+# tune / A-B:
+BDH_LOG_FREQ=200 BDH_LOG_ASYNC=0 python train.py
+```
+
+### Semantics
+
+- Printed value = **mean** loss over the window since the previous boundary
+  (same as train-fuse). `close()` also flushes a partial tail window (tip
+  previously dropped steps after the last `LOG_FREQ` boundary — minor UX fix).
+- On CUDA async, the first print is deferred one window (intentional: avoids
+  syncing the step-0 micro-window into the critical path).
+- Loss / CE / AMP / compile / prefetch / attention paths untouched.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_log_sync.py tests/test_dataloader.py -q
+# log-sync + dataloader: passed (CUDA async test soft-skipped without GPU)
+```
+
+### Honest limits (no GPU claims)
+
+- **No GPU on this box** — deferred D2H path is implemented but unexecuted here.
+  Do **not** claim train wall-time wins from CPU medians; measure on CUDA with
+  `BDH_LOG_ASYNC=0` vs `1` (and optionally higher `BDH_LOG_FREQ`).
+- On CPU, end-to-end step time is still ~noise vs tip (forward+backward dominate;
+  `.item()` is cheap without a device). The further sync cut matters on **CUDA**.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No default flip of `LOG_FREQ` / compile / AMP / attn impl
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No fake GPU speedups from CPU runs

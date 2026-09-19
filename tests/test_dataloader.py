@@ -181,13 +181,14 @@ def test_make_batch_source_dataloader(tr, monkeypatch):
 
 
 def test_hot_loop_logging_defers_item(tr):
-    """Sanity: train_step returns a tensor; logging path uses detach + rare .item()."""
+    """Sanity: train_step returns a tensor; TrainLossLogger owns rare .item()."""
     model = tr.bdh.BDH(tr.bdh.BDHConfig(n_layer=1, n_head=1, n_embd=32)).to(tr.device)
     opt = tr.make_optimizer(model)
     x, y = tr.get_batch("train")
     loss = tr.train_step(model, opt, x, y)
     assert torch.is_tensor(loss)
-    det = loss.detach()
-    assert det.device == loss.device
-    # .item() only when printing — not required for the step itself
-    _ = float(det)  # allowed outside hot path
+    logger = tr.TrainLossLogger(log_freq=10, device=tr.device, async_cuda=False, max_iters=1)
+    # step 1 is non-boundary → no print / no .item required
+    logger.update(loss, step=1)
+    assert logger._steps == 1 and logger._acc is not None
+    logger.close()  # flushes partial window

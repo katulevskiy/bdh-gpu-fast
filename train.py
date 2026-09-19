@@ -1,6 +1,6 @@
 # Copyright Pathway Technology, Inc.
-# Private opt (opt/amp-deepen): harden opt-in BDH_AMP_DTYPE; GradScaler fp16+CUDA only.
-# Defaults stay fp32 / COMPILE=0 / eager. AMP throughput wins are GPU-only.
+# Private opt (opt/log-sync): cut train logging host sync further (see OPT_NOTES.md).
+# Defaults stay fp32 / COMPILE=0 / eager / LOG_FREQ=100. tril(diagonal=-1) untouched.
 
 from __future__ import annotations
 
@@ -158,7 +158,10 @@ BATCH_SIZE = 32
 MAX_ITERS = 3000
 LEARNING_RATE = 1e-3
 WEIGHT_DECAY = 0.1
-LOG_FREQ = 100
+LOG_FREQ = int(os.environ.get("BDH_LOG_FREQ", "100"))
+# CUDA: defer .item() one LOG_FREQ window via non_blocking D2H (default on).
+# Set BDH_LOG_ASYNC=0 to .item() at the log boundary (train-fuse timing).
+USE_LOG_ASYNC = os.environ.get("BDH_LOG_ASYNC", "1") not in ("0", "false", "False")
 
 # Compile / opt knobs (env overrides for benches and CPU boxes without inductor deps)
 USE_COMPILE = os.environ.get("BDH_COMPILE", "0") in ("1", "true", "True")
@@ -610,6 +613,132 @@ def maybe_compile(
     return compiled
 
 
+
+class TrainLossLogger:
+    """On-device loss accumulate; host sync only at LOG_FREQ (CUDA: deferred).
+
+    Each step: ``loss.detach().float()`` into an on-device fp32 running sum
+    (in-place ``add_`` — no per-step ``.item()``). At ``LOG_FREQ`` boundaries
+    (and on ``close()``):
+
+    * **CUDA + async (default):** ``non_blocking`` copy into a pinned host
+      scalar + record event; ``.item()`` / print run on the *next* boundary
+      (or ``close``), so the sync overlaps the following train steps.
+    * **CPU or ``BDH_LOG_ASYNC=0``:** print immediately (CPU has no device sync
+      to hide; sync mode matches train-fuse timing).
+
+    Printed value = mean loss over the window since the previous boundary
+    (same semantics as ``opt/train-fuse``). Does not touch attention / tril.
+    """
+
+    def __init__(
+        self,
+        log_freq: int | None = None,
+        *,
+        device: torch.device | None = None,
+        async_cuda: bool | None = None,
+        max_iters: int | None = None,
+    ):
+        self.log_freq = int(LOG_FREQ if log_freq is None else log_freq)
+        if self.log_freq < 1:
+            raise ValueError(f"log_freq must be >= 1, got {self.log_freq}")
+        self.device = device if device is not None else globals()["device"]
+        self.async_cuda = USE_LOG_ASYNC if async_cuda is None else bool(async_cuda)
+        self.max_iters = max_iters
+        self._acc: torch.Tensor | None = None
+        self._steps = 0
+        self._use_cuda_async = (
+            self.async_cuda
+            and isinstance(self.device, torch.device)
+            and self.device.type == "cuda"
+            and torch.cuda.is_available()
+        )
+        self._host: torch.Tensor | None = None
+        self._event = None  # torch.cuda.Event when pending
+        self._pending_step: int | None = None
+        self._closed = False
+
+    def _ensure_host(self) -> torch.Tensor:
+        if self._host is None:
+            self._host = torch.empty((), dtype=torch.float32, pin_memory=True)
+        return self._host
+
+    def _flush_pending(self) -> None:
+        """Sync previous deferred D2H (if any) and print."""
+        if self._pending_step is None:
+            return
+        assert self._host is not None
+        if self._event is not None:
+            self._event.synchronize()
+            self._event = None
+        mean = float(self._host)
+        total = self.max_iters if self.max_iters is not None else "?"
+        print(f"Step: {self._pending_step}/{total} loss {mean:.3}")
+        self._pending_step = None
+
+    def _schedule_or_print(self, step: int) -> None:
+        assert self._acc is not None and self._steps > 0
+        mean = self._acc / self._steps
+        total = self.max_iters if self.max_iters is not None else "?"
+        if self._use_cuda_async:
+            # Flush prior window first (sync after ~LOG_FREQ more compute).
+            self._flush_pending()
+            host = self._ensure_host()
+            host.copy_(mean.detach(), non_blocking=True)
+            evt = torch.cuda.Event()
+            evt.record()
+            self._event = evt
+            self._pending_step = step
+        else:
+            print(f"Step: {step}/{total} loss {mean.item():.3}")
+        self._acc = None
+        self._steps = 0
+
+    def update(self, loss: torch.Tensor, step: int) -> None:
+        """Record one step's loss; maybe schedule/print at LOG_FREQ."""
+        if self._closed:
+            raise RuntimeError("TrainLossLogger.update after close()")
+        det = loss.detach().float()
+        if self._acc is None:
+            self._acc = det.clone()
+        else:
+            self._acc.add_(det)
+        self._steps += 1
+        if step % self.log_freq == 0:
+            self._schedule_or_print(step)
+
+    def close(self) -> None:
+        """Flush any partial window + deferred pending print (end of training)."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._steps > 0 and self._acc is not None:
+            step = (
+                (self.max_iters - 1)
+                if self.max_iters is not None
+                else (self._pending_step or 0) + self._steps
+            )
+            self._schedule_or_print(step)
+        self._flush_pending()
+
+
+def run_train_loop(model, optimizer, loader, x, y, *, max_iters: int | None = None):
+    """Shared train loop for train.py / train_fast.py (sync-light logging).
+
+    Caller supplies the first ``(x, y)`` (already used for compile probe).
+    Prefetch of the *next* batch runs before any rare log sync so host gather
+    / H2D still overlaps compute on the non-log path.
+    """
+    n = MAX_ITERS if max_iters is None else int(max_iters)
+    logger = TrainLossLogger(max_iters=n)
+    for step in range(n):
+        loss = train_step(model, optimizer, x, y)
+        x, y = loader.next()
+        logger.update(loss, step)
+    logger.close()
+
+
+
 def eval(model):
     model.eval()
 
@@ -658,19 +787,8 @@ if __name__ == "__main__":
     model = maybe_compile(model, example_x=x, example_y=y)
     optimizer = make_optimizer(model)
 
-    # Detach + accumulate on-device; .item() only at LOG_FREQ (avoids per-step CUDA sync).
-    loss_acc = None
-    loss_steps = 0
-    for step in range(MAX_ITERS):
-        loss = train_step(model, optimizer, x, y)
-        x, y = loader.next()  # host gather overlapped previous train_step; CUDA H2D on side-stream
-        det = loss.detach()
-        loss_acc = det if loss_acc is None else (loss_acc + det)
-        loss_steps += 1
-        if step % LOG_FREQ == 0:
-            print(f"Step: {step}/{MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
-            loss_acc = None
-            loss_steps = 0
+    # Sync-light logging: on-device accumulate; CUDA D2H deferred across LOG_FREQ.
+    run_train_loop(model, optimizer, loader, x, y, max_iters=MAX_ITERS)
     print("Training done, now generating a sample ")
     model.eval()
     prompt = torch.tensor(
