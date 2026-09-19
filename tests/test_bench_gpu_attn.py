@@ -309,6 +309,65 @@ def test_device_probe_failure_skips_before_cuda_measurement(
     assert "median ms" not in output
 
 
+def test_no_visible_device_skips_before_cuda_measurement(
+    monkeypatch, tmp_path, capsys
+):
+    """A true availability probe with no visible device stays diagnostics-only."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("no-visible-device skip entered measurement")
+
+    monkeypatch.setitem(namespace, "_select_device", fail_if_called)
+    monkeypatch.setitem(namespace, "_bench", fail_if_called)
+    summary_path = tmp_path / "no-visible-device-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--json-out", str(summary_path)],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    output = capsys.readouterr().out
+
+    assert summary["status"] == "skip"
+    assert summary["reason"] == "cuda_unavailable"
+    assert summary["timing_scope"] == "none"
+    assert summary["cuda_available"] is True
+    assert summary["cuda_built"] is True
+    assert summary["cuda_device_count"] == 0
+    assert summary["cuda_device_probe_error"] is None
+    assert summary["cuda_runtime_state"] == "no_visible_device"
+    assert summary["skips"] == [
+        {
+            "scope": "run",
+            "status": "skip",
+            "reason": "cuda_unavailable",
+            "detail": "CUDA runtime state is no_visible_device",
+            "timing_scope": "none",
+            "cuda_available": True,
+            "cuda_runtime_state": "no_visible_device",
+            "cuda_built": True,
+            "cuda_built_probe_error": None,
+            "cuda_device_count": 0,
+            "cuda_device_probe_error": None,
+            "cuda_available_probe_error": None,
+        }
+    ]
+    assert "CUDA runtime state is no_visible_device" in output
+    assert "timing_scope=none" in output
+    assert "median ms" not in output
+
+
 def test_build_probe_failure_skips_before_cuda_measurement(
     monkeypatch, tmp_path, capsys
 ):
