@@ -579,6 +579,63 @@ def test_no_cuda_skip_returns_before_measurement(monkeypatch):
     assert namespace["main"]() == 0
 
 
+def test_unavailable_cuda_with_visible_device_skips_before_measurement(
+    monkeypatch, tmp_path, capsys
+):
+    """A failed availability probe cannot be bypassed by a visible-device count."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("runtime-unavailable skip entered measurement")
+
+    monkeypatch.setitem(namespace, "_select_device", fail_if_called)
+    monkeypatch.setitem(namespace, "_bench", fail_if_called)
+    summary_path = tmp_path / "runtime-unavailable-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--json-out", str(summary_path)],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    output = capsys.readouterr().out
+
+    assert summary["status"] == "skip"
+    assert summary["timing_scope"] == "none"
+    assert summary["cuda_available"] is False
+    assert summary["cuda_built"] is True
+    assert summary["cuda_device_count"] == 1
+    assert summary["cuda_runtime_state"] == "runtime_unavailable"
+    assert summary["skips"] == [
+        {
+            "scope": "run",
+            "status": "skip",
+            "reason": "cuda_unavailable",
+            "detail": "torch.cuda.is_available() is false",
+            "timing_scope": "none",
+            "cuda_available": False,
+            "cuda_runtime_state": "runtime_unavailable",
+            "cuda_built": True,
+            "cuda_built_probe_error": None,
+            "cuda_device_count": 1,
+            "cuda_device_probe_error": None,
+            "cuda_available_probe_error": None,
+        }
+    ]
+    assert "cuda_runtime_state=runtime_unavailable" in output
+    assert "timing_scope=none" in output
+    assert "median ms" not in output
+
+
 def test_force_cpu_main_skips_gpu_metadata_when_cuda_is_available(monkeypatch, tmp_path):
     """Forced CPU smoke must not initialize GPU metadata or claim GPU timing."""
     namespace: dict[str, object] = {
