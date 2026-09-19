@@ -157,3 +157,28 @@ def test_online_decode_multi_query_packed_shared_v_tiled_parity():
     assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
         f"maxdiff={(got - ref).abs().max().item()}"
     )
+
+
+def test_online_decode_preserves_offset_packed_shared_v_views():
+    """Long CPU decode keeps nonzero-offset packed K/V views exact and read-only."""
+    B, H, S, N, D = 2, 3, 1025, 4, 2
+    offset = 5
+    capacity = S + 17
+    g = torch.Generator().manual_seed(912)
+    k_storage = torch.randn(B, H, offset + capacity, N, generator=g)
+    v_storage = torch.randn(B, 1, offset + capacity, D, generator=g)
+    K = k_storage.narrow(2, offset, S)
+    V = v_storage.narrow(2, offset, S)
+    Q = torch.randn(B, H, 1, N, generator=g)
+
+    assert K.stride() == (
+        H * (offset + capacity) * N, (offset + capacity) * N, N, 1
+    )
+    assert V.stride() == ((offset + capacity) * D, (offset + capacity) * D, D, 1)
+    K_before, V_before = K.clone(), V.clone()
+    ref = eager_decode_attn(Q, K, V)
+    got = online_decode_attn(Q, K, V, block_size=64)
+
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
+    assert torch.equal(K, K_before)
+    assert torch.equal(V, V_before)
