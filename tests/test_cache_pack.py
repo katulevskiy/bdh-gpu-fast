@@ -328,3 +328,100 @@ def test_generate_page_size_matches_fixed():
         prompt.clone(), max_new_tokens=6, temperature=1.0, cache_page_size=4
     )
     assert torch.equal(a, b)
+
+
+def test_reserve_writes_without_second_kr_copy():
+    """reserve returns writable slots; RoPE/write in-place shares storage."""
+    cfg = _small_cfg()
+    cm = CacheManager.from_config(cfg, batch_size=1, max_seq=16, device="cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    T = 3
+    dst_kr, dst_v = cm.reserve(0, T)
+    assert dst_kr.shape == (1, cfg.n_head, T, N)
+    assert dst_v.shape == (1, 1, T, cfg.n_embd)
+    # Writing through the view lands in the packed buffer
+    dst_kr.fill_(1.25)
+    dst_v.fill_(2.5)
+    assert cm.seq_len == 0  # not committed
+    for level in range(1, cfg.n_layer):
+        kr, v = cm.reserve(level, T)
+        kr.zero_()
+        v.zero_()
+    cm.commit()
+    assert cm.seq_len == T
+    past_kr, past_v = cm.get_past(0)
+    assert torch.allclose(past_kr, torch.full_like(past_kr, 1.25))
+    assert torch.allclose(past_v, torch.full_like(past_v, 2.5))
+    # get_past must not force a contiguous copy (narrow view, last-dim stride 1)
+    assert past_kr.stride(-1) == 1
+    assert past_v.stride(-1) == 1
+
+
+def test_generate_copy_calls_halved_vs_append_path():
+    """decode-copy: generate Tensor.copy_ ≈ 1 (prompt) + n_layer*(prompt_blocks + steps) V writes.
+
+    Before reserve/in-place RoPE: 2 copy_ per layer per step (KR+V) → 265 for
+    4 layers, prompt=16 prefill block + 32 decode steps.
+    After: only V slot copy_ (+ 1 prompt out) → 133.
+    """
+    cfg = _small_cfg(n_layer=4, n_embd=64, n_head=4, mlp_internal_dim_multiplier=8)
+    m = _model(cfg, seed=0)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 16))
+    n_new = 32
+    n_layer = cfg.n_layer
+    # Expected: 1 prompt out.copy_ + n_layer * (1 prefill V + n_new decode V)
+    expected = 1 + n_layer * (1 + n_new)
+
+    counts = {"n": 0}
+    orig = torch.Tensor.copy_
+
+    def hooked(self, *a, **k):
+        counts["n"] += 1
+        return orig(self, *a, **k)
+
+    torch.Tensor.copy_ = hooked
+    try:
+        torch.manual_seed(0)
+        with torch.no_grad():
+            out = m.generate(prompt.clone(), max_new_tokens=n_new, temperature=1.0)
+    finally:
+        torch.Tensor.copy_ = orig
+
+    assert out.shape == (1, 16 + n_new)
+    assert counts["n"] == expected, (
+        f"expected {expected} copy_ (V-only + prompt), got {counts['n']}"
+    )
+    # Still well below the old KR+V append tax (2x V-only + prompt ≈ 265)
+    assert counts["n"] < 2 * expected
+
+
+def test_get_past_never_contiguous_call():
+    cfg = _small_cfg()
+    cm = CacheManager.from_config(cfg, 1, 32, "cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    for level in range(cfg.n_layer):
+        cm.append(
+            level,
+            torch.randn(1, cfg.n_head, 7, N),
+            torch.randn(1, 1, 7, cfg.n_embd),
+        )
+    cm.commit()
+    calls = {"n": 0}
+    orig = torch.Tensor.contiguous
+
+    def hooked(self, *a, **k):
+        calls["n"] += 1
+        return orig(self, *a, **k)
+
+    torch.Tensor.contiguous = hooked
+    try:
+        kr, v = cm.get_past(0)
+        assert kr is not None and v is not None
+        _ = cm.stage(
+            0,
+            torch.randn(1, cfg.n_head, 2, N),
+            torch.randn(1, 1, 2, cfg.n_embd),
+        )
+    finally:
+        torch.Tensor.contiguous = orig
+    assert calls["n"] == 0

@@ -10,6 +10,11 @@ v2 (cache-v2):
     (still hard-capped by ``max_seq``).
   - ``stage`` writes the new block and returns a contiguous past+new view so
     multi-token+past attention can avoid ``torch.cat`` on KR/V.
+v3 (decode-copy):
+  - ``reserve`` returns writable slot views so RoPE can write KR in-place
+    (skips a host ``copy_`` when storage dtype matches compute).
+  - ``get_past`` / ``stage`` return ``narrow`` views — never ``.contiguous()``.
+  - ``copy_`` into packed slots casts without an intermediate ``.to()`` alloc.
 
 Optional ``storage_dtype=torch.float16`` stores half and casts back to
 ``compute_dtype`` (default fp32) before attention matmuls so RoPE score GEMMs
@@ -182,24 +187,25 @@ class CacheManager:
     def get_past(
         self, level: int
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        """Valid past prefix for ``level``, cast to compute_dtype if needed."""
+        """Valid past prefix for ``level``, cast to compute_dtype if needed.
+
+        Returns ``narrow`` views into packed storage (no ``.contiguous()``).
+        When ``seq_len < capacity`` the KR view may be non-contiguous across
+        heads; last-dim stride stays 1 so decode GEMMs keep a dense (S, N).
+        """
         if self.seq_len == 0:
             return None, None
-        kr = self._kr_buf[level, :, :, : self.seq_len]
-        v = self._v_buf[level, :, :, : self.seq_len]
+        # narrow avoids an extra Python slice chain on the layer index.
+        kr = self._kr_buf[level].narrow(2, 0, self.seq_len)
+        v = self._v_buf[level].narrow(2, 0, self.seq_len)
         if self.storage_dtype != self.compute_dtype:
             # fp16 storage → fp32 for RoPE score GEMMs / V multiply
             kr = kr.to(self.compute_dtype)
             v = v.to(self.compute_dtype)
         return kr, v
 
-    def _write_block(
-        self, level: int, new_kr: torch.Tensor, new_v: torch.Tensor
-    ) -> int:
-        """Write ``new_*`` at ``seq_len``; return end index. Does not commit."""
-        T = new_kr.size(2)
-        if T != new_v.size(2):
-            raise ValueError(f"kr T={T} != v T={new_v.size(2)}")
+    def _track_pending(self, T: int) -> int:
+        """Ensure capacity for ``seq_len+T`` and record pending length."""
         end = self.seq_len + T
         self._ensure_capacity(end)
         if self._pending_t is None:
@@ -208,17 +214,38 @@ class CacheManager:
             raise RuntimeError(
                 f"inconsistent append T: layer wrote {T}, pending={self._pending_t}"
             )
-        # Avoid .to() alloc when dtypes already match; copy_ into packed slot.
-        dst_kr = self._kr_buf[level, :, :, self.seq_len : end]
-        dst_v = self._v_buf[level, :, :, self.seq_len : end]
-        if new_kr.dtype != self.storage_dtype:
-            dst_kr.copy_(new_kr.to(self.storage_dtype))
-        else:
-            dst_kr.copy_(new_kr)
-        if new_v.dtype != self.storage_dtype:
-            dst_v.copy_(new_v.to(self.storage_dtype))
-        else:
-            dst_v.copy_(new_v)
+        return end
+
+    def reserve(
+        self, level: int, T: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return writable views for the next block at ``[seq_len : seq_len+T]``.
+
+        Does not copy. Caller may RoPE / write directly into the returned
+        tensors (storage dtype). Does not advance ``seq_len`` — call
+        ``commit`` after all layers. When ``T`` mismatches other layers'
+        pending width, raises like ``append``.
+        """
+        if T < 1:
+            raise ValueError("reserve T must be >= 1")
+        end = self._track_pending(T)
+        dst_kr = self._kr_buf[level].narrow(2, self.seq_len, T)
+        dst_v = self._v_buf[level].narrow(2, self.seq_len, T)
+        return dst_kr, dst_v
+
+    def _write_block(
+        self, level: int, new_kr: torch.Tensor, new_v: torch.Tensor
+    ) -> int:
+        """Write ``new_*`` at ``seq_len``; return end index. Does not commit."""
+        T = new_kr.size(2)
+        if T != new_v.size(2):
+            raise ValueError(f"kr T={T} != v T={new_v.size(2)}")
+        end = self._track_pending(T)
+        # copy_ casts when dtypes differ — no intermediate .to() alloc.
+        dst_kr = self._kr_buf[level].narrow(2, self.seq_len, T)
+        dst_v = self._v_buf[level].narrow(2, self.seq_len, T)
+        dst_kr.copy_(new_kr)
+        dst_v.copy_(new_v)
         return end
 
     def append(self, level: int, new_kr: torch.Tensor, new_v: torch.Tensor) -> None:
@@ -228,16 +255,16 @@ class CacheManager:
     def stage(
         self, level: int, new_kr: torch.Tensor, new_v: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Write new block and return contiguous past+new views (no ``cat``).
+        """Write new block and return past+new views (no ``cat``).
 
         Used for multi-token continuation under a packed cache so attention can
         run tril over a single slice. Does not advance ``seq_len`` (call
         ``commit`` after all layers). Returned tensors are cast to
-        ``compute_dtype`` when storage differs.
+        ``compute_dtype`` when storage differs. Never calls ``.contiguous()``.
         """
         end = self._write_block(level, new_kr, new_v)
-        kr = self._kr_buf[level, :, :, :end]
-        v = self._v_buf[level, :, :, :end]
+        kr = self._kr_buf[level].narrow(2, 0, end)
+        v = self._v_buf[level].narrow(2, 0, end)
         if self.storage_dtype != self.compute_dtype:
             kr = kr.to(self.compute_dtype)
             v = v.to(self.compute_dtype)
