@@ -5487,3 +5487,52 @@ kernel correctness on hardware, or speedup claim is made.
 - No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change.
 - No softmax, scale, diagonal inclusion, or full-score materialization.
 - No GPU claims from CPU reference parity or build smoke.
+
+
+## opt/online-decode-t1-v2 — direct shared-V T=1 decode epilogue (2026-09-19)
+
+**Branch:** `opt/online-decode-t1-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `f24a5d8` (`opt/cuda-cold-v3` / #114 tip; rebase onto current
+`main` / #115 before opening the private PR). This pairs the blocked online
+long-S path from #55 with the direct score×V epilogue from #100.
+
+### Audit / deepen
+
+The existing #55 path already tightens broadcast-V T=1 decode to a 1024-score
+oneshot budget and tiles longer packed past scans. The #100 `baddbmm` epilogue
+already writes head-matched V tiles into the flattened output. The remaining
+CacheManager hot path was broadcast `V=(B,1,S,D)`: both its oneshot and its
+long-S tile loop still used generic 4-D matmul, retaining a score×V product
+buffer after each score tile.
+
+This revision keeps the shared V unexpanded, flattens T=1 Q/K scores over
+`B*H`, and accumulates each shared-V tile with per-sample zero-stride V views
+and `baddbmm(..., out=target)` in inference/no-grad mode. The output tile is
+therefore the epilogue destination for both the oneshot and long-S paths;
+autograd uses the existing graph-safe matmul fallback. No score tile exceeds
+the #55 budget, and no full `T×S`/`T×T` score is retained on the tiled path.
+
+Strict raw-score × `tril(diagonal=-1)` semantics are unchanged: packed past
+keys are all earlier than the T=1 query, and `S=0` returns zeros. `online`
+remains the `blocked` alias. `BDH_ATTN_IMPL` remains opt-in; default eager is
+unchanged.
+
+### Correctness (CPU-only box; no GPU claims)
+
+```bash
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_inc_decode.py tests/test_gen_sample.py -q
+# 66 passed, 3 skipped
+```
+
+Coverage includes blocked/online parity against eager, exact position-zero
+zero output, broadcast-V oneshot and long-S tile parity, autograd fallback,
+and blocked `generate()` token parity with eager while `torch.cat` remains 0.
+
+### Non-goals
+
+- No default `BDH_ATTN_IMPL` change; eager remains the default.
+- No softmax, scale, SDPA, or diagonal inclusion.
+- No V expansion into `(B,H,S,D)` and no full score materialization.
+- No GPU timing, kernel claim, or speedup claim from this CPU-only box.
+- No public PR and no PRs to `pathwaycom/*`; private repo only.
