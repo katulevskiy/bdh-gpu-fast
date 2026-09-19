@@ -101,7 +101,7 @@ def test_decode_s0_returns_zeros():
     assert torch.all(out == 0)
 
 
-@pytest.mark.parametrize("impl", ["eager", "blocked", "triton"])
+@pytest.mark.parametrize("impl", ["eager", "blocked", "triton", "cuda"])
 def test_dispatch_decode(impl):
     Q, K, V = _make_decode_qkv(S=20, seed=3)
     out = bdh_attn_decode(Q, K, V, impl=impl, block_size=7)

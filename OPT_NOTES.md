@@ -913,9 +913,68 @@ On this CPU-only box, **default BatchPrefetcher + vectorized gather** remains th
 fast path. DataLoader+workers is for overlapping host prep with **GPU** compute;
 do not claim a CPU train speedup from workers. No CUDA here — pin/non_blocking
 overlap not measured.
+## opt/cuda-decode — CUDA scaffold T=1 decode vs packed KR/V (2026-09-19)
+
+**Branch:** `opt/cuda-decode` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `73d6002` (ln-fuse + inc-decode + attn-unify + cuda-ext on main).
+
+### Goal
+
+Extend the `csrc/` CUDA/C++ scaffold with a **single-token / Tq decode**
+kernel against packed past KR/V (no full `(S+1)×(S+1)` scores), preserving
+`tril(diagonal=-1)` (new token does **not** attend to itself). Wire under
+`BDH_ATTN_IMPL=cuda`; default stays **eager**.
+
+### What landed
+
+| Piece | Change |
+|-------|--------|
+| `csrc/tril_attn.h` | `tril_decode` / `_cpu` / `_cuda` decls |
+| `csrc/tril_attn_cpu.cpp` | CPU C++ `(Q @ K_past.mT) @ V_past` |
+| `csrc/tril_attn_cuda.cu` | Naive fused decode kernel (scaffold) |
+| `csrc/tril_attn_bind.cpp` | Bind `tril_decode` (+ cuda symbols when `WITH_CUDA`) |
+| `kernels/cuda_attn.py` | `tril_decode_ref` (always) + `tril_decode` (ext or ref) |
+| `kernels/attention_dispatch.py` | `bdh_attn_decode(..., impl=cuda)` → `tril_decode` |
+| `bdh.Attention.forward` | Doc/comment: T=1 + `BDH_ATTN_IMPL=cuda` uses decode path |
+| `tests/test_cuda_decode.py` | CPU ref always; native CUDA skipped if no GPU/ext |
+
+### Semantics
+
+```text
+# decode at absolute index S (past length S):
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+```
+
+No softmax, no `1/√d`, no SDPA.
+
+### Usage
+
+```bash
+export BDH_ATTN_IMPL=cuda   # cold + T=1 decode via kernels.cuda_attn
+# default eager unchanged
+BDH_BUILD_EXT=1 pip install -e . --no-build-isolation          # optional native
+BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 141 passed, 7 skipped on this CPU-only box
+# (CUDA/native decode + Triton CUDA paths skipped — no GPU / no ext)
+```
+
+### Honest limits
+
+- **No GPU on this box** — CUDA decode kernel unmeasured; CPU ref + skip tests.
+- Native ext may be absent; `tril_decode` falls back to pure PyTorch ref.
+- Naive CUDA kernel is a scaffold (one thread per `(b,h,i,d)`); tiled/shared-mem later.
+- Still no softmax / no scale / no SDPA.
 
 ### Non-goals
 
 - No PRs to `pathwaycom/bdh`
 - No change to CE loss / tril(-1) / train=first 90% val=last 10%
 - Do not default `BDH_DATALOADER=1` on CPU
+- Do not default `BDH_ATTN_IMPL=cuda`

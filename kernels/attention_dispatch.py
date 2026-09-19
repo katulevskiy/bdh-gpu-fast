@@ -10,15 +10,11 @@ Backends (``BDH_ATTN_IMPL``)::
 
 Backends: eager, blocked, triton, or cuda.
 
-Wire-up in ``bdh.Attention.forward`` cold path (``past_kr is None``)::
+Wire-up in ``bdh.Attention.forward``:
 
-    from kernels.attention_dispatch import bdh_attn
-    out = bdh_attn(QR, QR, V)
-
-Incremental / KV-cache path (``past_kr is not None``) always uses eager
-PyTorch matmuls — custom kernels do not yet support incremental decode.
-``generate()`` therefore ignores ``BDH_ATTN_IMPL`` after the cold prefill
-step (prefill itself respects the env when cache starts empty).
+- Cold path (``past_kr is None``): ``bdh_attn`` respects ``BDH_ATTN_IMPL``.
+- T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM;
+  blocked/triton/cuda use their decode paths (cuda → ``kernels.cuda_attn.tril_decode``).
 """
 
 from __future__ import annotations
@@ -113,12 +109,17 @@ def bdh_attn_decode(
     - eager:   single ``(Q @ K.mT) @ V`` (reference)
     - blocked: tiled over past length (no ``(S+T)x(S+T)`` scores)
     - triton:  blocked on CPU / no-CUDA; same API for GPU later
+    - cuda:    ``kernels.cuda_attn.tril_decode`` (native ext if built, else ref)
     """
     name = resolve_attn_impl(impl)
     if name == "eager":
         return eager_decode_attn(Q, K_past, V_past)
     if name == "blocked":
         return blocked_decode_attn(Q, K_past, V_past, block_size=block_size)
+    if name == "cuda":
+        from .cuda_attn import tril_decode
+
+        return tril_decode(Q, K_past, V_past)
     # triton → decode kernel not specialized; CPU fallback is blocked_decode
     if _can_use_triton(Q):
         return triton_decode_attn(Q, K_past, V_past, block_size=block_size)
