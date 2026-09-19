@@ -14,7 +14,10 @@ BDH_AMP_DTYPE (opt/amp-deepen):
 BDH_COMPILE=0 vs 1 (opt/compile-bench):
   Always attempted unless BDH_BENCH_COMPILE=0. Uses train.maybe_compile so
   inductor / CXX / probe failures soft-skip (print + return) instead of
-  crashing. Same weights, same AdamW path, same fixed batch — honest A/B.
+  crashing. The bench defaults to BDH_COMPILE_PROBE=train_bwd so the compile
+  arm warms the backward graph used by train_step; set it to train/eval only
+  for an explicitly forward-only diagnostic. Same weights, same AdamW path,
+  same fixed batch — honest A/B.
   Absolute ms are CPU-only; do not claim GPU / CUDA-graph wins here.
 
 COMPILE × ATTN_IMPL × AUTOGRAD matrix (opt/compile-blocked):
@@ -36,7 +39,8 @@ COMPILE=1 dropout=0 vs >0 (opt/dropout-compile):
 
 COMPILE FULLGRAPH=0 vs 1 × eager × AUTOGRAD (opt/compile-fullgraph):
   Set BDH_BENCH_COMPILE_FULLGRAPH=1 (default on). COMPILE=1 MODE=default;
-  FULLGRAPH∈{0,1} × AUTOGRAD∈{0,1} on IMPL=eager tiny cfg. Soft-skip a cell if
+  FULLGRAPH∈{0,1} × AUTOGRAD∈{0,1} on IMPL=eager tiny cfg, using the
+  effective BDH_COMPILE_PROBE (train_bwd by default). Soft-skip a cell if
   inductor/fullgraph unsupported (graph breaks → probe fallback). CPU wall
   only — do not claim GPU / CUDA-graph wins. Opt out:
   BDH_BENCH_COMPILE_FULLGRAPH=0.
@@ -58,7 +62,10 @@ sys.path.insert(0, str(ROOT))
 import bdh
 
 # Import train helpers without forcing compile during import benches.
+# Train-step sections default to the stronger backward probe; an explicit
+# BDH_COMPILE_PROBE=train|eval remains available for forward-only diagnostics.
 os.environ.setdefault("BDH_COMPILE", "0")
+os.environ.setdefault("BDH_COMPILE_PROBE", "train_bwd")
 import train as tr  # noqa: E402
 
 

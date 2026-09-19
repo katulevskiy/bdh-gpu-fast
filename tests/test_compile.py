@@ -182,8 +182,44 @@ def test_compile_cache_decode_matches_eager_dropout_zero():
         assert cache_e.seq_len == cache_c.seq_len == 7
 
 
+def test_compile_probe_default_is_train_backward(monkeypatch):
+    """The opt-in default probes backward, not just the first forward."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "0")
+    monkeypatch.delenv("BDH_COMPILE_PROBE", raising=False)
+    importlib.reload(tr)
+    assert tr.COMPILE_PROBE == "train_bwd"
+
+
+def test_train_backward_probe_without_targets_soft_falls_back(monkeypatch, capsys):
+    """A backward probe without y must not return an unprobed compiled module."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    importlib.reload(tr)
+    # Keep this contract test independent of inductor/C++ availability.
+    monkeypatch.setattr(tr.torch, "compile", lambda model, **kwargs: model)
+
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    assert out is model
+    assert "requires example_y" in capsys.readouterr().out
+
+
 def test_maybe_compile_train_probe_fallback_and_enable():
-    """BDH_COMPILE=1 default probe is train-mode (not eval-only)."""
+    """An explicit train probe is train-mode (not eval-only)."""
     # Import after env so train reads knobs — use a fresh subprocess-like reload.
     import importlib
 
