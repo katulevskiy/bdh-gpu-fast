@@ -166,6 +166,23 @@ def test_invalid_amp_request_preserves_full_previous_state():
     assert tr._amp_forward_only is previous["forward_only"]
 
 
+@pytest.mark.parametrize("amp_name", ["bfloat16", "float16"])
+def test_amp_forward_only_switch_is_explicit(monkeypatch, amp_name):
+    """AMP keeps the full-forward default unless logits-only mode is requested."""
+    probe_name = {
+        "bfloat16": "cpu_bf16_available",
+        "float16": "cpu_fp16_available",
+    }[amp_name]
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        mp.setattr(tr, probe_name, lambda: True)
+        tr.configure_amp(amp_name, forward_only=False)
+        assert tr.dtype == amp_name
+        assert tr._amp_forward_only is False
+        tr.configure_amp(amp_name, forward_only=True)
+        assert tr._amp_forward_only is True
+
+
 @pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
