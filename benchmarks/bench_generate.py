@@ -12,6 +12,9 @@ Modes
   strict cold gate is ``T > cold_thr`` and the decode gate is
   ``past_len > decode_thr``; each switches to triton|blocked independently
   (``opt/prefill-blocked``). ``--auto-cold-threshold`` makes the split explicit.
+  ``--auto-threshold-sweep`` repeats the same parity/cat checks for each
+  comma-separated decode threshold (mirroring cold thresholds unless an
+  explicit ``--auto-cold-threshold`` is supplied).
 
 Honest CPU numbers: this sandbox is often ``cuda=False``. Report wall medians
 and tokens-match flags — **do not** claim GPU / kernel wins from CPU medians.
@@ -311,6 +314,67 @@ def run_impls(args, device: torch.device) -> int:
     return 0
 
 
+def _parse_threshold_sweep(raw: str | None) -> list[int]:
+    """Parse a stable, de-duplicated non-negative AUTO threshold sweep."""
+    if raw is None:
+        return []
+    values: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            raise ValueError("threshold sweep contains an empty item")
+        try:
+            value = int(token)
+        except ValueError as exc:
+            raise ValueError(f"invalid threshold {token!r}") from exc
+        if value < 0:
+            raise ValueError(f"threshold must be >= 0, got {value}")
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise ValueError("threshold sweep must list at least one value")
+    return values
+
+
+def run_auto_ab_sweep(args, device: torch.device) -> int:
+    """Run the full CPU-safe AUTO A/B harness once per requested threshold."""
+    raw = getattr(args, "auto_threshold_sweep", None)
+    if raw is None:
+        return run_auto_ab(args, device)
+    try:
+        thresholds = _parse_threshold_sweep(raw)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        return 2
+
+    print(
+        "--- AUTO threshold sweep --- "
+        f"decode thresholds={thresholds}; each run keeps seeded parity and cat=0 checks"
+    )
+    status = 0
+    for index, threshold in enumerate(thresholds, start=1):
+        sweep_args = argparse.Namespace(**vars(args))
+        sweep_args.auto_threshold = threshold
+        # Prevent recursive dispatch while preserving an explicitly independent
+        # cold threshold, if the caller supplied one.
+        sweep_args.auto_threshold_sweep = None
+        cold = (
+            threshold
+            if args.auto_cold_threshold is None
+            else args.auto_cold_threshold
+        )
+        print(
+            f"=== sweep {index}/{len(thresholds)}: "
+            f"decode_thr={threshold} cold_thr={cold} ==="
+        )
+        status = max(status, run_auto_ab(sweep_args, device))
+    print(
+        "NOTE: threshold sweep reports CPU-safe wall medians and parity only; "
+        "it makes no GPU performance claim."
+    )
+    return status
+
+
 def run_auto_ab(args, device: torch.device) -> int:
     """E2E generate A/B: BDH_ATTN_AUTO=0 vs 1 at long past lengths (#55/#56)."""
     prompts = [int(x) for x in args.prompts.split(",") if x.strip()]
@@ -554,6 +618,14 @@ def main() -> int:
         help="independent BDH_ATTN_AUTO_COLD_THRESHOLD (default: mirror --auto-threshold)",
     )
     p.add_argument(
+        "--auto-threshold-sweep",
+        default=None,
+        help=(
+            "comma-separated decode thresholds for repeated auto-ab runs; "
+            "cold threshold mirrors each value unless --auto-cold-threshold is set"
+        ),
+    )
+    p.add_argument(
         "--device",
         choices=("auto", "cpu", "cuda"),
         default="auto",
@@ -579,7 +651,7 @@ def main() -> int:
         print(f"(auto-ab default) --new={args.new} for CPU-feasible long-S wall")
 
     if args.mode == "auto-ab":
-        return run_auto_ab(args, device)
+        return run_auto_ab_sweep(args, device)
     return run_impls(args, device)
 
 

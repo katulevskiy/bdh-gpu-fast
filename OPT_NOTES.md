@@ -6019,3 +6019,16 @@ made on this CPU-only box.
 - No PRs to `pathwaycom/*`; private repo only; no public PR.
 - No softmax, scale, diagonal inclusion, or SDPA substitution.
 - No GPU claims from CPU profiler percentages or copy counts.
+
+
+## Generate microbench v2 (2026-09-19)
+
+- `opt/gen-bench-v2` starts from tip `5200b4f` and deepens
+  `benchmarks/bench_generate.py` with `--auto-threshold-sweep`. The helper
+  repeats the existing long-S AUTO A/B for a stable, de-duplicated list of
+  decode thresholds; cold thresholds mirror each value unless explicitly
+  overridden. Every run retains seeded token parity, `aten::cat=0`, and strict
+  cold/decode resolver checks.
+- The harness remains CPU-safe and default-eager: no environment defaults or
+  generate semantics change when the sweep option is omitted. CPU wall medians
+  are diagnostic only; this change makes no GPU timing or kernel claim.
