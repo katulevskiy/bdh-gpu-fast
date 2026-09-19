@@ -6032,3 +6032,40 @@ made on this CPU-only box.
 - The harness remains CPU-safe and default-eager: no environment defaults or
   generate semantics change when the sweep option is omitted. CPU wall medians
   are diagnostic only; this change makes no GPU timing or kernel claim.
+## opt/cuda-build-v2 — CPU-safe CUDA build configuration smoke (2026-09-19)
+
+**Branch:** `opt/cuda-build-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `891b7c5` (`main`, after #131). No pathwaycom or public PR.
+
+### Audit / deepen
+
+The optional `csrc/` build already uses C++20 and `kernels.cuda_attn` already
+soft-imports a missing `bdh_cuda_ext`. The remaining CPU-box gap was the
+CUDA-enabled torch-wheel case: `BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1` could enter
+`CUDAExtension` setup even when the box had no `nvcc`, producing an opaque
+ninja/toolchain traceback. `setup.py` now checks `CUDA_HOME`/`CUDA_PATH` and
+`PATH` for `nvcc` before constructing the CUDA extension. A missing compiler
+prints an explicit skip and leaves the pure-Python CPU refs available;
+`BDH_FORCE_CPU_EXT=1` remains the explicit C++-only route.
+
+The new CPU-safe configuration tests cover the default pure-Python no-op and
+the forced-CUDA/no-`nvcc` skip without compiling or claiming GPU behavior.
+Attention semantics remain raw scores × strict `tril(diagonal=-1)`, and all
+defaults are unchanged.
+
+### Tests
+
+```text
+python -m pytest tests/test_cuda_build.py tests/test_cuda_attn.py tests/test_cuda_decode.py -q
+# expected on this box: CPU tests pass; CUDA-only tests skip cleanly
+```
+
+No GPU is available here, so this is build configuration/import smoke only;
+no CUDA compilation, kernel correctness-on-hardware, timing, or speedup claim
+is made.
+
+### Non-goals
+
+- No default `BDH_BUILD_EXT`, attention, decode, or implementation change.
+- No softmax, scale, diagonal inclusion, or full-score materialization.
+- No public or `pathwaycom/*` PRs; private repository only.
