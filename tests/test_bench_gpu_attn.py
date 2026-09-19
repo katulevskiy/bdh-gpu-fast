@@ -308,6 +308,76 @@ def test_device_probe_failure_skips_before_cuda_measurement(
     assert "CUDA device probe raised RuntimeError: driver query failed" in output
     assert "median ms" not in output
 
+
+def test_build_probe_failure_skips_before_cuda_measurement(
+    monkeypatch, tmp_path, capsys
+):
+    """A failing CUDA build probe remains a structured pre-measurement skip."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def fail_build_probe():
+        raise RuntimeError("CUDA build query failed")
+
+    monkeypatch.setattr(torch.backends.cuda, "is_built", fail_build_probe)
+    monkeypatch.setitem(
+        namespace,
+        "backend_info",
+        lambda: {"status": "unavailable", "detail": "build probe failed"},
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("build-probe failure entered measurement")
+
+    monkeypatch.setattr(torch.cuda, "device_count", fail_if_called)
+    monkeypatch.setitem(namespace, "_select_device", fail_if_called)
+    summary_path = tmp_path / "build-failure-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--json-out", str(summary_path)],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    output = capsys.readouterr().out
+
+    assert summary["status"] == "skip"
+    assert summary["reason"] == "cuda_unavailable"
+    assert summary["timing_scope"] == "none"
+    assert summary["cuda_available"] is True
+    assert summary["cuda_built"] is False
+    assert summary["cuda_built_probe_error"] == (
+        "RuntimeError: CUDA build query failed"
+    )
+    assert summary["cuda_device_count"] == 0
+    assert summary["cuda_device_probe_error"] is None
+    assert summary["cuda_runtime_state"] == "build_probe_failed"
+    assert summary["skips"] == [
+        {
+            "scope": "run",
+            "status": "skip",
+            "reason": "cuda_unavailable",
+            "detail": "CUDA runtime state is build_probe_failed",
+            "timing_scope": "none",
+            "cuda_available": True,
+            "cuda_runtime_state": "build_probe_failed",
+            "cuda_built": False,
+            "cuda_built_probe_error": "RuntimeError: CUDA build query failed",
+            "cuda_device_count": 0,
+            "cuda_device_probe_error": None,
+            "cuda_available_probe_error": None,
+        }
+    ]
+    assert "CUDA runtime state is build_probe_failed" in output
+    assert "median ms" not in output
+
+
 def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
     """Forced smoke timings are explicitly marked as CPU-only."""
     summary_path = tmp_path / "cpu-summary.json"
