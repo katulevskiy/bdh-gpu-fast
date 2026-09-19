@@ -125,6 +125,15 @@ class Attention(torch.nn.Module):
 
         cos_sin: optional (cos, sin) from ``rope_cos_sin`` — avoids redoing
         remainder/trig every layer when the caller shares phases.
+
+        Cold path (``past_kr is None``): dispatches via
+        ``kernels.attention_dispatch.bdh_attn`` according to ``BDH_ATTN_IMPL``
+        (``eager`` | ``blocked`` | ``triton`` | ``cuda``; default ``eager``).
+
+        Cached / incremental path: always eager PyTorch matmuls. Custom
+        kernels (blocked/triton/cuda) do not yet support incremental decode,
+        so ``generate()`` only applies ``BDH_ATTN_IMPL`` on the cold prefill
+        when the cache is empty; decode steps stay eager.
         """
         assert K is Q
         B, nh, T, _ = Q.size()
@@ -133,24 +142,12 @@ class Attention(torch.nn.Module):
         QR = self.rope(None, Q, cos_sin=cos_sin)
 
         if past_kr is None:
-            # Training / cold prefill: strict lower-triangular score@V.
-            # BDH_ATTN_IMPL=eager|triton|blocked (default eager). See kernels/.
-            # BDH_ATTN_AUTOGRAD=1 → StrictTrilAttnFn + analytic Q/K/V bwd (opt-in).
-            impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
-            autograd_on = os.environ.get("BDH_ATTN_AUTOGRAD", "").strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
-            if impl == "eager" and not autograd_on:
-                scores = QR @ QR.transpose(-2, -1)
-                scores.tril_(diagonal=-1)
-                out = scores @ V
-            else:
-                from kernels.attention_dispatch import bdh_attn
+            # Training / cold prefill: unified backend dispatch.
+            # Semantics: tril(QR @ QR.T, diagonal=-1) @ V — no softmax, no scale.
+            # BDH_ATTN_AUTOGRAD=1 remains supported by the dispatcher.
+            from kernels.attention_dispatch import bdh_attn
 
-                out = bdh_attn(QR, QR, V, impl=impl, use_autograd_fn=autograd_on or None)
+            out = bdh_attn(QR, QR, V)
             return out, QR, V
 
         # Incremental: queries attend to all past positions + earlier positions
