@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_SCHEMA_VERSION = 3
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -96,11 +96,36 @@ def _summary_path(path: str | None, summary: dict[str, Any]) -> None:
     output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
 
 
+def _backend_skip(
+    name: str, *, phase: str, exc: BaseException
+) -> dict[str, Any]:
+    """Return an honest, machine-readable result for an unavailable backend."""
+    return {
+        "backend": name,
+        "status": "skip",
+        "reason": "backend_unavailable",
+        "phase": phase,
+        "detail": f"{type(exc).__name__}: {exc}",
+        "bit_identical": None,
+        "allclose_at_1e-4": None,
+        "max_abs_delta": None,
+        "max_rel_delta": None,
+        "median_ms": None,
+    }
+
+
 def _skip_summary() -> dict[str, Any]:
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": "skip",
         "reason": "cuda_unavailable",
+        "skips": [
+            {
+                "scope": "run",
+                "reason": "cuda_unavailable",
+                "detail": "torch.cuda.is_available() is false",
+            }
+        ],
         "device": "cpu",
         "timing_scope": "none",
         "cuda_available": False,
@@ -151,6 +176,8 @@ def _bit_identical_report(
         f"allclose@1e-4={close}  max|Δ|={max_abs:.3e}  max_rel={max_rel:.3e}"
     )
     return {
+        "status": "ok",
+        "reason": None,
         "backend": name,
         "bit_identical": identical,
         "allclose_at_1e-4": close,
@@ -247,6 +274,8 @@ def main() -> int:
         ref = ref_fn(Q, K, V)
         outs: dict[str, torch.Tensor] = {"eager": ref}
         comparisons["eager"] = {
+            "status": "ok",
+            "reason": None,
             "backend": "eager",
             "bit_identical": True,
             "allclose_at_1e-4": True,
@@ -256,7 +285,17 @@ def main() -> int:
         for name, fn in backends.items():
             if name == "eager":
                 continue
-            outs[name] = fn(Q, K, V)
+            try:
+                outs[name] = fn(Q, K, V)
+            except Exception as exc:
+                comparisons[name] = _backend_skip(
+                    name, phase="correctness", exc=exc
+                )
+                print(
+                    f"GPU_ATTN_BACKEND_SKIP backend={name} "
+                    f"reason=backend_unavailable phase=correctness"
+                )
+                continue
             comparisons[name] = _bit_identical_report(name, outs[name], ref)
 
     print("--- median wall time (ms) ---")
@@ -267,15 +306,43 @@ def main() -> int:
     for name, fn in backends.items():
         if name == "eager":
             continue
-        t = _bench(fn, (Q, K, V), warmup=args.warmup, iters=args.iters)
+        if name not in outs:
+            continue
+        try:
+            t = _bench(fn, (Q, K, V), warmup=args.warmup, iters=args.iters)
+        except Exception as exc:
+            comparisons[name] = _backend_skip(name, phase="timing", exc=exc)
+            print(
+                f"GPU_ATTN_BACKEND_SKIP backend={name} "
+                f"reason=backend_unavailable phase=timing"
+            )
+            continue
         timings[name] = t
         speedup = (t_eager / t) if t > 0 else float("inf")
         print(f"  {name:7s} {t:8.3f} ms  ({speedup:.2f}× vs eager)")
 
+    results = [
+        {**comparisons[name], "median_ms": timings.get(name)}
+        for name in backends
+    ]
+    skips = [
+        {"scope": "backend", **result}
+        for result in results
+        if result["status"] == "skip"
+    ]
     summary = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
-        "status": "ok" if device.type == "cuda" else "cpu_smoke",
-        "reason": None if device.type == "cuda" else "force_cpu",
+        "status": (
+            "cpu_smoke"
+            if device.type != "cuda"
+            else ("partial" if skips else "ok")
+        ),
+        "reason": (
+            "force_cpu"
+            if device.type != "cuda"
+            else ("backend_unavailable" if skips else None)
+        ),
+        "skips": skips,
         "mode": mode,
         "device": device.type,
         "timing_scope": "gpu" if device.type == "cuda" else "cpu",
@@ -288,17 +355,14 @@ def main() -> int:
         "dtype": args.dtype,
         "warmup": args.warmup,
         "iters": args.iters,
-        "results": [
-            {**comparisons[name], "median_ms": timings[name]}
-            for name in backends
-        ],
+        "results": results,
     }
     print("GPU_ATTN_SUMMARY " + json.dumps(summary, sort_keys=True))
     _summary_path(args.json_out, summary)
 
     if device.type != "cuda":
         print(
-            "NOTE: --force-cpu used; Triton/CUDA kernels not executed; "
+            "NOTE: --force-cpu used; results are CPU-only fallback smoke; "
             "do not claim GPU wins from these medians."
         )
     else:
