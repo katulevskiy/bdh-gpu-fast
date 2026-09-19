@@ -72,7 +72,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | **Density measured** `opt/sparse-probe`: short-train x~27% xy~12% @150 steps (≫ paper 5%); CPU sparse **never reliably beat dense** → **keep OFF**. GPU sparse still open. | GPU sparse bench if density ≪10% | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** + **`opt/mlp-fuse`** — `(B,T,nh,N)` encoder, free decoder view, fused bias+ReLU / `_mlp_merge`; embed-tie #16; CPU wall ~noise vs tip | Low |
-| **P3** | **Hardware / dtype** | **Landed `opt/bf16-train`:** opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA only; CPU parity tests. GPU train bench still open. | GPU box microbench | Env |
+| **P3** | **Hardware / dtype** | **Landed `opt/bf16-train`+#54 `opt/amp-deepen`:** opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA; CPU smoke/bench honest (often slower); `BDH_AMP_FORWARD_ONLY`. GPU train throughput still open. | GPU box microbench | Env |
 | **P3** | **Profiler CI artifact** | Traces gitignored; optional nightly upload. | CI | N/A |
 
 ### Done (struck from ranked queue)

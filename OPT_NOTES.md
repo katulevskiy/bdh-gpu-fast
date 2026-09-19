@@ -3057,3 +3057,79 @@ grid + larger past tiles + fused score×V. Default remains eager.
 - No re-introducing `aten::cat` in generate / CacheManager
 - No softmax / scale / SDPA
 - No fake GPU speedups from CPU medians
+
+## opt/amp-deepen — harden opt-in AMP train path (2026-09-19)
+
+**Branch:** `opt/amp-deepen` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `6e23cfe` (decode-mm #53 on main).
+
+### Goal
+
+Deepen the opt-in train AMP path from #24 for **correctness + CPU honesty**:
+extend CPU bf16/fp16 smoke, optional hot-forward-only autocast, honest tiny
+`train_step` AMP vs fp32 bench, and document that **AMP throughput wins are
+GPU-only**. Defaults stay **fp32 / COMPILE=0 / eager**; GradScaler **only**
+`float16+CUDA`; attention still `tril(diagonal=-1)`.
+
+### Knobs (`train.py`)
+
+| Env / API | Default | Meaning |
+|-----------|---------|---------|
+| `BDH_AMP_DTYPE` | unset → `float32` | `float32`/`fp32`/`off`, `bfloat16`/`bf16`, `float16`/`fp16`/`half` |
+| `BDH_AMP_FORWARD_ONLY` | `0` | `1` → autocast logits only; CE in fp32 outside |
+| `configure_amp(name, forward_only=…)` | from env | Reconfigure `ctx` / `scaler` / `_amp_forward_only` |
+| `cpu_bf16_available()` / `cpu_fp16_available()` | — | CPU autocast gates |
+| `amp_throughput_claim_device()` | — | `"cuda"` or `"none"` (honest) |
+| GradScaler | **off** unless `float16` **and** CUDA | bf16 never loss-scales; CPU never scales |
+
+### Semantics (unchanged)
+
+```text
+out = tril(Q @ K.T, diagonal=-1) @ V   # no softmax, no 1/sqrt(d)
+```
+
+Default `train_step` still wraps `model(x, y)` in `ctx`. With
+`BDH_AMP_FORWARD_ONLY=1`, only `model(x)` logits are under autocast; CE uses
+`logits.float()` outside.
+
+### AMP correctness (CPU — documented atol; #54 headroom)
+
+| path | dtype | atol | rtol |
+|------|-------|------|------|
+| train forward logits + loss | float16 / bfloat16 | 2e-1 | 2e-1 |
+| train grads (1× fwd+bwd) | float16 / bfloat16 | 2e-1 | 2e-1 |
+| forward_only vs full autocast loss | bfloat16 | 2e-1 | 2e-1 |
+
+Typical bf16 logits max ~5e-3; rare seeds ~0.11–0.13 → table uses headroom.
+
+```text
+.venv/bin/python -m pytest tests/test_bf16_train.py -v
+# 16 tests: aliases, GradScaler gate, tril(-1), parity, bf16+fp16 smoke,
+# forward_only, defaults fp32/COMPILE=0/eager, amp_claim honesty
+```
+
+### Honest CPU train_step bench (this box, tiny cfg)
+
+```text
+BDH_BENCH_COMPILE=0 BDH_BENCH_COMPILE_BLOCKED=0 BDH_BENCH_AMP=1 \
+  python benchmarks/bench_train_step.py
+
+device=cpu cuda=False amp_claim=none  layers=2 d=64 B=4 T=64
+float32:            median  8.25 ms   1.00x
+bfloat16:           median  7.12 ms   0.86x   # noise / cast mix; not a win claim
+float16:            median  8.68 ms   1.05x   # slightly slower
+bfloat16+fwd_only:  median 11.49 ms   1.39x   # CE outside often slower on CPU
+```
+
+**Verdict:** CPU AMP is for **correctness smoke**. Medians wander around fp32
+(sometimes a hair faster, often slower — especially forward_only). **No
+Tensor Core / GPU throughput claim** from these numbers. Use AMP on CUDA train
+boxes (`amp_claim=cuda`); GradScaler only for `float16`.
+
+### Non-goals
+
+- No default AMP on (stays float32 until env set)
+- No COMPILE / attn-impl default change
+- No attention math changes / softmax / SDPA
+- No PRs to `pathwaycom/*`
+- No fake GPU speedups from CPU medians
