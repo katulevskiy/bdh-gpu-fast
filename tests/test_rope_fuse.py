@@ -24,7 +24,12 @@ from kernels.rope import (
     fused_rope_rotate_triton,
     _can_use_triton_rope,
 )
-from kernels.rope_dispatch import backend_info, bdh_rope_rotate, resolve_rope_impl
+from kernels.rope_dispatch import (
+    backend_info,
+    bdh_rope_rotate,
+    bdh_rope_rotate_paired,
+    resolve_rope_impl,
+)
 
 
 def _small_cfg(**kwargs) -> bdh.BDHConfig:
@@ -353,6 +358,29 @@ def test_fused_paired_t1_cpu_parity():
     v = torch.randn(2, cfg.n_head, 1, N)
     ref = eager_rope_rotate(v, cos, sin)
     assert torch.equal(fused_rope_rotate_paired(v, paired[0], paired[1]), ref)
+
+
+def test_t1_paired_cache_refreshes_across_positions(monkeypatch):
+    """Paired decode cis follows each absolute position on the CPU path."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    attn.ensure_rope_table(16, device)
+    torch.manual_seed(281)
+    v = torch.randn(2, cfg.n_head, 1, N)
+
+    for impl in ("eager", "fused"):
+        monkeypatch.setenv("BDH_ROPE_IMPL", impl)
+        for rope_start in (2, 11, 2):
+            cos, sin = attn.rope_cos_sin(1, rope_start, device)
+            paired = attn.t1_cis_pairs(rope_start, device)
+            assert paired is not None
+            ref = eager_rope_rotate(v, cos, sin)
+            got = bdh_rope_rotate_paired(
+                v, paired[0], paired[1], impl=impl
+            )
+            assert torch.equal(got, ref), (impl, rope_start)
 
 
 @pytest.mark.parametrize("T", [1, 12])
