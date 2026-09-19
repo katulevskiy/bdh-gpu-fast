@@ -7088,9 +7088,9 @@ calls).
 
 | Mode | Top self-CPU operators | copy_ / cat / contiguous |
 |---|---|---|
-| Attention | `aten::mul` **25.08%**, `aten::bmm` **23.91%**, `aten::complex` **14.88%**, `aten::copy_` **13.55%**, `aten::sub` **7.25%**, `aten::add` **7.24%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
-| Forward | `aten::bmm` **25.97%**, `aten::mm` **22.60%**, `aten::mul` **17.74%**, `aten::complex` **11.37%**, `aten::copy_` **9.52%**, `aten::clamp_min_` **3.06%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
-| Generate | `aten::mm` **20.82%**, `aten::bmm` **13.91%**, `aten::mul` **3.04%**, `aten::matmul` **2.51%**, `aten::native_layer_norm` **2.51%**, `aten::einsum` **2.18%**, `aten::copy_` **0.92%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
+| Attention | `aten::mul` **24.91%**, `aten::bmm` **24.65%**, `aten::complex` **14.56%**, `aten::copy_` **13.32%**, `aten::sub` **7.63%**, `aten::add` **7.34%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
+| Forward | `aten::bmm` **30.16%**, `aten::mm` **23.01%**, `aten::mul` **16.60%**, `aten::complex` **9.47%**, `aten::copy_` **7.23%**, `aten::clamp_min_` **2.95%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
+| Generate | `aten::mm` **20.36%**, `aten::bmm` **13.29%**, `aten::mul` **3.03%**, `aten::matmul` **2.48%**, `aten::native_layer_norm` **2.39%**, `aten::einsum` **2.11%**, `aten::copy_` **0.90%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
 
 Relative to profile-v16, the copy/cat/contiguous counts are unchanged:
 attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call,
