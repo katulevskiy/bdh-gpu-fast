@@ -295,3 +295,51 @@ def test_sampler_idx_out_does_not_clobber_strided_neighbors():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1:2, 1], ref), name
+
+
+def test_sampler_idx_out_accepts_unit_batch_stride_view():
+    """Sampler output may have unit batch stride and a strided singleton axis."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+    )
+
+    for name, kwargs in cases:
+        destination = torch.full((1, 3, 2), -123, dtype=torch.long)
+        before = destination.clone()
+        # Transpose a middle-row view so the (B, 1) output has batch stride 1
+        # and singleton-axis stride 6, unlike the existing narrow contracts.
+        idx_out = destination[:, 1, :].transpose(0, 1)
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (1, 6), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        target = torch.zeros_like(destination, dtype=torch.bool)
+        target[:, 1, :] = True
+        assert torch.equal(
+            destination.masked_select(~target), before.masked_select(~target)
+        ), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1, :].transpose(0, 1), ref), name
