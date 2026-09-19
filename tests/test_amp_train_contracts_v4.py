@@ -1,0 +1,102 @@
+"""AMP train v4: CPU-safe dtype skips and the CUDA-only scaler gate."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+os.environ.setdefault("BDH_AMP_DTYPE", "float32")
+os.environ.setdefault("BDH_COMPILE", "0")
+
+import train as tr
+
+
+@pytest.fixture(autouse=True)
+def _restore_fp32_amp():
+    yield
+    tr.configure_amp("float32")
+
+
+def _configure_or_cpu_skip(amp_name: str) -> None:
+    """Configure one dtype, turning unsupported CPU backends into a clear skip."""
+    try:
+        tr.configure_amp(amp_name, forward_only=True)
+    except RuntimeError as exc:
+        if tr.device.type == "cpu" and "autocast is unavailable" in str(exc):
+            pytest.skip(f"CPU-safe skip for {amp_name}: {exc}")
+        raise
+
+
+@pytest.mark.parametrize(
+    ("amp_name", "expected_ptdtype"),
+    [
+        ("float32", torch.float32),
+        ("bfloat16", torch.bfloat16),
+        ("float16", torch.float16),
+    ],
+)
+def test_train_dtype_matrix_is_cpu_safe(amp_name, expected_ptdtype):
+    """All supported dtypes have an explicit, backend-safe config outcome."""
+    _configure_or_cpu_skip(amp_name)
+    assert tr.dtype == amp_name
+    assert tr.ptdtype is expected_ptdtype
+    assert tr._amp_forward_only is (amp_name != "float32")
+    assert tr._use_scaler is (
+        amp_name == "float16"
+        and tr.device.type == "cuda"
+        and torch.cuda.is_available()
+    )
+    assert tr.scaler is not None
+    assert tr.scaler.is_enabled() is tr._use_scaler
+
+
+@pytest.mark.parametrize("amp_name", ["bfloat16", "float16"])
+def test_cpu_amp_failure_message_is_actionable(monkeypatch, amp_name):
+    """Unsupported CPU AMP reports the requested dtype before state changes."""
+    if tr.device.type != "cpu":
+        pytest.skip("CPU-only backend skip contract")
+    probe_name = {
+        "bfloat16": "cpu_bf16_available",
+        "float16": "cpu_fp16_available",
+    }[amp_name]
+    monkeypatch.setattr(tr, probe_name, lambda: False)
+    tr.configure_amp("float32")
+    with pytest.raises(RuntimeError) as caught:
+        tr.configure_amp(amp_name, forward_only=True)
+    message = str(caught.value)
+    assert f"BDH_AMP_DTYPE={amp_name}" in message
+    assert "requested on CPU" in message
+    assert "autocast is unavailable" in message
+    assert tr.dtype == "float32"
+    assert tr._use_scaler is False
+
+
+@pytest.mark.parametrize(
+    ("amp_name", "device_type", "cuda_available", "expected"),
+    [
+        ("float32", "cpu", False, False),
+        ("bfloat16", "cpu", False, False),
+        ("float16", "cpu", False, False),
+        ("float16", "cuda", False, False),
+        ("bfloat16", "cuda", True, False),
+        ("float16", "cuda", True, True),
+    ],
+)
+def test_gradscaler_gate_is_cuda_float16_only(
+    monkeypatch, amp_name, device_type, cuda_available, expected
+):
+    """The scaler gate requires float16, a CUDA device, and live CUDA support."""
+    tr.configure_amp("float32")
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device(device_type))
+        mp.setattr(torch.cuda, "is_available", lambda: cuda_available)
+        assert tr._grad_scaler_allowed(amp_name) is expected
+    tr.configure_amp("float32")
+

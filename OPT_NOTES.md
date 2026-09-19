@@ -7015,3 +7015,14 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q -rs
 
 No CUDA allocation, kernel launch, timing, or GPU claim is added. Defaults stay
 eager and `BDH_ATTN_AUTO` remains opt-in.
+
+## opt/amp-train-v4 — deepen CPU dtype and scaler contracts (2026-09-19)
+
+**Branch:** `opt/amp-train-v4` on the private repository. **Base tip:**
+`f72033e` (current `main` tip after #177).
+
+Added focused CPU-safe AMP contract coverage for the explicit
+`float32|bfloat16|float16` matrix, actionable skips when a CPU autocast backend
+is unavailable, and a parametrized GradScaler gate: only float16 on a live CUDA
+device may enable scaling. Defaults remain fp32 / AMP-off; this CPU-only box
+adds no GPU timing or throughput claim.
