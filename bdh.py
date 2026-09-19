@@ -4,7 +4,7 @@
 import dataclasses
 import os
 import math
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -59,15 +59,38 @@ class Attention(torch.nn.Module):
         return torch.cos(phases), torch.sin(phases)
 
     @staticmethod
-    def rope(phases, v):
-        """Rotate adjacent pairs. Skips redundant casts when dtypes match."""
-        v_rot = torch.empty_like(v)
-        v_rot[..., 0::2] = -v[..., 1::2]
-        v_rot[..., 1::2] = v[..., 0::2]
-        phases_cos, phases_sin = Attention.phases_cos_sin(phases)
+    def rope(phases, v, out: Optional[torch.Tensor] = None, cos_sin=None):
+        """Rotate adjacent pairs into ``out`` (or a fresh empty_like).
+
+        Avoids a full-size ``v_rot`` temporary. When ``cos_sin`` is provided,
+        skips recomputing cos/sin (shared across layers in one forward).
+        Skips redundant casts when dtypes already match ``v``.
+        """
+        if cos_sin is None:
+            phases_cos, phases_sin = Attention.phases_cos_sin(phases)
+        else:
+            phases_cos, phases_sin = cos_sin
+
+        if out is None:
+            out = torch.empty_like(v)
+        elif out is v:
+            raise ValueError("rope out= must not alias v")
+
+        ve = v[..., 0::2]
+        vo = v[..., 1::2]
+        ce = phases_cos[..., 0::2]
+        se = phases_sin[..., 0::2]
+        co = phases_cos[..., 1::2]
+        so = phases_sin[..., 1::2]
+
         if v.dtype != phases_cos.dtype:
-            return (v * phases_cos).to(v.dtype) + (v_rot * phases_sin).to(v.dtype)
-        return v * phases_cos + v_rot * phases_sin
+            # Match baseline cast-then-add rounding when phases are fp32 and v is not.
+            out[..., 0::2] = (ve * ce).to(v.dtype) + ((-vo) * se).to(v.dtype)
+            out[..., 1::2] = (vo * co).to(v.dtype) + (ve * so).to(v.dtype)
+        else:
+            out[..., 0::2] = ve * ce - vo * se
+            out[..., 1::2] = vo * co + ve * so
+        return out
 
     def _rope_phases(self, T: int, rope_start: int, device):
         assert self.freqs.dtype == torch.float32
@@ -79,6 +102,10 @@ class Attention(torch.nn.Module):
         ).view(1, 1, -1, 1)
         return positions * self.freqs
 
+    def rope_cos_sin(self, T: int, rope_start: int, device):
+        """Precompute (cos, sin) once per forward; reuse across layers."""
+        return self.phases_cos_sin(self._rope_phases(T, rope_start, device))
+
     def forward(
         self,
         Q,
@@ -87,6 +114,7 @@ class Attention(torch.nn.Module):
         rope_start: int = 0,
         past_kr: Optional[torch.Tensor] = None,
         past_v: Optional[torch.Tensor] = None,
+        cos_sin: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         """
         Q, K: (B, nh, T, N) — K must be Q (shared latent).
@@ -94,11 +122,15 @@ class Attention(torch.nn.Module):
 
         Returns (out, kr_to_store, v_to_store) where store tensors are the
         RoPE'd keys / values for this block only (caller concatenates cache).
+
+        cos_sin: optional (cos, sin) from ``rope_cos_sin`` — avoids redoing
+        remainder/trig every layer when the caller shares phases.
         """
         assert K is Q
         B, nh, T, _ = Q.size()
-        r_phases = self._rope_phases(T, rope_start, Q.device)
-        QR = self.rope(r_phases, Q)
+        if cos_sin is None:
+            cos_sin = self.rope_cos_sin(T, rope_start, Q.device)
+        QR = self.rope(None, Q, cos_sin=cos_sin)
 
         if past_kr is None:
             # Training / cold prefill: strict lower-triangular score@V.
@@ -209,9 +241,12 @@ class BDH(nn.Module):
         elif cache is not None and cache[0] is not None:
             rope_start = cache[0]["kr"].size(2)
 
+        # One cos/sin for all layers (same T, rope_start) — cuts RoPE trig allocs.
+        cos_sin = self.attn.rope_cos_sin(T, rope_start, x.device)
+
         for level in range(C.n_layer):
-            x_latent = x @ self.encoder
-            x_sparse = F.relu(x_latent)
+            # Q/K latent: fuse ReLU in-place onto encoder GEMM output (no 2nd buffer).
+            x_sparse = F.relu(x @ self.encoder, inplace=True)
 
             past_kr = past_v = None
             if packed:
@@ -227,6 +262,7 @@ class BDH(nn.Module):
                 rope_start=rope_start,
                 past_kr=past_kr,
                 past_v=past_v,
+                cos_sin=cos_sin,
             )
             if packed:
                 cache.append(level, new_kr, new_v)
@@ -241,8 +277,8 @@ class BDH(nn.Module):
 
             yKV = self.ln(yKV)
 
-            y_latent = yKV @ self.encoder_v
-            y_sparse = F.relu(y_latent)
+            # encoder_v projection + in-place ReLU (same fuse as Q path)
+            y_sparse = F.relu(yKV @ self.encoder_v, inplace=True)
             xy_sparse = x_sparse * y_sparse
             xy_sparse = self.drop(xy_sparse)
 
