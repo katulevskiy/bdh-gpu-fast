@@ -31,13 +31,14 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Blocked/Triton decode polish vs packed KR/V (`opt/triton-decode2` #19)
 - CacheManager v2: layer-contiguous KR/V, page growth, generate **0× aten::cat** (`opt/cache-v2` #20)
 - Online fused strict-tril score×V (no full T×T) under `blocked`/`online` (`opt/fuse-scorev` #21)
+- GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
 
 ## Ranked next work
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
-| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + CUDA/Triton scaffolds in-tree; **no CUDA on this box**. | A100/H100 microbench vs eager; bit-identical | Env blocker |
+| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + CUDA/Triton scaffolds in-tree; **harness landed** `benchmarks/bench_gpu_attn.py` — **no CUDA on this box**. | Run harness on A100/H100; record ms + bit-identical | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU parity / train bench** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. Compile path hardened (#22); **GPU inductor / CUDA graphs unmeasured**. | GPU compile train step vs eager | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). Remaining: incremental score×V kernel + fewer host copies. | GPU decode kernel bench; keep cat-free | Medium |
@@ -74,3 +75,29 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 ```bash
 python benchmarks/profile_forward.py --mode all
 ```
+
+## GPU microbench (A100 / H100)
+
+Harness skips cleanly when `torch.cuda.is_available()` is false (this sandbox).
+On a CUDA box, compare **eager | blocked | online | triton | cuda** and print
+bit-identical / `allclose@1e-4` vs eager:
+
+```bash
+# cold-path tril(diagonal=-1) score×V — default shapes B=2 H=4 T=128 N=64 D=128
+python benchmarks/bench_gpu_attn.py
+
+# longer seq / more heads (typical A100/H100 sweep)
+python benchmarks/bench_gpu_attn.py --B 4 --H 8 --T 512 --N 64 --D 128 --warmup 20 --iters 100
+
+# optional dtype sweep
+python benchmarks/bench_gpu_attn.py --dtype bfloat16
+python benchmarks/bench_gpu_attn.py --dtype float16
+
+# optional native CUDA extension (otherwise `cuda` backend uses pure-PyTorch ref)
+BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+python benchmarks/bench_gpu_attn.py
+```
+
+Record: GPU name, torch/CUDA versions, median ms per backend, `bit_identical`
+and `max|Δ|` vs eager. **Do not** claim wins from CPU medians; keep default
+`BDH_ATTN_IMPL=eager` until GPU data lands. Private repo only — not pathwaycom.
