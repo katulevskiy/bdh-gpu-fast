@@ -10,6 +10,7 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -128,8 +129,9 @@ def test_backward_probe_without_targets_preserves_training_grads(
     assert "no backward probe was attempted" in captured
 
 
+@pytest.mark.parametrize("fullgraph", [False, True])
 def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
-    monkeypatch, capsys
+    monkeypatch, capsys, fullgraph
 ):
     """An omitted example batch returns an unprobed wrapper without mutation."""
     import train as tr
@@ -137,7 +139,7 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
     monkeypatch.setenv("BDH_COMPILE", "1")
     monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
     monkeypatch.setenv("BDH_COMPILE_MODE", "default")
-    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "1" if fullgraph else "0")
     importlib.reload(tr)
 
     compile_kwargs = {}
@@ -168,7 +170,10 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
         importlib.reload(tr)
 
     captured = capsys.readouterr().out
-    assert compile_kwargs == {"mode": "default"}
+    expected_compile_kwargs = {"mode": "default"}
+    if fullgraph:
+        expected_compile_kwargs["fullgraph"] = True
+    assert compile_kwargs == expected_compile_kwargs
     assert out is wrapper
     assert model.training
     assert all(
@@ -177,6 +182,7 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
     )
     assert "without a first probe" in captured
     assert "probe=train_bwd" in captured
+    assert f"fullgraph={fullgraph}" in captured
     assert "first probe failed" not in captured
 
 
