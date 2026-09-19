@@ -37,6 +37,29 @@ def test_raw_score_strict_tril_forward_and_backward_contract(impl):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_zero_upstream_gradient_produces_zero_input_gradients(impl):
+    """A zero upstream gradient cannot create strict-tril input gradients."""
+    generator = torch.Generator().manual_seed(2042)
+    Q = torch.randn(
+        2, 2, 4, 3, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        2, 2, 4, 3, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        2, 1, 4, 5, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    out.backward(torch.zeros_like(out))
+
+    assert Q.grad is not None and K.grad is not None and V.grad is not None
+    assert torch.equal(Q.grad, torch.zeros_like(Q))
+    assert torch.equal(K.grad, torch.zeros_like(K))
+    assert torch.equal(V.grad, torch.zeros_like(V))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 @pytest.mark.parametrize("v_heads", [1, 3])
 def test_t1_excludes_self_attention_in_output_and_backward(impl, v_heads):
     """T=1 has no past keys, so output and every input gradient are zero."""
