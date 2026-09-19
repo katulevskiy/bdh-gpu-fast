@@ -7,11 +7,11 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile source tip `f10bdd4` / documented code tip `b9ce421` (post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile source tip `f10bdd4` / documented code tip `8e7a4d2` (post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
-Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU and #93 is an opt-in cold path at T≥256. No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
+Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU, #93 is an opt-in cold path at T≥256, and #95 adds only CPU copy-call evidence (forward `copy_` 24→18; QR contig copies 8→0). No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
 
 Post-#64–#66 re-profile (`opt/profile-v6`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #58 layout-v2 still visible on generate (`mm`/`linear`); #64–#66 not exercised on short default window (CUDA decode / train log). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v6.
 
@@ -96,13 +96,15 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Docs matrix (#91, `opt/docs-matrix-v16`) — refresh through #90; docs only
 - Prefetch H2D (#92, `opt/prefetch-h2d`) — pinned one-batch CUDA side-stream lookahead, `BDH_PREFETCH_H2D=1` default; CPU no-op; GPU H2D overlap/throughput remains unmeasured
 - Blocked tile v2 (#93, `opt/blocked-tile-v2`) — flatten long CPU cold `(B,H)` heads into dense `bmm` tiles; CPU blocked wins from T≥256, while CUDA/default eager behavior is unchanged
+- Docs matrix v17 (#94, `opt/docs-matrix-v17`) — refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #93; docs only
+- Copy-tax v1 (#95, `opt/copy-tax-v1`) — contiguous QR avoids RoPE clones from the encoder permute view, fresh score buffers use in-place `tril_`, and CPU profile call counts improve (`copy_` 24→18; QR contig copies 8→0); correctness/parity pass, defaults unchanged, GPU impact unmeasured
 - Docs matrix v6 refresh (`opt/docs-matrix-v6` #65) — docs-only through #64; documented tip `4558501`
 
 ## Ranked next work
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
-| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v8): attn `bmm`~23% `mul`~22% `copy_`~21%; forward `copy_`~24% `mm`~23% `bmm`~22% `mul`~12%. #88–#93 add no GPU timing or speedup claim; #93 has CPU-only blocked-path measurements and #92 has no-op CPU staging. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
+| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v8): attn `bmm`~23% `mul`~22% `copy_`~21%; forward `copy_`~24% `mm`~23% `bmm`~22% `mul`~12%. #88–#95 add no GPU timing or speedup claim; #93 has CPU-only blocked-path measurements, #92 has no-op CPU staging, and #95 has CPU-only copy-call deltas. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold` + `opt/triton-cold-v2` + #93 CPU tile flattening:** adaptive power-of-2 tiles (grow @T≥256 pair #75/#79), fused strict-tril score×V, broadcast-V staging, CPU→blocked adaptive; #93 CPU blocked bench is 1.25× @256 / 4.00× @512 / 5.87× @1024, but CUDA validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn); optional `FULLGRAPH=1` (#84). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` + `FULLGRAPH` via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** + **`opt/prefill-blocked`** + **`opt/auto-tune`**: AUTO long-T cold+decode (adaptive blocked cold @T≥256), with optional independent cold threshold. CPU e2e AUTO **1.26×@1024 / 1.39×@2048**; IMPL=blocked ~1.23–1.43×; short A/B ~1.25× @1024. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
@@ -131,6 +133,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Docs matrix through #90 | **Landed** #91 `opt/docs-matrix-v16` — docs-only; documented code tip `24f44a6` |
 | CUDA H2D staging | **Landed** #92 `opt/prefetch-h2d` — `BDH_PREFETCH_H2D=1` default on CUDA; CPU no-op; GPU overlap/throughput remains unmeasured |
 | Long CPU blocked tile flattening | **Landed** #93 `opt/blocked-tile-v2` — dense `(B,H)` `bmm` staging for T≥256; CPU-only 1.25×/4.00×/5.87× at T=256/512/1024; default eager and CUDA path unchanged |
+| Docs matrix v17 | **Landed** #94 `opt/docs-matrix-v17` — docs-only refresh through #93 |
+| Copy-tax / RoPE layout | **Landed** #95 `opt/copy-tax-v1` — CPU forward `aten::copy_` 24→18 and QR contiguous copies 8→0; correctness/parity pass; no GPU claim; defaults unchanged |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
