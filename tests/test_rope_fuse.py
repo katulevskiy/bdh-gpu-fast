@@ -360,6 +360,33 @@ def test_fused_paired_t1_cpu_parity():
     assert torch.equal(fused_rope_rotate_paired(v, paired[0], paired[1]), ref)
 
 
+def test_fused_paired_t1_strided_out_preserves_parity():
+    """Paired decode writes only the requested non-contiguous cache slot."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 5
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(281)
+    v = torch.randn(2, cfg.n_head, 1, N)
+
+    sentinel = torch.tensor(-123.0)
+    backing = torch.full((*v.shape[:-1], N * 2), sentinel.item())
+    out = backing[..., ::2]
+    ref = eager_rope_rotate(v, cos, sin)
+    got = fused_rope_rotate_paired(v, paired[0], paired[1], out=out)
+
+    assert got is out and not got.is_contiguous()
+    assert torch.equal(got, ref)
+    assert torch.equal(
+        backing[..., 1::2], torch.full_like(backing[..., 1::2], sentinel)
+    )
+
+
 def test_t1_paired_cache_refreshes_across_positions(monkeypatch):
     """Paired decode cis follows each absolute position on the CPU path."""
     cfg = _small_cfg()
