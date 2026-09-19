@@ -400,6 +400,24 @@ def test_dataloader_worker_prefetch_contract(tr, monkeypatch):
         del src
 
 
+def test_dataloader_worker_init_separates_cpu_rng_streams(tr, monkeypatch):
+    """Worker initialization gives distinct, reproducible CPU RNG streams."""
+    monkeypatch.setattr(tr.torch, "initial_seed", lambda: 100)
+    state = torch.random.get_rng_state()
+    try:
+        tr._dataloader_worker_init(0)
+        worker_zero = torch.rand(4)
+        tr._dataloader_worker_init(1)
+        worker_one = torch.rand(4)
+        tr._dataloader_worker_init(0)
+        worker_zero_repeat = torch.rand(4)
+    finally:
+        torch.random.set_rng_state(state)
+
+    assert not torch.equal(worker_zero, worker_one)
+    assert torch.equal(worker_zero, worker_zero_repeat)
+
+
 def test_dataloader_cpu_h2d_identity_does_not_probe_cuda(tr, monkeypatch):
     """CPU DataLoader H2D remains identity-only without CUDA initialization."""
     host_x = torch.zeros((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64)
