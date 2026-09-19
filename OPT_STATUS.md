@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#139)
+# OPT status — landed work (#1–#142)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `6fd7950` (`#139` prefetch-h2d-v2 / `#138` rope-gpu-v2 / `#137` docs refresh through #136). The landed matrix below is aligned through #139; #138 hardens Triton RoPE selection with conservative complete-tensor/device/dtype skip gates, and #139 makes the CPU H2D-prefetch path an explicit identity no-op while preserving the CUDA opt-in defaults. CPU validation preserves strict raw-tril semantics, eager defaults, autograd fallback, and cat-free generate; no GPU timing or speedup evidence was added, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `68f949a` (`#142` amp-train-v3 / `#140` docs refresh through #139; `#141` blocked-tile-v3 beneath it). The landed matrix below is aligned through #142; #141 adds wide-head CPU cold parity coverage for shared and head-matched V layouts while preserving bounded shared-V tile behavior, eager defaults, and no GPU claims, and #142 adds explicit float32/bf16/fp16 AMP configuration coverage with CPU-safe skips while preserving fp32 defaults and CUDA-only GradScaler gating. CPU validation preserves strict raw-tril semantics, eager defaults, autograd fallback, and cat-free generate; no GPU timing or speedup evidence was added, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -318,6 +318,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **137** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #136 | Docs only | — |
 | **138** | `opt/rope-gpu-v2` | Harden Triton RoPE dispatch with complete tensor/device/dtype skip gates; preserve eager default and PyTorch/blocked fallback | Focused CPU: 33 passed, 2 skipped; T>1 parity and out-buffer coverage; no GPU timing | **P0** GPU fused-RoPE validation remains open |
 | **139** | `opt/prefetch-h2d-v2` | Make the CPU H2D-prefetch contract explicit: gate by device before CUDA objects, keep no device lookahead, and preserve CPU tensor identity | CPU: 17 passed, 1 skipped; full suite: 539 passed, 19 skipped, 3 warnings; CPU path is a no-op | GPU H2D overlap/throughput remains unmeasured |
+| **140** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #139 | Docs only | — |
+| **141** | `opt/blocked-tile-v3` | Add wide-head CPU cold parity coverage with shared and head-matched V layouts; document bounded shared-V tile behavior without changing eager defaults | CPU parity coverage; no GPU timing or kernel claim | **P0** GPU measure / cold CUDA-Triton validation |
+| **142** | `opt/amp-train-v3` | Add explicit float32/bf16/fp16 AMP configuration coverage with CPU-safe backend skips; preserve fp32 defaults and CUDA-only GradScaler gating | CPU-safe configuration/parity coverage; no throughput claim | GPU AMP train measurement remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
