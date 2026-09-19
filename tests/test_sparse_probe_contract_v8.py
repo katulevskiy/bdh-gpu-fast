@@ -195,3 +195,35 @@ def test_enforced_guardrail_honors_custom_cli_floors(monkeypatch, capsys):
     assert "required_x>=0.2100 required_xy>=0.0800" in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=2 reason=guardrail_failed" in captured.err
+
+
+def test_enforced_guardrail_honors_custom_cli_xy_floor(monkeypatch, capsys):
+    """The custom xy floor must participate in enforced guardrail decisions."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.20, "y": 0.25, "xy": 0.08}],
+    )
+
+    def unexpected_crossover(**_):
+        raise AssertionError("a custom xy-floor failure must stop crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(
+            [
+                "--density-only",
+                "--enforce-density-guardrail",
+                "--min-final-xy",
+                "0.09",
+            ]
+        )
+        == probe.EXIT_DENSITY_GUARDRAIL
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=fail" in captured.out
+    assert "required_x>=0.2000 required_xy>=0.0900" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=2 reason=guardrail_failed" in captured.err
