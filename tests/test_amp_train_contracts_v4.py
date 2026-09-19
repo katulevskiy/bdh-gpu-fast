@@ -208,3 +208,14 @@ def test_cpu_amp_throughput_claim_stays_none_with_active_amp(monkeypatch, amp_na
         mp.setattr(tr, probe_name, lambda: True)
         tr.configure_amp(amp_name, forward_only=True)
         assert tr.amp_throughput_claim_device() == "none"
+
+
+def test_cpu_amp_throughput_claim_ignores_cuda_runtime(monkeypatch):
+    """A CPU AMP run cannot claim GPU throughput even if CUDA reports available."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        mp.setattr(torch.cuda, "is_available", lambda: True)
+        mp.setattr(tr, "cpu_bf16_available", lambda: True)
+        tr.configure_amp("bfloat16", forward_only=True)
+        assert tr._use_scaler is False
+        assert tr.amp_throughput_claim_device() == "none"
