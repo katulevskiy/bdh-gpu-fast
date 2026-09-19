@@ -160,6 +160,35 @@ def test_generate_zero_torch_cat():
     assert cats["n"] == 0
 
 
+def test_generate_blocked_matches_eager_and_stays_cat_free(monkeypatch):
+    """The opt-in blocked decode preserves eager tokens and generate cat=0."""
+    cfg = _small_cfg()
+    m = _model(cfg, seed=17)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 5))
+
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    torch.manual_seed(101)
+    eager = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
+
+    monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
+    cats = {"n": 0}
+    orig = torch.cat
+
+    def hooked(*a, **k):
+        cats["n"] += 1
+        return orig(*a, **k)
+
+    torch.cat = hooked  # type: ignore[assignment]
+    try:
+        torch.manual_seed(101)
+        blocked = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
+    finally:
+        torch.cat = orig  # type: ignore[assignment]
+
+    assert torch.equal(blocked, eager)
+    assert cats["n"] == 0
+
+
 def test_generate_topk_runs():
     cfg = _small_cfg()
     m = _model(cfg)

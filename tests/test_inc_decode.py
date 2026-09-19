@@ -112,6 +112,17 @@ def test_decode_s0_returns_zeros():
     assert torch.all(out == 0)
 
 
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+def test_optin_decode_pos0_is_zero(impl):
+    """Opt-in blocked/online decode keeps position zero at exact zero."""
+    Q = torch.randn(2, 4, 1, 8)
+    K = torch.empty(2, 4, 0, 8)
+    V = torch.empty(2, 1, 0, 16)
+    out = bdh_attn_decode(Q, K, V, impl=impl)
+    assert out.shape == (2, 4, 1, 16)
+    assert torch.count_nonzero(out) == 0
+
+
 @pytest.mark.parametrize("impl", ["eager", "blocked", "triton", "cuda"])
 def test_dispatch_decode(impl):
     Q, K, V = _make_decode_qkv(S=20, seed=3)
