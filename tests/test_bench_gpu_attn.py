@@ -32,8 +32,10 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
+    assert summary["schema_version"] == 2
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
+    assert summary["timing_scope"] == "none"
     assert summary["cuda_available"] is False
     assert summary["commands"]["cold"]
     assert summary["commands"]["decode"]
@@ -41,6 +43,48 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
         "python benchmarks/bench_gpu_attn.py --dtype bfloat16",
         "python benchmarks/bench_gpu_attn.py --dtype float16",
     ]
+
+
+def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
+    """Forced smoke timings are explicitly marked as CPU-only."""
+    summary_path = tmp_path / "cpu-summary.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--force-cpu",
+            "--warmup",
+            "0",
+            "--iters",
+            "1",
+            "--B",
+            "1",
+            "--H",
+            "1",
+            "--T",
+            "2",
+            "--N",
+            "2",
+            "--D",
+            "2",
+            "--json-out",
+            str(summary_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(summary_path.read_text())
+    assert summary["schema_version"] == 2
+    assert summary["status"] == "cpu_smoke"
+    assert summary["reason"] == "force_cpu"
+    assert summary["device"] == "cpu"
+    assert summary["timing_scope"] == "cpu"
+    assert summary["gpu_name"] is None
+    assert "do not claim GPU wins" in result.stdout
 
 
 def test_backend_matrix_includes_online_decode():
