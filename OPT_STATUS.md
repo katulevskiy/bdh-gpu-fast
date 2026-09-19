@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `527ead2` (`#50` profile-v4 on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49/#50 docs).
+Tip documented here: `b19ec59` (`#51` ln-deepen on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49/#50/#51 docs).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
