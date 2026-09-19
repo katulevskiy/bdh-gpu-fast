@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#235; #160 docs scope retained)
+# OPT status — landed work (#1–#240; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `ee586d0` (long blocked/online gradient parity, #235) follows #234 CPU AMP skip-reason contract (`1f1edd9`), #233 prefetch-v5 CUDA skip diagnostics (`ff5b071`), #232 structured backend skip results (`efbb1f3`), and #231 docs refresh through #230 (`d8eb80e`). Profile-v19 remains a matched CPU-only re-profile: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the result is flat versus profile-v18. #232 adds CPU-only structured backend skip/result diagnostics; #233 hardens the CPU-safe H2D gate when CUDA availability probing raises, without stream/event construction; #234 adds CPU-only parameterized AMP skip-reason coverage without changing attention math or defaults; #235 extends CPU long-path blocked gradient parity to the online alias. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `2a004c3` (AUTO cold explicit-backend contract, #240) follows #239 eager raw-score decode contract (`34a0d9f`), #238 generate-AUTO environment cleanup (`95ecae0`), #237 sparse density-only probe contract (`66c1680`), #236 docs refresh through #235 (`02bcf68`), #235 long blocked/online gradient parity (`ee586d0`), #234 CPU AMP skip-reason contract (`1f1edd9`), #233 prefetch-v5 CUDA skip diagnostics (`ff5b071`), and #232 structured backend skip results (`efbb1f3`). Profile-v19 remains a matched CPU-only re-profile: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the result is flat versus profile-v18. #237 adds a CPU-safe density-only sparse probe contract without changing opt-in or production sparse wiring; #238 adds CPU-only AUTO environment cleanup coverage; #239 extends the CPU raw-score decode contract to eager; #240 verifies explicit backends remain authoritative on both AUTO gates. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#235)
+## Landed opts (#1–#239)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -411,6 +411,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **233** | `opt/prefetch-v5` | Harden the CPU-safe H2D skip gate when `torch.cuda.is_available()` raises; preserve allocation-free behavior and existing prefetch defaults | CPU-only no-allocation/skip contract coverage; no CUDA H2D timing or overlap claim | **P1** GPU H2D overlap measurement remains open |
 | **234** | `test/amp-train-contracts-v4` | Add parameterized CPU-only skip-reason coverage for unavailable bfloat16 and float16 AMP configuration while preserving requested dtype/context, attention math, and defaults | CPU-only AMP configuration coverage; no GPU timing or throughput claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 | **235** | `opt/blocked-tile-v6` | Extend long-path CPU forward/gradient parity from blocked tiles to the public online alias for shared and head-matched V layouts at T=257 | CPU-only blocked/online gradient parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **236** | `opt/docs-v58` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #235 while preserving profile-v19 counts and the real-GPU P0 blocker | Docs only | —
+| **237** | `opt/sparse-v6` | Add a CPU-safe density-only sparse probe contract: a passing guardrail completes without starting the CPU crossover sweep; keep the probe opt-in and production sparse wiring unchanged | CPU-only contract coverage; sparse remains OFF; no GPU claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **238** | `test/bench-generate` | Verify interrupted AUTO runs restore variables that were initially unset | CPU-only environment-contract coverage; no GPU timing or generate-performance claim | **P1** GPU generate measurement remains open
+| **239** | `test/online-decode-v5` | Extend the raw-score decode contract to the eager backend alongside blocked, online, Triton-fallback, and CUDA-reference dispatch; preserve no-softmax/no-scale semantics | CPU-only decode contract coverage; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **240** | `opt/auto-thr-v6` | Verify explicit backends remain authoritative on both AUTO cold and decode gates | CPU-only AUTO contract coverage; eager/AUTO-off defaults unchanged; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -480,7 +485,12 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#233** prefetch-v5 merged as `ff5b071`; CUDA availability probe errors remain allocation-free skip outcomes before stream/event construction, with CPU-only coverage and no H2D overlap claim.
 - **#234** CPU AMP skip-reason contract merged as `1f1edd9`; parameterized unavailable bfloat16/float16 requests retain requested dtype and backend context, with no GPU timing or throughput claim.
 - **#235** long blocked/online gradient parity merged as `ee586d0`; T=257 shared and head-matched V CPU cases cover both blocked and online aliases, with no GPU performance claim.
-- **Current tip #235** `ee586d0` carries the flat profile-v19 counts plus CPU-only structured-skip, prefetch-gate, AMP skip-reason, and blocked/online gradient diagnostics; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#236** docs refresh merged as `02bcf68`; carries the matrix through #235 while preserving profile-v19 counts and the real-GPU P0 blocker.
+- **#237** sparse density-only probe contract merged as `66c1680`; a passing guardrail completes without starting CPU crossover work, with sparse still opt-in/default-off and no GPU claim.
+- **#238** generate-AUTO environment cleanup tests merged as `95ecae0`; interrupted runs restore variables that were initially unset, with CPU-only coverage and no GPU claim.
+- **#239** eager raw-score decode contract merged as `34a0d9f`; the eager backend joins the no-softmax/no-scale decode parity contract, with no GPU timing or performance claim.
+- **#240** `opt/auto-thr-v6` merged as `2a004c3`; CPU-safe coverage keeps explicit backends authoritative on both AUTO gates, with no GPU timing or performance claim.
+- **Current tip #240** `2a004c3` carries the flat profile-v19 counts plus CPU-only structured-skip, prefetch-gate, AMP skip-reason, blocked/online gradient, sparse-probe, AUTO-environment, eager raw-score decode, and explicit-backend AUTO-gate diagnostics; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
