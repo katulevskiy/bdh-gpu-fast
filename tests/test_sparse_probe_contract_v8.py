@@ -526,3 +526,30 @@ def test_falsey_gate_values_disable_probe_without_work(monkeypatch, capsys):
         assert "density_guardrail" not in captured.out
         assert "CPU sparse vs dense crossover" not in captured.out
         assert "exit_code=0 reason=probe_disabled" in captured.out
+
+
+def test_truthy_gate_values_enable_density_only_probe(monkeypatch, capsys):
+    """Whitespace and case normalization must preserve an explicit opt-in."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "  TrUe  ")
+    calls = []
+
+    def fake_short_train_density(**kwargs):
+        calls.append(kwargs)
+        return [{"x": 0.20, "y": 0.25, "xy": 0.08}]
+
+    def unexpected_crossover(**_):
+        raise AssertionError("density-only mode must not run crossover work")
+
+    monkeypatch.setattr(probe, "short_train_density", fake_short_train_density)
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(["--density-only", "--enforce-density-guardrail"])
+        == probe.EXIT_OK
+    )
+
+    assert calls == [{"steps": 150, "log_every": 25, "B": 8, "T": 64, "seed": 0}]
+    captured = capsys.readouterr()
+    assert "SPARSE PROBE DISABLED" not in captured.out
+    assert "density_guardrail=pass" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=0 reason=probe_complete" in captured.out
