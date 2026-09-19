@@ -153,6 +153,22 @@ def test_explicit_non_eager_impl_stays_selected_on_both_auto_gates(
     assert resolve_decode_impl(1, requested=impl) == expected
 
 
+def test_zero_threshold_switches_both_auto_gates(monkeypatch):
+    """Zero is a valid strict threshold for cold and decode AUTO gates."""
+    monkeypatch.setattr(
+        "kernels.attention_dispatch.triton_decode_available", lambda: False
+    )
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "0")
+
+    assert resolve_cold_impl(0) == "eager"
+    assert resolve_decode_impl(0) == "eager"
+    assert resolve_cold_impl(1) == "blocked"
+    assert resolve_decode_impl(1) == "blocked"
+
+
 def test_requested_backend_overrides_conflicting_environment(monkeypatch):
     """Per-call backend requests take precedence over the AUTO environment."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
