@@ -391,6 +391,29 @@ def test_fused_paired_t1_cpu_parity():
     assert torch.equal(fused_rope_rotate_paired(v, paired[0], paired[1]), ref)
 
 
+def test_fused_paired_t1_mixed_dtype_out_preserves_parity():
+    """Paired decode casts fp16 math into fp32 cache-style output slots."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 6
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(283)
+    v = torch.randn(2, cfg.n_head, 1, N, dtype=torch.float16)
+    ref_out = torch.empty_like(v, dtype=torch.float32)
+    ref = eager_rope_rotate(v, cos, sin, out=ref_out)
+    fused_out = torch.empty_like(ref_out)
+    got = fused_rope_rotate_paired(v, paired[0], paired[1], out=fused_out)
+
+    assert ref is ref_out and got is fused_out
+    assert got.dtype == torch.float32
+    assert torch.equal(got, ref)
+
+
 def test_fused_paired_t1_strided_out_preserves_parity():
     """Paired decode writes only the requested non-contiguous cache slot."""
     cfg = _small_cfg()
