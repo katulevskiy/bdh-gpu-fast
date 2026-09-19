@@ -210,7 +210,7 @@ def test_compile_failure_without_probe_preserves_caller_state(
         out = tr.maybe_compile(model)
     finally:
         monkeypatch.setenv("BDH_COMPILE", "0")
-        monkeypatch.setenv("BD_COMPILE_PROBE", "train_bwd")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
         importlib.reload(tr)
 
     captured = capsys.readouterr().out
