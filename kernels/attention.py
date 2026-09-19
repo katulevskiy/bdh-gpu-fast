@@ -349,12 +349,27 @@ def _broadcast_t1_score_v_into(
     fallback because ``out=`` operators do not participate in autograd.
     """
     Bi, Bj = scores.size(1), scores.size(2)
-    target4 = target.view(B, H, Bi, Vj.size(-1))
-    scores4 = scores.view(B, H, Bi, Bj)
     use_out = not torch.is_grad_enabled() or not any(
         t.requires_grad for t in (target, scores, Vj)
     )
     if use_out:
+        # B=1 is the common generate configuration. Keep the already-flattened
+        # BH views and issue one direct baddbmm rather than rebuilding 4-D
+        # views and entering a Python batch loop. The zero-stride head view is
+        # read-only and preserves CacheManager's unexpanded (B,1,S,D) V.
+        if B == 1:
+            Vshared = Vj[0, 0].unsqueeze(0).expand(H, Bj, Vj.size(-1))
+            torch.baddbmm(
+                target[:H],
+                scores[:H],
+                Vshared,
+                beta=beta,
+                out=target[:H],
+            )
+            return
+
+        target4 = target.view(B, H, Bi, Vj.size(-1))
+        scores4 = scores.view(B, H, Bi, Bj)
         for b in range(B):
             Vshared = Vj[b, 0].unsqueeze(0).expand(H, Bj, Vj.size(-1))
             torch.baddbmm(
@@ -366,6 +381,8 @@ def _broadcast_t1_score_v_into(
             )
         return
 
+    target4 = target.view(B, H, Bi, Vj.size(-1))
+    scores4 = scores.view(B, H, Bi, Bj)
     product = torch.matmul(scores4, Vj).reshape_as(target)
     if beta == 0:
         target.copy_(product)
