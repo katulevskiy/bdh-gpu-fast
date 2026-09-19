@@ -5174,3 +5174,62 @@ layout changes).
 - PRs to `pathwaycom/*`
 - Claiming GPU speedups from CPU copy_ counts
 - Changing default sampling distribution / RNG (only the write destination)
+
+## opt/profile-v10 — re-profile gen-copy-tax-v1 tip (2026-09-19)
+
+**Branch:** `opt/profile-v10` (private `katulevskiy/bdh-gpu-opt` only).
+**Profile source:** `1363794` (`#102` gen-copy-tax-v1); this branch is rebased
+onto `234de2a` (`#103` docs-v21) before publication. The rebase is docs-only
+and does not change the default eval/generate path.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python \
+  benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The harness uses two warmups, one wait, and three active steps. Absolute CPU
+milliseconds are profiler-inflated; the table reports self-CPU percentages and
+aggregate calls over the three active steps. Chrome traces remain under
+`benchmarks/traces/` (gitignored).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators (calls) | Notes |
+|------|--------------------------------|-------|
+| Attention | `aten::bmm` **30.87% (6)**, `aten::mul` **30.19% (12)**, `aten::copy_` **19.04% (9)**, `aten::sub` **8.28% (3)**, `aten::add` **2.96% (3)**, `aten::tril_` **0.31% (3)** | Default eager still computes raw scores then applies strict `tril_(diagonal=-1)`; no softmax, scale, or SDPA. |
+| Forward | `aten::bmm` **36.00% (36)**, `aten::mul` **21.86% (60)**, `aten::mm` **19.15% (27)**, `aten::copy_` **11.27% (48)**, `aten::clamp_min_` **3.00% (24)**, `aten::sub` **2.45% (12)** | `aten::cat=0`, `aten::contiguous=0`; warmed harness active window is **48 copy_ / 3 = 16 per active call**. |
+| Generate | `aten::mm` **14.76% (795)**, `aten::bmm` **12.80% (1,188)**, `aten::matmul` **7.33% (1,587)**, `aten::mul` **4.70% (1,980)**, `aten::native_layer_norm` **2.55% (1,287)**, `aten::einsum` **2.54% (396)**, `aten::copy_` **0.50% (1,194)** | `aten::cat=0`, `aten::contiguous=0`; generate `copy_` is **398 per active call**, down from profile-v9's 558, while the preallocated cache path remains cat-free. |
+
+A separate one-forward CPU profiler check at the same cfg reports
+`aten::copy_=18`, `aten::cat=0`, and `aten::contiguous=0`. A standalone
+one-shot generate check reports `aten::copy_=400`, while the scheduled harness
+reports **1,194 / 3 = 398 per active call**; the latter is the comparable
+profile-v10 number. These are CPU operator counts, not GPU performance
+measurements.
+
+### Smoke and verdict
+
+```text
+.venv/bin/python -m pytest tests/test_gen_copy_tax.py tests/test_rope_decode.py \
+  tests/test_rope_fuse.py tests/test_cache_pack.py tests/test_copy_tax.py \
+  tests/test_gen_host.py -q
+# 74 passed, 1 skipped
+```
+
+The tip confirms the #102 generate copy-tax cut (~558 → ~398 `aten::copy_` per
+active generate call) with `aten::cat=0` and `aten::contiguous=0`; forward's
+isolated `copy_` remains 18. Defaults are unchanged (`BDH_ATTN_IMPL=eager`,
+`BDH_ROPE_IMPL=eager`), and attention remains raw scores × strict
+lower-triangular `tril(-1)`. This box has no GPU, so no GPU timing, kernel win,
+or speedup is claimed.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; private repo only; no public PR
+- No default attention/RoPE implementation change
+- No softmax / scale / SDPA / diagonal inclusion
+- No GPU claims from CPU profiler percentages or copy_ counts
