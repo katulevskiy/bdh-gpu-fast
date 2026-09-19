@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#108)
+# OPT status — landed work (#1–#110)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `e11c187` (`#108` triton-cold-v3 / `#107` docs-matrix-v22 / `#106` docs-matrix-v22 / `#105` opt/ln-resid-v2 / `#104` profile-v10 / `#103` docs-matrix-v21 / `#102` gen-copy-tax-v1 / `#101` docs-matrix-v20 / `#100` scorev-fuse-v2 / `#99` docs-matrix-v19 / `#98` profile-v9 / `#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v9 source is `8e7a4d2` (`#95`); profile-v10 source is `1363794` (`#102`), and the current code tip is `e11c187`. Default eager remains unchanged; #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, #95/profile-v9 report CPU-only copy-call evidence (isolated forward `copy_`=18; warmed harness 16/call; generate remains copy_-heavy), #100 deepens blocked/online CPU score×V epilogues plus T=1 decode tiling, #102 introduced and #104 re-profiled the complex-view copy for RoPE pairs plus sampled `idx_out` into preallocated `out.narrow`, with generate `copy_` ~558→~398 and `cat` still 0, #105 confirms the existing eager residual-LN path is already the safe deepen, and #108 keeps wide-head Triton cold tiles bounded while preserving shared CPU V as a view in the blocked fallback. #106–#108 add no GPU speedup evidence; GPU measurement and cold Triton validation remain open.
+Tip documented here: `4963b0f` (`#110` gen-vcopy-v1 / `#109` docs-matrix-v23 / `#108` triton-cold-v3 / `#107` docs-matrix-v22 / `#106` docs-matrix-v22 / `#105` opt/ln-resid-v2 / `#104` profile-v10 / `#103` docs-matrix-v21 / `#102` gen-copy-tax-v1 / `#101` docs-matrix-v20 / `#100` scorev-fuse-v2 / `#99` docs-matrix-v19 / `#98` profile-v9 / `#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v9 source is `8e7a4d2` (`#95`); profile-v10 source is `1363794` (`#102`), and the current code tip is `4963b0f`. Default eager remains unchanged; #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, #95/profile-v9 report CPU-only copy-call evidence (isolated forward `copy_`=18; warmed harness 16/call; generate remains copy_-heavy), #100 deepens blocked/online CPU score×V epilogues plus T=1 decode tiling, #102 introduced and #104 re-profiled the complex-view copy for RoPE pairs plus sampled `idx_out` into preallocated `out.narrow`, with generate `copy_` ~558→~398 and `cat` still 0, #105 confirms the existing eager residual-LN path is already the safe deepen, #108 keeps wide-head Triton cold tiles bounded while preserving shared CPU V as a view in the blocked fallback, and #110 cuts generate `copy_` ~398→~394 by using `_store_pairs` for T>1 RoPE plus a top-k `gather(out=)` path. The #110 probe ceiling is the remaining V-slot writes (~132/gen) and multinomial internals (~128/gen), which are not safely removable without changing cache-snapshot layout or RNG behavior. #109 is docs-only; #110 adds no GPU speedup evidence, so GPU measurement and cold Triton validation remain open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#108)
+## Landed opts (#1–#110)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -284,6 +284,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **106** | `opt/docs-matrix-v22` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #104 | Docs only | — |
 | **107** | `opt/docs-matrix-v22` | Record the #105 residual-LN audit in `OPT_STATUS.md` / `OPT_BACKLOG.md` | Docs only | — |
 | **108** | `opt/triton-cold-v3` | Bound wide-head Triton cold query/key tiles at 64×64 while preserving explicit overrides; keep shared CPU `V=(B,1,T,D)` as a `(B,T,D)` view in the flattened blocked score×V fallback | CPU parity: 45 passed, 3 skipped; no GPU timing or kernel claim; defaults eager and AUTO-off unchanged | GPU/Triton validation remains open |
+| **109** | `opt/docs-matrix-v23` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #108 | Docs only | — |
+| **110** | `opt/gen-vcopy-v1` | Probe remaining generate `aten::copy_`; use `_store_pairs` for T>1 RoPE and `gather(out=)` for top-k without changing defaults or RNG behavior | CPU generate `aten::copy_` ~398→~394, `aten::cat`=0; V-slot (~132/gen) and multinomial (~128/gen) copies remain the safe-removal ceiling | No GPU timing or speedup; GPU measurement remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
