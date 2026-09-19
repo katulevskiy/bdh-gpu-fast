@@ -88,9 +88,11 @@ def main():
         print(
             "NOTE: CPU-only box — Triton kernel not executed; "
             "BDH_ATTN_IMPL=triton uses blocked/online pure-PyTorch fallback. "
-            "Online fusion lowers peak score memory (no full T×T); on CPU the "
-            "Python tile/row loop is often slower than eager for modest T. "
-            "Do not claim GPU wins from these CPU medians."
+            "Online/blocked is vectorized (opt/blocked-vec) and much faster than "
+            "the old Python row loop, but on CPU still typically slower than eager "
+            "for modest T (peak score memory still ≪ T×T). "
+            "Do not claim GPU wins from these CPU medians. "
+            "See also benchmarks/bench_blocked_vec.py."
         )
 
 
