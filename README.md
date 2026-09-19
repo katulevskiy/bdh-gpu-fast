@@ -1,5 +1,10 @@
 # BDH (Dragon Hatchling)
 
+> **Private GPU-opt sandbox** (`katulevskiy/bdh-gpu-opt` only — **not** `pathwaycom/bdh`).
+> Landed opts **#1–#33**, env flags (`BDH_ATTN_IMPL`, `BDH_ROPE_IMPL`, `BDH_COMPILE`, `BDH_AMP_DTYPE`),
+> and honest CPU vs GPU status: **[`OPT_STATUS.md`](OPT_STATUS.md)**.
+> Detail: [`OPT_NOTES.md`](OPT_NOTES.md) · backlog: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
+
 ## **Bridging the Gap Between Transformers and the Brain**
 
 **BDH (Dragon Hatchling)** is a biologically inspired large language model architecture that connects principles of deep learning with the foundations of neuroscience. Developed by researchers at [Pathway](https://pathway.com), BDH provides a theoretical and practical framework for understanding the emergence of reasoning and generalization in artificial systems.
