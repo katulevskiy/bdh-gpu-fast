@@ -31,8 +31,11 @@ import torch
 from .attention import (
     _HAS_TRITON,
     _can_use_triton,
+    blocked_decode_attn,
     blocked_tril_attn,
+    eager_decode_attn,
     eager_tril_attn,
+    triton_decode_attn,
     triton_tril_attn,
 )
 from .attention_bwd import _env_autograd_enabled, strict_tril_attn
@@ -90,6 +93,36 @@ def bdh_attn(
     from .cuda_attn import tril_score_v
 
     return tril_score_v(Q, K, V)
+
+
+
+def bdh_attn_decode(
+    Q: torch.Tensor,
+    K_past: torch.Tensor,
+    V_past: torch.Tensor,
+    *,
+    impl: str | None = None,
+    block_size: int = 64,
+) -> torch.Tensor:
+    """Attend new queries to packed past KR/V only (no full TxT).
+
+    Used by ``Attention.forward`` incremental decode (Tq typically 1).
+    Preserves tril(diagonal=-1): past slices exclude the new token, so the
+    query never attends to itself.
+
+    - eager:   single ``(Q @ K.mT) @ V`` (reference)
+    - blocked: tiled over past length (no ``(S+T)x(S+T)`` scores)
+    - triton:  blocked on CPU / no-CUDA; same API for GPU later
+    """
+    name = resolve_attn_impl(impl)
+    if name == "eager":
+        return eager_decode_attn(Q, K_past, V_past)
+    if name == "blocked":
+        return blocked_decode_attn(Q, K_past, V_past, block_size=block_size)
+    # triton → decode kernel not specialized; CPU fallback is blocked_decode
+    if _can_use_triton(Q):
+        return triton_decode_attn(Q, K_past, V_past, block_size=block_size)
+    return blocked_decode_attn(Q, K_past, V_past, block_size=block_size)
 
 
 def backend_info() -> dict:

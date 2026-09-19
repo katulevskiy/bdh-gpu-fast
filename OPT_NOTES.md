@@ -681,3 +681,53 @@ No GPU on this box — AMP is for CUDA throughput.
 - No PRs to `pathwaycom/bdh`
 - No softmax / diagonal inclusion / scale
 - No duplicate doubling cache alongside CacheManager
+## opt/inc-decode — efficient single-token decode (2026-09-19)
+
+**Branch:** `opt/inc-decode` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `5242ad6` (CacheManager + Triton/blocked + CUDA scaffold).
+
+### Goal
+
+Extend blocked (and triton CPU fallback) attention so **T=1 decode** against
+packed KR/V cache slices never materializes a full `(S+1)×(S+1)` score matrix,
+while preserving `tril(diagonal=-1)` (new token does **not** attend to itself).
+
+### What landed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `blocked_decode_attn`, `eager_decode_attn`, `triton_decode_attn` (CPU → blocked) |
+| `kernels/attention_dispatch.py` | `bdh_attn_decode(...)` gated by `BDH_ATTN_IMPL` |
+| `bdh.Attention.forward` | Hot path `T==1, S>0`: eager two-GEMM; blocked/triton → `bdh_attn_decode` on past slices. Multi-token + past + non-eager: concat + `bdh_attn` then slice new positions. |
+| `tests/test_inc_decode.py` | Kernel parity, no-self-attend, incremental vs full, CacheManager path, default eager |
+
+### Semantics
+
+```text
+# decode at absolute index S (past length S):
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+```
+
+Default `BDH_ATTN_IMPL` remains **eager** (unchanged training / cold path).
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_inc_decode.py tests/test_cache_pack.py \
+  tests/test_attention_mask.py tests/test_triton_attn.py -q
+# 60 passed, 1 skipped (CUDA Triton) — also ran cache_pack + attention_mask + triton_attn + correctness
+```
+
+### Honest limits
+
+- No GPU here — Triton decode is the blocked fallback; a fused CUDA decode
+  kernel is future work.
+- On CPU, tiled decode is for **memory shape** / API parity, not a wall-time win
+  vs the eager two-GEMM for modest S.
+- Still no softmax / no scale / no SDPA.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- Do not default `BDH_ATTN_IMPL=blocked` on CPU
