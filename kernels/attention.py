@@ -33,25 +33,87 @@ def eager_tril_attn(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.
     return scores @ V
 
 
+# Default tile widths. Decode uses a larger default so Tq=1 past scans need
+# fewer Python trips; cold blocked keeps 64 for score-tile memory.
+DEFAULT_BLOCK_COLD = 64
+DEFAULT_BLOCK_DECODE = 256
+# Soft cap on score elements (Tq * tile) before preferring another tile split.
+_SCORE_ELEMS_BUDGET = 256 * 256
+
+
+def _expand_v_heads(V: torch.Tensor, B: int, H: int, S: int, D: int) -> torch.Tensor:
+    """Broadcast V from (B,1,S,D) to (B,H,S,D) when heads share values."""
+    if V.size(1) == 1 and H != 1:
+        return V.expand(B, H, S, D)
+    return V
+
+
+def _pick_tile_size(S: int, Tq: int, block_size: int) -> int:
+    """Choose a past-axis tile width: larger tiles ⇒ fewer Python loop trips.
+
+    Still bounds peak score memory roughly by ``Tq * tile`` via ``_SCORE_ELEMS_BUDGET``.
+    """
+    BS = max(1, int(block_size))
+    if S <= BS:
+        return S if S > 0 else BS
+    # Aim for a modest number of tiles on the hot Tq=1 decode path.
+    if Tq <= 4:
+        target_tiles = 8
+        want = max(BS, (S + target_tiles - 1) // target_tiles)
+        max_by_budget = max(BS, _SCORE_ELEMS_BUDGET // max(Tq, 1))
+        return min(S, want, max_by_budget)
+    return min(S, BS)
+
+
+def _tiled_score_v(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    Vh: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    """``(Q @ K.mT) @ Vh`` tiled over the past axis (no tril — all keys valid).
+
+    Shared by ``blocked_decode_attn`` and the past region of ``blocked_tril_attn``.
+    One-shots when the full ``(Tq × S)`` score fits the budget; otherwise loops
+    over adaptive tiles (fewer trips than a fixed small BS).
+    """
+    B, H, Tq, _N = Q.shape
+    S = K.size(2)
+    D = Vh.size(-1)
+    if S == 0:
+        return Q.new_zeros(B, H, Tq, D)
+
+    BS = _pick_tile_size(S, Tq, block_size)
+    # Modest past / small score: single two-GEMM (same as eager decode).
+    if S <= BS or Tq * S <= _SCORE_ELEMS_BUDGET:
+        return (Q @ K.transpose(-2, -1)) @ Vh
+
+    out = Q.new_zeros(B, H, Tq, D)
+    for j0 in range(0, S, BS):
+        j1 = min(j0 + BS, S)
+        Kj = K[:, :, j0:j1, :]
+        Vj = Vh[:, :, j0:j1, :]
+        out = out + (Q @ Kj.transpose(-2, -1)) @ Vj
+    return out
+
+
 def blocked_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = 64,
+    block_size: int = DEFAULT_BLOCK_COLD,
 ) -> torch.Tensor:
     """Pure-PyTorch strict-tril attention without a full upper triangle.
 
     Tiles the sequence so score tiles are at most (BS × past) / (BS × BS).
+    Past-only regions reuse ``_tiled_score_v`` (same helper as decode).
     Semantically identical to eager_tril_attn (up to fp roundoff on long T).
     Works on CPU and CUDA; used as the non-Triton "triton" path fallback and
     as a lower-memory eager alternative.
     """
     B, H, T, N = Q.shape
     D = V.shape[-1]
-    if V.size(1) == 1 and H != 1:
-        Vh = V.expand(B, H, T, D)
-    else:
-        Vh = V
+    Vh = _expand_v_heads(V, B, H, T, D)
 
     out = Q.new_zeros(B, H, T, D)
     BS = max(1, int(block_size))
@@ -60,19 +122,15 @@ def blocked_tril_attn(
         i1 = min(i0 + BS, T)
         Qi = Q[:, :, i0:i1, :]
 
-        # Full past blocks: all j < i0 are strictly before every query in [i0, i1)
-        for j0 in range(0, i0, BS):
-            j1 = min(j0 + BS, i0)
-            Kj = K[:, :, j0:j1, :]
-            Vj = Vh[:, :, j0:j1, :]
-            scores = Qi @ Kj.transpose(-2, -1)
-            out[:, :, i0:i1, :] = out[:, :, i0:i1, :] + scores @ Vj
+        # Full past: all j < i0 are strictly before every query in [i0, i1).
+        # Shared with decode — one helper, adaptive tiles, often a single GEMM.
+        if i0 > 0:
+            out[:, :, i0:i1, :] = _tiled_score_v(
+                Qi, K[:, :, :i0, :], Vh[:, :, :i0, :], BS
+            )
 
         # Diagonal block: apply tril(diagonal=-1) within the block
         Bi = i1 - i0
-        if Bi > 1 or (Bi == 1 and i0 > 0):
-            # For Bi==1 and i0>0, past already handled; within-block j<i is empty.
-            pass
         if Bi > 1:
             Kj = K[:, :, i0:i1, :]
             Vj = Vh[:, :, i0:i1, :]
@@ -307,7 +365,7 @@ def blocked_decode_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = 64,
+    block_size: int = DEFAULT_BLOCK_DECODE,
 ) -> torch.Tensor:
     """Single-chunk decode against past KR/V only (strict tril diagonal=-1).
 
@@ -315,12 +373,12 @@ def blocked_decode_attn(
     K: (B, H, S, N)  — packed past keys (length S); does **not** include Q's positions
     V: (B, 1, S, D) or (B, H, S, D) — packed past values
 
-    Computes ``(Q @ K.mT) @ V`` tiled over the past axis. Because K/V are the
-    live cache prefix, every key is strictly earlier than the new queries, so
-    the new token never attends to itself (same as ``tril(diagonal=-1)``).
+    Computes ``(Q @ K.mT) @ V`` via shared ``_tiled_score_v``. Because K/V are
+    the live cache prefix, every key is strictly earlier than the new queries,
+    so the new token never attends to itself (same as ``tril(diagonal=-1)``).
 
     Never materializes an ``(S+Tq) x (S+Tq)`` score matrix (unlike concat + full
-    tril attn). Peak score tiles are at most ``(Tq x block_size)``.
+    tril attn). Default tile is larger than cold blocked (fewer Python trips).
     """
     B, H, Tq, N = Q.shape
     S = K.size(2)
@@ -333,41 +391,173 @@ def blocked_decode_attn(
     if S == 0:
         return Q.new_zeros(B, H, Tq, D)
 
-    if V.size(1) == 1 and H != 1:
-        Vh = V.expand(B, H, S, D)
-    else:
-        Vh = V
+    Vh = _expand_v_heads(V, B, H, S, D)
+    return _tiled_score_v(Q, K, Vh, block_size)
 
-    BS = max(1, int(block_size))
 
-    # Modest past: one (Tq x S) score GEMM — still far smaller than full TxT.
-    if S <= BS or Tq * S <= BS * BS:
-        return (Q @ K.transpose(-2, -1)) @ Vh
+if _HAS_TRITON:
 
-    out = Q.new_zeros(B, H, Tq, D)
-    for j0 in range(0, S, BS):
-        j1 = min(j0 + BS, S)
-        Kj = K[:, :, j0:j1, :]
-        Vj = Vh[:, :, j0:j1, :]
-        scores = Q @ Kj.transpose(-2, -1)
-        out = out + scores @ Vj
-    return out
+    @triton.jit
+    def _bdh_decode_fwd_kernel(
+        Q_ptr,
+        K_ptr,
+        V_ptr,
+        Out_ptr,
+        stride_qh,
+        stride_qt,
+        stride_qn,
+        stride_kh,
+        stride_kt,
+        stride_kn,
+        stride_vh,
+        stride_vt,
+        stride_vd,
+        stride_oh,
+        stride_ot,
+        stride_od,
+        Tq,
+        S,
+        N,
+        D,
+        BLOCK_N: tl.constexpr,
+        BLOCK_D: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        """Fused decode: out[t] = sum_{j<S} (q_t·k_j) * v_j (all past keys valid).
+
+        Grid: (cdiv(Tq, 1) effectively one row-group per program, B*H).
+        pid_m indexes query rows in steps of 1..BLOCK_M with BLOCK_M=1 typical.
+        """
+        pid_m = tl.program_id(0)
+        bh = tl.program_id(1)
+
+        # One query row per program when Tq is small; still masked for safety.
+        offs_m = pid_m + tl.arange(0, 1)
+        mask_m = offs_m < Tq
+
+        q_bh = Q_ptr + bh * stride_qh
+        k_bh = K_ptr + bh * stride_kh
+        v_bh = V_ptr + bh * stride_vh
+        o_bh = Out_ptr + bh * stride_oh
+
+        for d0 in range(0, D, BLOCK_D):
+            offs_d = d0 + tl.arange(0, BLOCK_D)
+            mask_d = offs_d < D
+            acc = tl.zeros((1, BLOCK_D), dtype=tl.float32)
+
+            for j0 in range(0, S, BLOCK_N):
+                offs_n = j0 + tl.arange(0, BLOCK_N)
+                mask_n = offs_n < S
+
+                qk = tl.zeros((1, BLOCK_N), dtype=tl.float32)
+                for k0 in range(0, N, BLOCK_K):
+                    offs_k = k0 + tl.arange(0, BLOCK_K)
+                    mask_k = offs_k < N
+                    q = tl.load(
+                        q_bh
+                        + offs_m[:, None] * stride_qt
+                        + offs_k[None, :] * stride_qn,
+                        mask=mask_m[:, None] & mask_k[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    k = tl.load(
+                        k_bh
+                        + offs_n[:, None] * stride_kt
+                        + offs_k[None, :] * stride_kn,
+                        mask=mask_n[:, None] & mask_k[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    qk += tl.dot(q, tl.trans(k))
+
+                qk = tl.where(mask_m[:, None] & mask_n[None, :], qk, 0.0)
+                v = tl.load(
+                    v_bh
+                    + offs_n[:, None] * stride_vt
+                    + offs_d[None, :] * stride_vd,
+                    mask=mask_n[:, None] & mask_d[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                acc += tl.dot(qk.to(v.dtype), v)
+
+            tl.store(
+                o_bh
+                + offs_m[:, None] * stride_ot
+                + offs_d[None, :] * stride_od,
+                acc.to(Out_ptr.dtype.element_ty),
+                mask=mask_m[:, None] & mask_d[None, :],
+            )
 
 
 def triton_decode_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = 64,
+    block_size: int = DEFAULT_BLOCK_DECODE,
+    block_n: int = 64,
 ) -> torch.Tensor:
-    """Decode against past KR/V. CUDA Triton not specialized yet → blocked.
+    """Decode against past KR/V. Triton fused on CUDA; else blocked.
 
     On CPU (this box) and whenever Triton cannot run, uses
     ``blocked_decode_attn`` so ``BDH_ATTN_IMPL=triton`` still gets the
-    no-full-TxT decode path.
+    no-full-TxT decode path. Dedicated decode kernel skips causal masking
+    (past keys are all valid under tril(-1)).
     """
-    # A dedicated Triton decode kernel is GPU work; CPU / no-CUDA → blocked.
-    return blocked_decode_attn(Q, K, V, block_size=block_size)
+    if not _can_use_triton(Q):
+        return blocked_decode_attn(Q, K, V, block_size=block_size)
+
+    B, H, Tq, N = Q.shape
+    S = K.size(2)
+    D = V.size(-1)
+    if S == 0:
+        return Q.new_zeros(B, H, Tq, D)
+
+    if V.size(1) == 1 and H != 1:
+        Vh = V.expand(B, H, S, D).contiguous()
+    else:
+        Vh = V.contiguous()
+
+    Qc = Q.contiguous()
+    Kc = K.contiguous()
+    out = torch.empty(B, H, Tq, D, device=Q.device, dtype=Q.dtype)
+
+    Qf = Qc.view(B * H, Tq, N)
+    Kf = Kc.view(B * H, S, N)
+    Vf = Vh.view(B * H, S, D)
+    Of = out.view(B * H, Tq, D)
+
+    BH = B * H
+    BLOCK_N = min(block_n, triton.next_power_of_2(max(S, 1)))
+    BLOCK_N = max(16, min(BLOCK_N, 128))
+    BLOCK_D = min(64, triton.next_power_of_2(D) if D > 0 else 1)
+    BLOCK_K = min(64, triton.next_power_of_2(N) if N > 0 else 1)
+
+    grid = (Tq, BH)
+    _bdh_decode_fwd_kernel[grid](
+        Qf,
+        Kf,
+        Vf,
+        Of,
+        Qf.stride(0),
+        Qf.stride(1),
+        Qf.stride(2),
+        Kf.stride(0),
+        Kf.stride(1),
+        Kf.stride(2),
+        Vf.stride(0),
+        Vf.stride(1),
+        Vf.stride(2),
+        Of.stride(0),
+        Of.stride(1),
+        Of.stride(2),
+        Tq,
+        S,
+        N,
+        D,
+        BLOCK_N=BLOCK_N,
+        BLOCK_D=BLOCK_D,
+        BLOCK_K=BLOCK_K,
+    )
+    return out
 
 
 def eager_decode_attn(
@@ -381,8 +571,5 @@ def eager_decode_attn(
     D = V.size(-1)
     if S == 0:
         return Q.new_zeros(B, H, Tq, D)
-    if V.size(1) == 1 and H != 1:
-        Vh = V.expand(B, H, S, D)
-    else:
-        Vh = V
+    Vh = _expand_v_heads(V, B, H, S, D)
     return (Q @ K.transpose(-2, -1)) @ Vh
