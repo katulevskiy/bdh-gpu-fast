@@ -6157,3 +6157,43 @@ OMP_NUM_THREADS=2 /workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/ -q
 
 No GPU or CUDA-graph measurement was available or added. Attention remains raw
 scores × strict `tril(diagonal=-1)`.
+
+
+## opt/rope-gpu-v2 — conservative Triton gates and T>1 CPU parity (2026-09-19)
+
+**Branch:** `opt/rope-gpu-v2` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no `pathwaycom/*`).
+**Base tip:** `6a4c856` (`main`, after #137 docs).
+
+### Audit / deepen
+
+The default `BDH_ROPE_IMPL=eager` path is unchanged. The fused RoPE scaffold
+now gates Triton on the complete tensor set instead of checking only `v`:
+`v`, cis, and optional `out` must be on the same CUDA device and use the
+conservative fp16/bf16/fp32 set. Unsupported or mixed-device inputs therefore
+skip to the existing PyTorch/blocked fallback rather than reaching a kernel
+launch with a device or dtype mismatch. `backend_info(cuda)` also reports a
+clean skip without trying to initialize an unavailable CUDA runtime.
+
+The CPU coverage adds T>1 parity for transposed leading dimensions and an
+explicit out buffer, alongside the no-CUDA/Triton gate and diagnostic checks.
+RoPE math, cache behavior, strict lower-triangular attention, default eager
+dispatch, and generate behavior are unchanged.
+
+### Tests (CPU-only; no GPU claims)
+
+```text
+python -m pytest tests/test_rope_fuse.py tests/test_rope_decode.py -q
+# 33 passed, 2 skipped in 2.08s
+
+python -m pytest -q
+# 536 passed, 19 skipped, 3 warnings in 60.69s
+```
+
+This CPU box has no usable CUDA/Triton execution target; no timing, kernel-on-
+hardware, GPU correctness, or speedup claim is made.
+
+### Non-goals
+
+- No default eager, attention math, cache, or generate behavior change.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.
