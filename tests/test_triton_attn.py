@@ -13,10 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from kernels.attention import (  # noqa: E402
+    DEFAULT_BLOCK_COLD,
     _HAS_TRITON,
+    _as_contiguous,
     _can_use_triton,
+    _expand_v_heads,
+    _pick_triton_cold_tiles,
     blocked_tril_attn,
     eager_tril_attn,
+    online_tril_attn,
     triton_tril_attn,
 )
 from kernels.attention_dispatch import bdh_attn, resolve_attn_impl  # noqa: E402
@@ -138,3 +143,67 @@ def test_v_head_broadcast():
     ref = eager_tril_attn(Q, K, V)
     got = blocked_tril_attn(Q, K, V, block_size=5)
     assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
+
+
+# --- opt/triton-cold: better tiles, less staging, share online blocked ---
+
+def test_pick_triton_cold_tiles_aligned_with_online_block():
+    """Cold Triton defaults track DEFAULT_BLOCK_COLD (online blocked BS)."""
+    bm, bn, bd, bk = _pick_triton_cold_tiles(T=128, N=64, D=128)
+    assert bm >= 16 and bn >= 16
+    assert bm <= 128 and bn <= 128
+    # Prefer ~64 like online blocked, not the old fixed 32.
+    assert bm >= min(DEFAULT_BLOCK_COLD, 64)
+    assert bn >= min(DEFAULT_BLOCK_COLD, 64)
+    assert bd >= 16 and bk >= 16
+    # Explicit overrides still honored (power-of-2 capped).
+    bm2, bn2, _, _ = _pick_triton_cold_tiles(64, 32, 32, block_m=40, block_n=40)
+    assert bm2 == 64 and bn2 == 64  # next pow2 of 40 capped
+
+
+def test_as_contiguous_noop_when_already_contiguous():
+    t = torch.randn(2, 3, 4)
+    assert _as_contiguous(t) is t
+    v = t.transpose(0, 1)
+    assert not v.is_contiguous()
+    c = _as_contiguous(v)
+    assert c.is_contiguous()
+    assert torch.equal(c, v.contiguous())
+
+
+def test_triton_cold_fallback_matches_online_blocked():
+    """CPU triton_tril_attn must use online blocked (DEFAULT_BLOCK_COLD)."""
+    Q, K, V = _make_qkv(T=37, N=32, D=64, seed=42)
+    got = triton_tril_attn(Q, K, V)
+    ref_eager = eager_tril_attn(Q, K, V)
+    ref_online = online_tril_attn(Q, K, V, block_size=DEFAULT_BLOCK_COLD)
+    assert torch.allclose(got, ref_eager, rtol=1e-4, atol=1e-4)
+    assert torch.equal(got, ref_online)
+
+
+def test_expand_v_heads_shared_no_copy_on_broadcast():
+    """_expand_v_heads is a view (no B*H*T*D staging) — used by blocked + cold."""
+    B, H, T, D = 2, 4, 16, 32
+    V = torch.randn(B, 1, T, D)
+    Vh = _expand_v_heads(V, B, H, T, D)
+    assert Vh.shape == (B, H, T, D)
+    assert Vh.data_ptr() == V.data_ptr()
+    # Mutating base reflects in expand (true broadcast view)
+    V[0, 0, 0, 0] = 123.0
+    assert Vh[0, 0, 0, 0] == 123.0 and Vh[0, 3, 0, 0] == 123.0
+
+
+@pytest.mark.parametrize("T", [1, 5, 17, 64])
+def test_triton_path_vs_eager_tril_minus_one(T):
+    """triton cold path (CPU→online blocked) ≡ eager (Q@K.T).tril(-1) @ V."""
+    Q, K, V = _make_qkv(T=T, seed=100 + T)
+    scores = (Q @ K.transpose(-2, -1)).tril(diagonal=-1)
+    expected = scores @ V
+    got = triton_tril_attn(Q, K, V)
+    assert torch.allclose(got, expected, rtol=1e-4, atol=1e-4)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
+def test_default_remains_eager_after_triton_cold(monkeypatch):
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    assert resolve_attn_impl() == "eager"
