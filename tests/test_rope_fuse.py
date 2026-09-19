@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 import bdh
 import bdh_baseline as baseline
+import kernels.rope_dispatch as rope_dispatch
 from kernels.rope import (
     _HAS_TRITON,
     eager_rope_rotate,
@@ -74,6 +75,47 @@ def test_public_dispatch_rejects_invalid_explicit_impl_before_input_validation(
     """Explicit backend overrides fail before touching malformed tensor inputs."""
     with pytest.raises(ValueError, match="BDH_ROPE_IMPL"):
         entrypoint(None, None, None, impl="triton")
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "eager_backend", "fused_backend"),
+    [
+        (bdh_rope_rotate, "eager_rope_rotate", "fused_rope_rotate"),
+        (bdh_rope_rotate_paired, "rope_rotate_paired", "fused_rope_rotate_paired"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("env_impl", "explicit_impl"),
+    [("fused", "eager"), ("eager", "fused")],
+)
+def test_public_dispatch_explicit_impl_overrides_env(
+    monkeypatch, entrypoint, eager_backend, fused_backend, env_impl, explicit_impl
+):
+    """Explicit backend selection wins over BDH_ROPE_IMPL for both entrypoints."""
+    monkeypatch.setenv("BDH_ROPE_IMPL", env_impl)
+    calls = []
+
+    def mark_eager(v, *args, **kwargs):
+        calls.append("eager")
+        return v
+
+    def mark_fused(v, *args, **kwargs):
+        calls.append("fused")
+        return v
+
+    monkeypatch.setattr(rope_dispatch, eager_backend, mark_eager)
+    monkeypatch.setattr(rope_dispatch, fused_backend, mark_fused)
+
+    _, _, cos, sin, v, _ = _cis_and_v(
+        T=1 if entrypoint is bdh_rope_rotate_paired else 7,
+        seed=118 if entrypoint is bdh_rope_rotate_paired else 119,
+    )
+    if entrypoint is bdh_rope_rotate_paired:
+        cos = cos.reshape(*cos.shape[:-1], -1, 2)
+        sin = sin.reshape(*sin.shape[:-1], -1, 2)
+
+    entrypoint(v, cos, sin, impl=explicit_impl)
+    assert calls == [explicit_impl]
 
 
 def test_fused_pytorch_bit_identical_to_eager():
