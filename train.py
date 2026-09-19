@@ -787,6 +787,10 @@ def maybe_compile(
 class TrainLossLogger:
     """On-device loss accumulate; host sync only at LOG_FREQ (CUDA: deferred).
 
+    ``async_cuda`` is a CUDA-only request: on CPU it resolves to a no-op, so
+    logging stays synchronous and does not allocate pinned host storage or CUDA
+    events.
+
     Each step: ``loss.detach().float()`` into an on-device fp32 running sum
     (in-place ``add_`` — no per-step ``.item()``). At ``LOG_FREQ`` boundaries
     (and on ``close()``):
@@ -817,6 +821,9 @@ class TrainLossLogger:
         self.max_iters = max_iters
         self._acc: torch.Tensor | None = None
         self._steps = 0
+        # Resolve the request once. CPU (and CUDA-unavailable environments)
+        # deliberately take the ordinary synchronous path even when the
+        # default/requested async flag is true.
         self._use_cuda_async = (
             self.async_cuda
             and isinstance(self.device, torch.device)
@@ -827,6 +834,11 @@ class TrainLossLogger:
         self._event = None  # torch.cuda.Event when pending
         self._pending_step: int | None = None
         self._closed = False
+
+    @property
+    def uses_deferred_cuda(self) -> bool:
+        """Whether the deferred CUDA D2H path is active for this logger."""
+        return self._use_cuda_async
 
     def _ensure_host(self) -> torch.Tensor:
         if self._host is None:
