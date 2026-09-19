@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#147)
+# OPT status — landed work (#1–#149)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `4e01e38` (`#146` cuda-cold-v4 CPU-safe skip clarification after `#147` online-decode; `#145` sparse probe exit codes; `#144` profile-v14; `#143` docs refresh through #142). The landed matrix below is aligned through #147 plus #146; #146 clarifies CPU-safe CUDA skip behavior and #147 deepens the opt-in blocked/online T=1 shared-V path while preserving default eager dispatch and raw strict-tril math. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. Sparse stays OFF; #146/#147 add no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `8f6ec4a` (`#149` AUTO threshold sweep smoke after `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #149; #148 keeps the docs aligned through #147, while #149 exercises stable threshold de-duplication, recursive-dispatch suppression, malformed-input rejection, and independent cold-gate propagation without changing eager or AUTO-off defaults. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. #148 is docs-only and #149 adds no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#147)
+## Landed opts (#1–#149)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -326,6 +326,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **145** | `opt/sparse-v3` | Make sparse-probe success and guardrail-failure outcomes scriptable with stable exit codes, coverage, and notes; keep the CPU-only probe default-off | Sparse remains **OFF**; no production-path change or GPU sparse claim | GPU sparse validation remains open; **P0** GPU measure still outstanding |
 | **146** | `opt/cuda-cold-v4` | Clarify CPU-safe CUDA skip behavior for the cold-attention tests without changing the CUDA implementation or defaults | CPU configuration/skip coverage; no GPU build or timing claim | **P0** GPU measure / cold CUDA validation remains open |
 | **147** | `opt/online-decode-v3` | Deepen opt-in blocked/online T=1 shared-V decode by reusing shared cache views and vectorizing the B>1 epilogue; preserve strict raw `tril(-1)`, autograd fallback, cat-free generate, and default eager | CPU parity/coverage; no GPU timing or speedup claim | **P0** GPU/CUDA-Triton validation remains open |
+| **148** | `opt/docs-matrix-v35` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #147 | Docs only | — |
+| **149** | `opt/auto-thr-v3` | Add CPU-safe smoke coverage for the #131 `--auto-threshold-sweep` dispatcher: stable threshold de-duplication, recursive-dispatch suppression, malformed-input rejection, and independent cold-gate preservation | CPU-only smoke; eager and AUTO-off defaults unchanged; no GPU timing or performance claim | **P0** GPU measure / threshold-tile validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
