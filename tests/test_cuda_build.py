@@ -193,3 +193,23 @@ def test_forced_cpu_ext_smoke_is_explicit():
     assert "Building bdh_cuda_ext CPU-only" in output
     assert "skipping CUDA extension build" not in output
     assert "pure-Python install" not in output
+
+
+def test_forced_cpu_ext_takes_precedence_over_cuda_flag():
+    """The explicit CPU-only request wins when both native flags are set."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "BDH_FORCE_CPU_EXT": "1",
+            "CUDA_HOME": str(ROOT / ".missing-cuda-home"),
+            "CUDA_PATH": str(ROOT / ".missing-cuda-path"),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "skipping CUDA extension build" not in output
+    assert "pure-Python install" not in output

@@ -64,8 +64,10 @@ def _extensions():
     # PyTorch 2.14 headers require C++20 (CPU and CUDA extension builds).
     extra_compile_args = {"cxx": ["-O3", "-std=c++20"]}
 
-    use_cuda = torch.cuda.is_available() and os.environ.get("BDH_FORCE_CPU_EXT", "") != "1"
-    force_cuda = os.environ.get("BDH_BUILD_CUDA", "") == "1"
+    force_cpu = os.environ.get("BDH_FORCE_CPU_EXT", "") == "1"
+    use_cuda = torch.cuda.is_available() and not force_cpu
+    # An explicit CPU-only request takes precedence when both flags are set.
+    force_cuda = os.environ.get("BDH_BUILD_CUDA", "") == "1" and not force_cpu
 
     if use_cuda or force_cuda:
         # A CUDA-enabled torch wheel does not imply that the compiler toolkit is
