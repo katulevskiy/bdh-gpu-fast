@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#214; #160 docs scope retained)
+# OPT status — landed work (#1–#215; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `8ec4b16` (sparse probe guardrail terminal contract, #214) follows #213 Triton cold skip-gate coverage, #212 CUDA cold shape validation, #211 partial cache-page accounting, and #210 docs refresh through #209. Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #210 is docs-only; #211 adds CPU-only partial-page accounting; #212 adds CPU-only cold-shape validation before optional native dispatch; #213 deepens CPU-safe Triton import/device gate coverage; and #214 adds CPU-only sparse guardrail terminal coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `eafe65c` (generate benchmark environment contracts, #215) follows #214 sparse guardrail terminal coverage, #213 Triton cold skip-gate coverage, #212 CUDA cold shape validation, #211 partial cache-page accounting, and #210 docs refresh through #209. Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #210 is docs-only; #211 adds CPU-only partial-page accounting; #212 adds CPU-only cold-shape validation before optional native dispatch; #213 deepens CPU-safe Triton import/device gate coverage; #214 adds CPU-only sparse guardrail terminal coverage; and #215 adds CPU-only generate-benchmark environment restoration coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#214)
+## Landed opts (#1–#215)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -394,6 +394,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **212** | `opt/cuda-cold-v6` | Validate malformed cold-attention shapes before optional native dispatch; preserve stable CPU-safe `ValueError` contracts and unchanged strict raw `tril(-1)` semantics | CPU-only contract coverage; no GPU timing or kernel claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 | **213** | `opt/triton-cold-v6` | Exercise Triton import, CUDA-unavailable, and available skip-reason branches deterministically without CUDA work | CPU-only gate coverage; no GPU timing or kernel claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 | **214** | `test/sparse-probe-contract-v5` | Make an enforced sparse-density guardrail failure terminal before CPU crossover work; keep sparse opt-in and production wiring unchanged | CPU-only terminal exit contract; no attention, GPU timing, or sparse-kernel claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **215** | `test/bench-generate` | Verify interrupted generate-benchmark dispatch and AUTO threshold scopes restore their environment contracts | CPU-only environment-contract coverage; no GPU timing or generate-performance claim | **P1** GPU generate measurement remains open |
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -446,7 +447,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#212** CUDA cold shape-contract tests merged as `61af5e0`; validates malformed inputs before optional native dispatch with no GPU timing or kernel claim.
 - **#213** Triton cold skip-gate tests merged as `bd809b9`; covers import/device branches deterministically without CUDA work or GPU claims.
 - **#214** sparse probe guardrail tests merged as `8ec4b16`; failed enforced density guardrails stop before CPU crossover work, with no attention or GPU claim.
-- **Current tip #214** `8ec4b16` deepens CPU-safe contract coverage; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#215** generate-benchmark environment tests merged as `eafe65c`; interrupted dispatch and AUTO threshold scopes restore their environment contracts without GPU timing or performance claims.
+- **Current tip #215** `eafe65c` deepens CPU-safe benchmark contracts; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
