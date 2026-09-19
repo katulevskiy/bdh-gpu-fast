@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#81+)
+# OPT status — landed work (#1–#82)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `3c4e663` (`#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged by #69–#79 on short window; re-profiled in `opt/profile-v7`). This PR deepens Triton cold tiles (`opt/triton-cold-v2`).
+Tip documented here: `03bc30b` (`#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged; #69–#82 opt-ins are not exercised on the short window; re-profiled in `opt/profile-v7`). Latest #82 deepens Triton cold tiles; GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -63,7 +63,7 @@ export BDH_ATTN_IMPL=blocked
 export BDH_ATTN_IMPL=triton
 export BDH_ATTN_IMPL=cuda
 
-# opt-in long-T cold + long-S decode → blocked|triton (#75/#77)
+# opt-in long-T cold + long-S decode → blocked|triton (#75/#77/#82)
 export BDH_ATTN_AUTO=1
 export BDH_ATTN_AUTO_THRESHOLD=512
 # optional independent cold gate (unset → same as THRESHOLD):
@@ -154,7 +154,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#80)
+## Landed opts (#1–#82)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
