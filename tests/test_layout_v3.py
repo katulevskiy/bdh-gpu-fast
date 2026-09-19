@@ -651,3 +651,39 @@ def test_sampler_accepts_strided_logits_and_probability_buffer():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1, :].transpose(0, 1), ref), name
+
+
+def test_sampler_probability_buffer_preserves_strided_neighbors():
+    """Full-vocab sampler writes must stay inside a strided scratch view."""
+    torch.manual_seed(0)
+    logits_storage = torch.randn(2, 32, 2)
+    logits = logits_storage[..., 0]
+    probs_storage = torch.full((2, 32, 2), -777.0)
+    probs_buf = probs_storage[..., 0]
+    before = probs_storage.clone()
+    assert probs_buf.stride() == (64, 2)
+
+    # These branches write the full-vocab softmax into probs_buf.  The narrow
+    # top-k branch intentionally allocates k-space probabilities instead.
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        probs_storage.copy_(before)
+        destination = torch.empty(2, 1, dtype=torch.long)
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=probs_buf,
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=destination,
+        )
+        assert got is destination, name
+
+        # Channel 1 is the neighboring storage excluded by the scratch view.
+        assert torch.equal(probs_storage[..., 1], before[..., 1]), name
