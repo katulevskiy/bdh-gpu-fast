@@ -1004,27 +1004,29 @@ def train_step(model, optimizer, x, y):
     Default keeps ``model(x, y)`` (logits + CE) under the same ctx.
     GradScaler still only for float16+CUDA.
     """
-    if _amp_forward_only:
-        # Hot body under autocast; CE outside in fp32 for numerical honesty.
-        with ctx:
-            logits, _ = model(x)
-        loss = torch.nn.functional.cross_entropy(
-            logits.float().reshape(-1, logits.size(-1)),
-            y.reshape(-1),
-        )
-    else:
-        with ctx:
-            _logits, loss = model(x, y)
-    use_scaler = bool(_use_scaler and scaler is not None and scaler.is_enabled())
-    if use_scaler:
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-    else:
-        loss.backward()
-        optimizer.step()
-    clear_grads(optimizer)
-    return loss
+    try:
+        if _amp_forward_only:
+            # Hot body under autocast; CE outside in fp32 for numerical honesty.
+            with ctx:
+                logits, _ = model(x)
+            loss = torch.nn.functional.cross_entropy(
+                logits.float().reshape(-1, logits.size(-1)),
+                y.reshape(-1),
+            )
+        else:
+            with ctx:
+                _logits, loss = model(x, y)
+        use_scaler = bool(_use_scaler and scaler is not None and scaler.is_enabled())
+        if use_scaler:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
+        return loss
+    finally:
+        clear_grads(optimizer)
 
 
 if __name__ == "__main__":

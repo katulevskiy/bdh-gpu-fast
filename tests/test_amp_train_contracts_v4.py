@@ -482,6 +482,39 @@ def test_unscaled_amp_train_step_updates_and_clears_grads(monkeypatch):
     assert model.weight.grad is None
 
 
+def test_failed_unscaled_optimizer_step_still_clears_grads(monkeypatch):
+    """The unscaled AMP path clears grads even when optimizer.step fails."""
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", False)
+    monkeypatch.setattr(tr, "scaler", None)
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, 1))
+
+        def forward(self, x, y=None):
+            logits = x @ self.weight
+            return logits, logits.square().mean()
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    step_calls = []
+
+    def _raise_step():
+        assert model.weight.grad is not None
+        step_calls.append(True)
+        raise RuntimeError("synthetic optimizer step failure")
+
+    monkeypatch.setattr(optimizer, "step", _raise_step)
+    with pytest.raises(RuntimeError, match="synthetic optimizer step failure"):
+        tr.train_step(model, optimizer, torch.tensor([[2.0]]), torch.tensor([[0]]))
+
+    assert step_calls == [True]
+    assert model.weight.grad is None
+
+
 def test_injected_scaler_path_orders_hooks_and_clears_grads(monkeypatch):
     """A CPU-safe scaler probe preserves scale/backward/step/update ordering."""
     events = []
