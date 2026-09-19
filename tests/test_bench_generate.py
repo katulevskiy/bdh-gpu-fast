@@ -30,6 +30,34 @@ def test_parse_threshold_sweep_rejects_invalid_values(raw):
         bench_generate._parse_threshold_sweep(raw)
 
 
+def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
+    """Each unique decode threshold runs once with a mirrored cold gate."""
+    calls = []
+
+    def fake_run_auto_ab(args, device):
+        calls.append(
+            (
+                args.auto_threshold,
+                args.auto_cold_threshold,
+                args.auto_threshold_sweep,
+            )
+        )
+        return 1 if args.auto_threshold == 512 else 0
+
+    monkeypatch.setattr(bench_generate, "run_auto_ab", fake_run_auto_ab)
+    args = argparse.Namespace(
+        auto_threshold=999,
+        auto_cold_threshold=None,
+        auto_threshold_sweep="256, 512,256",
+    )
+
+    assert bench_generate.run_auto_ab_sweep(args, object()) == 1
+    assert calls == [
+        (256, 256, None),
+        (512, 512, None),
+    ]
+
+
 def test_run_impls_rejects_invalid_selection_before_model_setup(
     monkeypatch, capsys
 ):
