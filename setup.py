@@ -80,7 +80,7 @@ def _extensions():
         nvcc = shutil.which("nvcc")
         if nvcc:
             nvcc_candidates.append(Path(nvcc))
-        if not any(path.is_file() for path in nvcc_candidates):
+        if not any(path.is_file() and os.access(path, os.X_OK) for path in nvcc_candidates):
             print(
                 "bdh-gpu-opt: skipping CUDA extension build — nvcc not found in "
                 "CUDA_HOME/CUDA_PATH or PATH; CPU refs remain available "

@@ -7375,3 +7375,22 @@ requiring an inductor or C++ toolchain.
 Validation is CPU-only; no CUDA-graph, GPU timing, or GPU compile claim is
 made. Defaults and raw scores × strict `tril(diagonal=-1)` attention semantics
 remain unchanged.
+## opt/cuda-build-v4 — reject non-executable nvcc stubs (2026-09-19)
+
+**Branch:** `opt/cuda-build-v4` from `ad7a50b` (#224) in the private
+`katulevskiy/bdh-gpu-opt` repository only.
+
+The optional CUDA setup probe now requires an executable `nvcc` candidate in
+`CUDA_HOME`, `CUDA_PATH`, or `PATH` before constructing `CUDAExtension`. A stale
+or non-executable file at one of those locations remains a clear CPU-safe
+no-op, leaving the CPU refs available; the explicit CPU-only extension smoke
+and missing-toolkit skip contract remain unchanged.
+
+### CPU validation
+
+```text
+python -m pytest tests/test_cuda_build.py -q
+```
+
+Validation is CPU-only; no CUDA compiler, hardware execution, compile timing, or
+speedup is claimed.
