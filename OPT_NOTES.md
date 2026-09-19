@@ -2019,3 +2019,59 @@ GPU sparse kernels — re-measure on CUDA before wiring into `BDH.forward`.
 - No change to default `bdh.py` path / no `use_sparse=True` default
 - No fake GPU speedups from CPU medians
 
+
+## opt/gen-bench — generate × CacheManager × attn impls (2026-09-19)
+
+**Branch:** `opt/gen-bench` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f005b3f` (`opt/sparse-probe`).
+
+### Goal
+
+Land an **honest** end-to-end `BDH.generate` microbench comparing
+`BDH_ATTN_IMPL=eager|blocked|triton|cuda` when available. Generate always uses
+packed `CacheManager` (cat-free). Soft-label Triton/CUDA fallbacks on CPU
+(effective=blocked / cuda_ref). Document **GPU** as the real next measurement
+step in `OPT_BACKLOG.md`.
+
+### Harness (`benchmarks/bench_generate.py`)
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `--prompt` / `--new` | 16 / 32 | prompt length + max_new_tokens |
+| `--impls` | eager,blocked,triton,cuda | comma list of backends |
+| `--device` | auto | cuda if available else cpu |
+| `--warmup` / `--iters` | 2 / 5 | timing reps |
+
+Procedure:
+
+1. Tiny-ish BDH (`layers=4 d=128 nh=4`, `dropout=0`), fixed prompt.
+2. For each impl: set `BDH_ATTN_IMPL`, run `generate` with fixed seeds.
+3. Report median wall ms, tok/s, tokens-match-eager, `aten::cat` count,
+   and `backend_info()["effective"]`.
+4. CUDA sync when present.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica)
+
+```text
+python benchmarks/bench_generate.py --warmup 2 --iters 5
+# device=cpu gpu='cpu' torch=2.14.0+cu130 cuda=False
+# cfg layers=4 d=128 nh=4 B=1 prompt=16 new=32
+# eager   median=  51.58 ms  match_eager=yes  aten::cat=0  effective=eager
+# blocked median=  51.76 ms  match_eager=yes  aten::cat=0  effective=blocked
+# triton  median=  50.51 ms  match_eager=yes  aten::cat=0  effective=blocked (CPU fallback)
+# cuda    median=  54.43 ms  match_eager=yes  aten::cat=0  effective=cuda_ref
+# vs eager: ~1.00× / 1.02× / 0.95×  (noise — not a GPU claim)
+```
+
+### Honest limits
+
+- This box is CPU-only (`cuda=False`) — absolute ms are **not** GPU claims.
+- Triton without CUDA → blocked; cuda without ext → pure-PyTorch ref.
+- Default `BDH_ATTN_IMPL` remains **eager** until A100/H100 e2e data lands.
+- No softmax / scale / SDPA; no PRs to `pathwaycom/*`.
+
+### Non-goals
+
+- No default `BDH_ATTN_IMPL` change
+- No re-introducing `aten::cat` in generate / CacheManager
+- No fake GPU speedups from CPU medians
