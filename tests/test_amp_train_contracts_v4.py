@@ -227,3 +227,11 @@ def test_cuda_amp_throughput_claim_requires_live_runtime(monkeypatch):
         mp.setattr(tr, "device", torch.device("cuda"))
         mp.setattr(torch.cuda, "is_available", lambda: False)
         assert tr.amp_throughput_claim_device() == "none"
+
+
+def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
+    """A live CUDA runtime is the only positive throughput claim surface."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cuda"))
+        mp.setattr(torch.cuda, "is_available", lambda: True)
+        assert tr.amp_throughput_claim_device() == "cuda"
