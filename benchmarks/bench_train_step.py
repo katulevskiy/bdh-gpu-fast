@@ -737,12 +737,14 @@ def bench_compile_fullgraph_matrix(cfg, device, fused_ok: bool) -> None:
 
 
 def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
-    """Honest tiny train_step: fp32 vs opt-in AMP (bf16 / fp16).
+    """Compare fp32 with the opt-in AMP train matrix on this device.
 
-    Soft-skips a dtype when CPU autocast is unavailable. Restores float32 after.
-    Absolute ms are device-local; AMP throughput claim is CUDA-only.
+    The matrix keeps autocast scope visible: each supported dtype is measured
+    both with the legacy full forward and with logits-only autocast + fp32 CE.
+    Unsupported CPU backends are explicit soft-skips rather than bench errors.
+    Absolute ms are device-local; AMP throughput claims are CUDA-only.
     """
-    print("--- BDH_AMP_DTYPE fp32 vs AMP (honest train_step) ---")
+    print("--- BDH_AMP_DTYPE fp32 vs AMP train matrix ---")
     print(
         f"device={device} cuda={torch.cuda.is_available()} "
         f"amp_claim={tr.amp_throughput_claim_device()} "
@@ -750,19 +752,29 @@ def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
     )
 
     x, y = _batch(device)
+    # fp32 is the baseline; AMP dtypes run in both supported scope modes.
+    cases = [
+        ("float32", False),
+        ("bfloat16", False),
+        ("bfloat16", True),
+        ("float16", False),
+        ("float16", True),
+    ]
     results = []
 
     def _one(amp_name: str, forward_only: bool = False):
-        tag = amp_name + ("+fwd_only" if forward_only else "")
-        if amp_name == "bfloat16" and device.type == "cpu" and not tr.cpu_bf16_available():
-            print(f"{tag}: soft-skip (CPU bf16 unavailable)")
-            results.append((tag, None, "soft-skip"))
+        mode = "forward_only" if forward_only else "full"
+        tag = f"{amp_name}/{mode}"
+        try:
+            tr.configure_amp(amp_name, forward_only=forward_only)
+        except (RuntimeError, ValueError) as exc:
+            # In particular, CPU AMP may be unavailable even when torch imports
+            # successfully. Keep the matrix useful on CPU-only CI.
+            reason = f"soft-skip:{type(exc).__name__}"
+            print(f"{tag}: {reason} ({exc})")
+            results.append((amp_name, mode, None, reason, False))
             return
-        if amp_name == "float16" and device.type == "cpu" and not tr.cpu_fp16_available():
-            print(f"{tag}: soft-skip (CPU fp16 unavailable)")
-            results.append((tag, None, "soft-skip"))
-            return
-        tr.configure_amp(amp_name, forward_only=forward_only)
+
         torch.manual_seed(0)
         m = bdh.BDH(cfg).to(device)
         m.train()
@@ -778,38 +790,43 @@ def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
 
         try:
             med = timed(step, warmup=3, reps=12)
-        except Exception as e:
-            print(f"{tag}: soft-skip train_step {type(e).__name__}: {e}")
-            results.append((tag, None, f"soft-skip:{type(e).__name__}"))
+        except Exception as exc:
+            reason = f"soft-skip:{type(exc).__name__}"
+            print(f"{tag}: {reason} ({exc})")
+            results.append((amp_name, mode, None, reason, tr._use_scaler))
             return
         ms = med * 1000.0
         print(
             f"{tag}: median {ms:.2f} ms  "
             f"(scaler={tr._use_scaler} forward_only={tr._amp_forward_only})"
         )
-        results.append((tag, ms, "ok"))
+        results.append((amp_name, mode, ms, "ok", tr._use_scaler))
 
     try:
-        _one("float32")
-        _one("bfloat16")
-        _one("float16")
-        # Optional forward-only path (same bf16 when available)
-        if device.type != "cpu" or tr.cpu_bf16_available():
-            _one("bfloat16", forward_only=True)
+        for amp_name, forward_only in cases:
+            _one(amp_name, forward_only=forward_only)
     finally:
         tr.configure_amp("float32")
 
-    fp32 = next((ms for tag, ms, st in results if tag == "float32" and ms is not None), None)
+    fp32 = next(
+        (ms for amp_name, mode, ms, status, _ in results
+         if amp_name == "float32" and mode == "full" and ms is not None),
+        None,
+    )
     print("--- AMP summary (median ms; soft-skip = —) ---")
-    print(f"{'dtype':>18} {'median_ms':>12} {'vs_fp32':>10} {'status':>14}")
-    for tag, ms, status in results:
+    print(f"{'dtype/mode':>24} {'median_ms':>12} {'vs_fp32':>10} {'scaler':>8} {'status':>24}")
+    for amp_name, mode, ms, status, used_scaler in results:
+        tag = f"{amp_name}/{mode}"
         if ms is None or fp32 is None or fp32 <= 0:
             vs = "—"
             med_s = "—" if ms is None else f"{ms:.2f}"
         else:
             med_s = f"{ms:.2f}"
             vs = f"{ms / fp32:.2f}x"
-        print(f"{tag:>18} {med_s:>12} {vs:>10} {status:>14}")
+        print(
+            f"{tag:>24} {med_s:>12} {vs:>10} "
+            f"{str(used_scaler):>8} {status:>24}"
+        )
 
     if device.type != "cuda":
         print(
@@ -820,7 +837,7 @@ def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
     else:
         print(
             "GPU box: AMP can help when Tensor Cores + bandwidth bound; "
-            "re-check GradScaler only for float16. Still opt-in."
+            "re-check float16 GradScaler behavior on the target GPU. Still opt-in."
         )
 
 

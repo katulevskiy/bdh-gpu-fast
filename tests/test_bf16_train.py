@@ -113,6 +113,21 @@ def test_gradscaler_only_fp16_cuda():
     tr.configure_amp("float32")  # restore
 
 
+def test_unavailable_cpu_amp_keeps_previous_state(monkeypatch):
+    """A CPU AMP miss is clear and cannot leave a half-configured context."""
+    if tr.device.type != "cpu":
+        pytest.skip("CPU-only configuration guard")
+    tr.configure_amp("float32")
+    monkeypatch.setattr(tr, "cpu_bf16_available", lambda: False)
+    with pytest.raises(RuntimeError, match="bfloat16 autocast is unavailable"):
+        tr.configure_amp("bfloat16", forward_only=True)
+    assert tr.dtype == "float32"
+    assert tr.ptdtype is torch.float32
+    assert tr._use_scaler is False
+    assert tr._amp_forward_only is False
+    assert tr.scaler is not None and tr.scaler.is_enabled() is False
+
+
 def test_tril_neg1_unchanged_under_amp_config():
     """Configuring AMP must not alter attention mask semantics."""
     tr.configure_amp("bfloat16")
@@ -245,6 +260,22 @@ def test_train_step_fp32_still_default_path():
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
     x = torch.randint(0, cfg.vocab_size, (2, 16), device=tr.device)
     y = torch.randint(0, cfg.vocab_size, (2, 16), device=tr.device)
+    loss = tr.train_step(model, opt, x, y)
+    assert loss.dtype == torch.float32
+    assert torch.isfinite(loss)
+
+
+def test_train_step_requires_enabled_scaler():
+    """A stale disabled scaler flag must not force the scaling path."""
+    tr.configure_amp("float32")
+    cfg = _small_cfg()
+    torch.manual_seed(10)
+    model = bdh.BDH(cfg).to(tr.device)
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    x = torch.randint(0, cfg.vocab_size, (2, 16), device=tr.device)
+    y = torch.randint(0, cfg.vocab_size, (2, 16), device=tr.device)
+    tr._use_scaler = True
+    tr.scaler = torch.amp.GradScaler(device="cpu", enabled=False)
     loss = tr.train_step(model, opt, x, y)
     assert loss.dtype == torch.float32
     assert torch.isfinite(loss)

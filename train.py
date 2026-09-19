@@ -76,19 +76,37 @@ def _cpu_autocast_smoke(pt_dtype: torch.dtype) -> bool:
 
 
 def cpu_bf16_available() -> bool:
-    """True if CPU autocast(bfloat16) works (torch.cpu.is_bf16_supported or smoke)."""
+    """True only when CPU bf16 is advertised *and* a real autocast smoke works."""
     check = getattr(getattr(torch, "cpu", None), "is_bf16_supported", None)
     if callable(check):
         try:
-            return bool(check())
+            if not bool(check()):
+                return False
         except Exception:
             pass
+    # The version probe is only a hint; the matmul catches runtime/backend gaps.
     return _cpu_autocast_smoke(torch.bfloat16)
 
 
 def cpu_fp16_available() -> bool:
-    """True if CPU autocast(float16) works (smoke matmul)."""
+    """True only when a CPU float16 autocast matmul succeeds."""
     return _cpu_autocast_smoke(torch.float16)
+
+
+def _cpu_amp_unavailable_message(dtype_name: str) -> str:
+    return (
+        f"BDH_AMP_DTYPE={dtype_name} requested on CPU, but {dtype_name} "
+        "autocast is unavailable; use float32 or a CPU build with AMP support"
+    )
+
+
+def _grad_scaler_allowed(dtype_name: str) -> bool:
+    """Keep loss scaling strictly on CUDA float16 with a live CUDA runtime."""
+    return (
+        dtype_name == "float16"
+        and device.type == "cuda"
+        and torch.cuda.is_available()
+    )
 
 
 def amp_throughput_claim_device() -> str:
@@ -104,8 +122,9 @@ def configure_amp(amp_name: str | None = None, *, forward_only: bool | None = No
     """Set module-level dtype / autocast ctx / GradScaler from name or env.
 
     Returns the resolved dtype name (float32|bfloat16|float16).
-    GradScaler: enabled only when dtype==float16 and device is CUDA.
-    CPU: bf16/fp16 enable autocast when requested (smoke / parity); no scaler.
+    GradScaler is enabled only for float16 on a live CUDA device. CPU bf16/fp16
+    use autocast only when a backend smoke succeeds; an unavailable request
+    raises a clear error without partially changing the previous AMP state.
 
     forward_only: if True, train_step autocasts logits-only forward and computes
     CE in fp32. None → read BDH_AMP_FORWARD_ONLY (default 0 / off).
@@ -113,34 +132,46 @@ def configure_amp(amp_name: str | None = None, *, forward_only: bool | None = No
     global dtype, ptdtype, ctx, _use_scaler, scaler, _amp_forward_only
     if amp_name is None:
         amp_name = os.environ.get("BDH_AMP_DTYPE", "float32")
-    dtype = parse_amp_dtype(amp_name)
-    ptdtype = _PTDTYPE[dtype]
+    resolved = parse_amp_dtype(amp_name)
+    resolved_ptdtype = _PTDTYPE[resolved]
     if forward_only is None:
         forward_only = os.environ.get("BDH_AMP_FORWARD_ONLY", "0") in (
             "1",
             "true",
             "True",
         )
-    _amp_forward_only = bool(forward_only) and dtype != "float32"
-    if dtype == "float32":
-        ctx = nullcontext()
-        _use_scaler = False
-        _amp_forward_only = False
+    resolved_forward_only = bool(forward_only) and resolved != "float32"
+
+    # Validate CPU support before touching module state. This makes a failed
+    # opt-in safe for test/bench callers that want to fall back to fp32.
+    if resolved == "bfloat16" and device.type == "cpu" and not cpu_bf16_available():
+        raise RuntimeError(_cpu_amp_unavailable_message(resolved))
+    if resolved == "float16" and device.type == "cpu" and not cpu_fp16_available():
+        raise RuntimeError(_cpu_amp_unavailable_message(resolved))
+
+    if resolved == "float32":
+        resolved_ctx = nullcontext()
+        use_scaler = False
+        resolved_forward_only = False
     else:
         # Prefer bdh helper (CPU/CUDA/MPS); keeps generate AMP consistent.
-        ctx = bdh._autocast_context(device, ptdtype)
-        _use_scaler = dtype == "float16" and device.type == "cuda"
-        if dtype == "bfloat16" and device.type == "cpu" and not cpu_bf16_available():
-            raise RuntimeError(
-                "BDH_AMP_DTYPE=bfloat16 requested but CPU bf16 autocast unavailable"
-            )
-        if dtype == "float16" and device.type == "cpu" and not cpu_fp16_available():
-            raise RuntimeError(
-                "BDH_AMP_DTYPE=float16 requested but CPU fp16 autocast unavailable"
-            )
-    # GradScaler device arg is the amp device type; keep constructed even when
-    # disabled so train_step branches stay simple. Never enable for bf16 or CPU.
-    scaler = torch.amp.GradScaler(device=device.type, enabled=_use_scaler)
+        resolved_ctx = bdh._autocast_context(device, resolved_ptdtype)
+        use_scaler = _grad_scaler_allowed(resolved)
+
+    # Use a known-supported disabled scaler device on non-CUDA backends. The
+    # scaler object remains present for callers/tests, but can never activate.
+    resolved_scaler = torch.amp.GradScaler(
+        device="cuda" if use_scaler else "cpu",
+        enabled=use_scaler,
+    )
+
+    # Commit all state only after validation and construction have succeeded.
+    dtype = resolved
+    ptdtype = resolved_ptdtype
+    ctx = resolved_ctx
+    _use_scaler = use_scaler
+    scaler = resolved_scaler
+    _amp_forward_only = resolved_forward_only
     return dtype
 
 
@@ -890,7 +921,8 @@ def train_step(model, optimizer, x, y):
     else:
         with ctx:
             _logits, loss = model(x, y)
-    if _use_scaler:
+    use_scaler = bool(_use_scaler and scaler is not None and scaler.is_enabled())
+    if use_scaler:
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
