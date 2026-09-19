@@ -158,6 +158,10 @@ def test_run_auto_ab_rejects_invalid_inputs_before_model_setup(
             dict(prompts="8", auto_threshold=-1, auto_cold_threshold=None),
             "AUTO thresholds must be >= 0",
         ),
+        (
+            dict(prompts="8", auto_threshold=512, auto_cold_threshold=-1),
+            "AUTO thresholds must be >= 0",
+        ),
     )
     for values, expected in cases:
         assert bench_generate.run_auto_ab(argparse.Namespace(**values), None) == 2
