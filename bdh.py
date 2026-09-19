@@ -502,17 +502,41 @@ class BDH(nn.Module):
         return F.relu(out, inplace=True)
 
     @staticmethod
+    def _hdn_as_linear_weight(weight_hdn: torch.Tensor) -> torch.Tensor:
+        """``(nh, D, N)`` -> ``(nh*N, D)`` for ``F.linear`` (out, in).
+
+        Layout ``(nh,D,N)`` is baseline/state_dict-compatible; the transpose+reshape
+        copies once (``(nh,N,D)`` is not a free view of ``(nh,D,N)``). Prefer
+        einsum on the default ``bias is None`` hot path to skip this copy.
+        """
+        nh, D, N = weight_hdn.shape
+        return weight_hdn.transpose(1, 2).reshape(nh * N, D)
+
+    @staticmethod
     def _encoder_relu(
         x_btd: torch.Tensor, weight_hdn: torch.Tensor, bias=None
     ) -> torch.Tensor:
         """Project ``(B,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU.
 
-        Einsum avoids broadcasting ``(B,1,T,D) @ (nh,D,N)`` (extra expand/copy on
-        CPU). Output layout is decoder-friendly: ``view(B,T,nh*N)`` is a free view.
-        Optional ``bias`` is fused via in-place add before ReLU (no add temp).
+        Default (``bias is None``): ``einsum("btd,hdn->bthn")`` then in-place ReLU —
+        writes decoder-friendly contiguous ``(B,T,nh,N)`` without a weight
+        transpose-copy (always-on ``F.linear`` paid that copy and lost on CPU).
+
+        Optional bias: ``F.linear`` on a ``(nh*N,D)`` weight view with bias fused
+        in the GEMM epilogue (no separate ``add_`` temp), then ``view`` + ReLU.
+        Bit-identical to ``F.relu(einsum(...) + bias)`` at ``dropout=0``.
         """
-        out = torch.einsum("btd,hdn->bthn", x_btd, weight_hdn)
-        return BDH._bias_relu_(out, bias)
+        if bias is None:
+            out = torch.einsum("btd,hdn->bthn", x_btd, weight_hdn)
+            return F.relu(out, inplace=True)
+        nh, D, N = weight_hdn.shape
+        B, T, _ = x_btd.shape
+        out = F.linear(
+            x_btd,
+            BDH._hdn_as_linear_weight(weight_hdn),
+            bias.reshape(nh * N),
+        )
+        return F.relu(out.view(B, T, nh, N), inplace=True)
 
     @staticmethod
     def _encoder_v_relu(
@@ -520,7 +544,9 @@ class BDH(nn.Module):
     ) -> torch.Tensor:
         """Project ``(B,nh,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU.
 
-        Optional ``bias`` fused via in-place add before ReLU (same as encoder).
+        Stays on einsum: ``matmul`` yields ``(B,nh,T,N)`` and a permute→contiguous
+        to ``(B,T,nh,N)`` costs an extra activation copy (measured slower on CPU).
+        Optional bias still fused via in-place ``add_`` before ReLU.
         """
         out = torch.einsum("bhtd,hdn->bthn", y_bhtd, weight_hdn)
         return BDH._bias_relu_(out, bias)
