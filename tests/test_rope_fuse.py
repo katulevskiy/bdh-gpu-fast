@@ -768,6 +768,40 @@ def test_fused_paired_t1_backward_matches_eager():
     assert torch.equal(vf.grad, ve.grad)
 
 
+@pytest.mark.parametrize("impl", ["eager", "fused"])
+def test_public_paired_t1_backward_matches_eager_for_strided_input(impl):
+    """Public paired decode preserves input gradients for strided V views."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 7
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(293)
+    v = torch.randn(2, cfg.n_head, 1, N)
+
+    def make_strided_input():
+        backing = torch.full((*v.shape[:-1], N * 2), -321.0)
+        backing[..., ::2].copy_(v)
+        backing.requires_grad_()
+        return backing, backing[..., ::2]
+
+    eager_backing, eager_v = make_strided_input()
+    fused_backing, fused_v = make_strided_input()
+    assert not eager_v.is_contiguous() and not fused_v.is_contiguous()
+    eager = eager_rope_rotate(eager_v, cos, sin)
+    fused = bdh_rope_rotate_paired(
+        fused_v, paired[0], paired[1], impl=impl
+    )
+    grad = torch.randn_like(eager)
+    eager.backward(grad)
+    fused.backward(grad)
+    assert torch.equal(fused_backing.grad, eager_backing.grad), impl
+
+
 def test_t1_paired_cache_refreshes_across_positions(monkeypatch):
     """Paired decode cis follows each absolute position on the CPU path."""
     cfg = _small_cfg()
