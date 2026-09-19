@@ -142,7 +142,8 @@ def bdh_attn_decode(
     query never attends to itself.
 
     - eager:   ``_two_gemm_decode`` (Tq=1 BH-bmm when V per-head; else 4D @)
-    - blocked: tiled over past (broadcast-V; ``out.add_`` tiles; larger default tile)
+    - blocked / online: online tiled decode (broadcast-V tight oneshot; ``out.add_``;
+      long-S peak ~Tq×tile; larger default tile)
     - triton:  fused decode + V_BROADCAST on CUDA; blocked fallback on CPU
     - cuda:    ``tril_decode`` (Tq=1 + DECODE_TILE_N CUDA ext if built, else ref)
     """

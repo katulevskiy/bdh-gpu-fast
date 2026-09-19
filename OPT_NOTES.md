@@ -3133,3 +3133,89 @@ boxes (`amp_claim=cuda`); GradScaler only for `float16`.
 - No attention math changes / softmax / SDPA
 - No PRs to `pathwaycom/*`
 - No fake GPU speedups from CPU medians
+
+## opt/decode-online-v2 — deepen blocked T=1 decode (2026-09-19)
+
+**Branch:** `opt/decode-online-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `dbf2c21` (main after `#54` amp-deepen / `#53` decode-mm).
+
+### Goal
+
+After decode-mm, deepen **blocked/online** T=1 decode vs packed KR/V for
+**lower peak score mem** and **better CPU wall vs eager when S is long**
+(CacheManager broadcast `V=(B,1,S,D)`). Keep `tril(diagonal=-1)`, **cat=0**,
+**default eager** unchanged.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `_DECODE_ONESHOT_ELEMS=2048`; `_tiled_score_v(..., oneshot_elems=)`; broadcast-V decode uses tight oneshot (tiles long S); per-head V keeps large budget (BH-bmm); Tq=1 per-head tile loop reuses flattened Q; `max_decode_score_elems`; `online_decode_attn` alias |
+| `kernels/attention_dispatch.py` | Docs: blocked/online decode peak ~Tq×tile on long S |
+| `kernels/README.md` | Decode-online-v2 oneshot / peak note |
+| `tests/test_inc_decode.py` | Long-S broadcast parity S∈{64,256,1024,4096}; peak bound; tile-when-over-budget; online alias |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — unchanged
+export BDH_ATTN_IMPL=blocked   # online tiled decode (tight oneshot)
+export BDH_ATTN_IMPL=online    # alias of blocked
+```
+
+### Semantics (unchanged)
+
+```text
+# decode at absolute index S (past length S):
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+# CacheManager: aten::cat = 0; pos0 / S=0 → zeros
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_inc_decode.py tests/test_cuda_decode.py \
+  tests/test_attention_mask.py tests/test_cache_pack.py tests/test_gen_sample.py -q
+# 88 passed, 3 skipped — blocked/online/triton/cuda decode ≡ eager last row
+# peak_decode(S>2048) < S; cats=0; default BDH_ATTN_IMPL=eager
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+`OMP_NUM_THREADS=2`, Europe/Podgorica, `torch 2.14.0+cu130`, `cuda=False`.
+
+**Decode score×V** (B=4 H=4 N=64 D=128, broadcast V):
+
+| S | eager ms | blocked ms | spd | peak elems | eager peak |
+|---|----------|------------|-----|------------|------------|
+| 64 | ~0.025 | ~0.026 | ~0.96× | 64 | 64 |
+| 256 | ~0.082 | ~0.076 | ~1.07× | 256 | 256 |
+| 1024 | ~0.44 | ~0.45 | ~0.98× | 1024 | 1024 |
+| 4096 | ~9.0 | ~2.1 | **~4.4×** | **1024** | 4096 |
+
+Long-S cliff: eager broadcast-V oneshot blows up; blocked tiles under
+`_DECODE_ONESHOT_ELEMS` → lower peak **and** better wall.
+
+**Generate** (CacheManager, layers=4 d=128, tokens match eager, `aten::cat=0`):
+
+| prompt | new | eager ms | blocked ms | blk/eager | match | cats |
+|--------|-----|----------|------------|-----------|-------|------|
+| 64 | 16 | ~15.4 | ~17.0 | ~0.91× | yes | 0 |
+| 256 | 16 | ~25.6 | ~30.7 | ~0.83× | yes | 0 |
+| 1024 | 8 | ~96.6 | ~62.0 | **~1.56×** | yes | 0 |
+
+Note: generate wall at prompt=1024 includes **cold** blocked prefill (no full
+T×T) as well as decode tiles — still a fair IMPL=blocked vs eager A/B; decode
+micro above isolates score×V.
+
+**Verdict:** structural deepen lands (tight broadcast oneshot, peak helper,
+online alias). Mid-S decode ~parity; **long S** blocked/online wins wall + peak
+on CPU for broadcast-V. Default remains eager. **No GPU** — measure with
+`bench_gpu_attn.py --mode decode` / `bench_generate.py` on A100/H100.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / scale / SDPA
+- No fake GPU speedups from CPU medians
