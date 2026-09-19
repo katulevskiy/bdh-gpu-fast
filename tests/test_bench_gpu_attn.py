@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 8
+    assert summary["schema_version"] == 9
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -43,6 +43,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
             "reason": "cuda_unavailable",
             "detail": "torch.cuda.is_available() is false",
             "timing_scope": "none",
+            "cuda_available": False,
             "cuda_runtime_state": summary["cuda_runtime_state"],
             "cuda_built": summary["cuda_built"],
             "cuda_device_count": summary["cuda_device_count"],
@@ -128,7 +129,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 8
+    assert summary["schema_version"] == 9
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
@@ -556,6 +557,7 @@ def test_no_cuda_skip_records_requested_measurement_config(tmp_path):
     assert summary["status"] == "skip"
     assert summary["timing_scope"] == "none"
     assert summary["skips"][0]["timing_scope"] == "none"
+    assert summary["skips"][0]["cuda_available"] is False
     assert summary["skips"][0]["cuda_runtime_state"] == summary["cuda_runtime_state"]
     assert summary["request"] == {
         "B": 3,
