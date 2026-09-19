@@ -887,6 +887,51 @@ python train.py                       # BatchPrefetcher (default)
 BDH_DATALOADER=1 python train.py      # DataLoader + persistent workers (N=2)
 BDH_DATALOADER=1 BDH_NUM_WORKERS=4 python train.py
 ```
+## opt/embed-tie — embedding + LM head path (2026-09-19)
+
+**Branch:** `opt/embed-tie` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `73d6002` (ln-fuse tip on main).
+
+### Goal
+
+Tighten the token-embed → final vocab projection path: fewer cast/copy opportunities,
+contiguous `(B,T,V)` logits, and **document** weight-tying status. Do **not** change
+published attention semantics (`tril(-1)`, CacheManager, `BDH_ATTN_IMPL`, attn-bwd).
+
+### Baseline tying status (documented)
+
+Published / `bdh_baseline.py` keeps **separate** Parameters:
+
+| Tensor | Shape | Role |
+|--------|-------|------|
+| `embed.weight` | `(V, D)` | token lookup |
+| `lm_head` | `(D, V)` | `hidden @ lm_head` |
+
+They are **not** GPT-tied (distinct storages, independent init). Enabling tying by
+default would change trainable param count and break strict `load_state_dict` from
+baseline checkpoints — so default remains **untied**.
+
+### What landed (`bdh.py`)
+
+1. **`BDHConfig.tie_weights: bool = False`** — opt-in only. When `True`,
+   `lm_head` is registered `None` and logits use `F.linear(h, embed.weight)`.
+2. **`_embed_tokens(idx)`** — `LN(embed(idx))` on contiguous `(B,T,D)`, then
+   `unsqueeze(1)` for the residual body (bit-identical to LN-after-unsqueeze).
+3. **`_vocab_logits(x)`** — squeeze to `(B,T,D)`, ensure contiguous hidden,
+   then:
+   - untied: `F.linear(h, lm_head.T)` (transpose **view**, no `(V,D)` clone);
+     bit-identical to `h @ lm_head`
+   - tied: `F.linear(h, embed.weight)`
+4. **`lm_head_bias`** registered `None` (not in checkpoints) for optional
+   `F.linear` epilogue later.
+5. CE uses `reshape(-1, V)` on the contiguous logits buffer.
+
+### Preserved
+
+- `tril(diagonal=-1)` attention math
+- `CacheManager` packed decode path
+- `BDH_ATTN_IMPL` dispatch + attn-bwd hooks
+- Default untied `state_dict` strict-load vs `bdh_baseline`
 
 ### Correctness
 
@@ -971,6 +1016,28 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 - Native ext may be absent; `tril_decode` falls back to pure PyTorch ref.
 - Naive CUDA kernel is a scaffold (one thread per `(b,h,i,d)`); tiled/shared-mem later.
 - Still no softmax / no scale / no SDPA.
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/ -q
+# 135 passed, 4 skipped
+# includes test_embed_tie, test_vs_baseline, tril(-1), CacheManager,
+# BDH_ATTN_IMPL, attn-bwd
+```
+
+### CPU timings (honest, noisy multi-agent box)
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python benchmarks/bench_forward.py
+# device=cpu  layers=4 d=128 B=4 T=128
+# forward baseline median:  36.60 ms
+# forward optimized median: 27.70 ms  (1.32× cumulative vs frozen baseline)
+# generate(32) baseline:      85.30 ms
+# generate(32) optimized:     31.09 ms  (2.74× — mostly KV cache from earlier opts)
+
+# Vocab-proj microbench (B=8 T=128 D=256 V=256): mm vs F.linear view ~1.00×
+# (layout/API win; no new kernel). Embed+LN LN-then-unsqueeze ~parity.
+```
+
+Absolute ms vary with box load; ratios are rough. No CUDA here — contiguous
+vocab GEMM + optional tie matter more under GPU / compile.
 
 ### Non-goals
 
@@ -1031,3 +1098,5 @@ No GPU on this box. Do not claim end-to-end train speedup from table cache alone
 - No softmax / diagonal / SDPA
 - No change to weight-layout or `BDH_ATTN_IMPL` defaults
 
+- No default weight tying (would change published param semantics)
+- No attention / cache / compile changes in this branch
