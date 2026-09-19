@@ -6,8 +6,9 @@
 
 // Cold-path CUDA: tiled online strict-tril score×V (no global T×T scores).
 // Semantics: out[i] = sum_{j < i} (Q[i]·K[j]) * V[j]  — NO softmax, NO 1/sqrt(d).
-// cuda-cold-v2: adaptive TILE_M/TILE_N (16/32 × 16/32/64) for long-T prefill
-// (pair #75 pick_cold_block_size @T≥256).
+// cuda-cold-v3: adaptive TILE_M/TILE_N (16/32 × 16/32/64) for long-T prefill
+// (pair #75 pick_cold_block_size @T≥256); wide heads retain the mid-size
+// 32x32 policy to bound qk/accumulator pressure like Triton cold-v3 (#108).
 //
 // Grid:  (ceil(T / TILE_M), B*H, ceil(Dv / TILE_D))
 // Block: (TILE_D, TILE_M)  — thread (tx,ty) owns query row i0+ty and Dv lane d0+tx
@@ -32,9 +33,13 @@ constexpr int DECODE_TILE_N_MAX = 128;
 // Soft cap: fall back to naive if dynamic smem would exceed this.
 constexpr size_t SMEM_CAP = 48 * 1024;
 
-// Pair with #75: prefer larger query/key tiles on long cold/prefill.
+// Pair with #75: prefer larger query/key tiles on long cold/prefill. For wide
+// heads, retain the mid-size policy from Triton cold-v3 (#108) rather than
+// blindly growing the long-T key tile.
 // Returns (tile_m, tile_n); shrink until float smem estimate fits SMEM_CAP.
-__host__ inline void pick_cold_tiles(int T, int Dk, int* out_m, int* out_n) {
+__host__ inline void pick_cold_tiles(
+    int T, int Dk, int Dv, int* out_m, int* out_n) {
+  const bool wide_head = Dk > 64 || Dv > 128;
   int want_m;
   int want_n;
   if (T <= 64) {
@@ -45,7 +50,7 @@ __host__ inline void pick_cold_tiles(int T, int Dk, int* out_m, int* out_n) {
     want_n = 32;
   } else {
     want_m = 32;  // CUDA blockDim.y cap
-    want_n = 64;  // fewer key-tile iters on long T
+    want_n = wide_head ? 32 : 64;  // bound wide-head qk pressure
   }
   int tm = TILE_M;
   int tn = TILE_N;
@@ -270,7 +275,9 @@ torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor 
 
   int tile_m = TILE_M;
   int tile_n = TILE_N;
-  pick_cold_tiles(static_cast<int>(T), static_cast<int>(Dk), &tile_m, &tile_n);
+  pick_cold_tiles(
+      static_cast<int>(T), static_cast<int>(Dk), static_cast<int>(Dv),
+      &tile_m, &tile_n);
 
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, qc.scalar_type(),

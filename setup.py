@@ -59,7 +59,8 @@ def _extensions():
         str(csrc / "tril_attn_bind.cpp"),
     ]
     include_dirs = [str(csrc)]
-    extra_compile_args = {"cxx": ["-O3", "-std=c++17"]}
+    # PyTorch 2.14 headers require C++20 (CPU and CUDA extension builds).
+    extra_compile_args = {"cxx": ["-O3", "-std=c++20"]}
 
     use_cuda = torch.cuda.is_available() and os.environ.get("BDH_FORCE_CPU_EXT", "") != "1"
     force_cuda = os.environ.get("BDH_BUILD_CUDA", "") == "1"

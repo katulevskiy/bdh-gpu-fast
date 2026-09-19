@@ -135,6 +135,7 @@ def pick_cuda_cold_tiles(
     T: int,
     Dk: int = 64,
     *,
+    Dv: int | None = None,
     for_smem: bool = False,
     tile_m: int | None = None,
     tile_n: int | None = None,
@@ -146,6 +147,9 @@ def pick_cuda_cold_tiles(
     online trips while peak scores stay ≪ ``T×T``. CUDA launch uses
     ``for_smem=True`` (cap ``CUDA_TILE_M/N_MAX``, shrink for 48 KiB smem).
     CPU tiled refs use ``for_smem=False`` so long-T can reach 128 like blocked.
+    When ``Dk > 64`` or ``Dv > 128``, default long-T tiles stay at the
+    mid-size width (32/32 for CUDA, 64/64 for CPU), mirroring #108's
+    wide-head Triton guard. Explicit overrides still win.
     """
     def _p2_cap(x: int, lo: int, hi: int) -> int:
         x = max(lo, min(int(x), hi))
@@ -161,6 +165,7 @@ def pick_cuda_cold_tiles(
     hi_n = CUDA_TILE_N_MAX if for_smem else CUDA_TILE_N_CPU_MAX
     lo = 16
     T = max(int(T), 1)
+    wide_head = int(Dk) > 64 or (Dv is not None and int(Dv) > 128)
 
     if tile_m is not None:
         tm = _p2_cap(int(tile_m), lo, hi_m)
@@ -172,6 +177,8 @@ def pick_cuda_cold_tiles(
             want_m = 32
         else:
             want_m = 64 if for_smem else 128
+            if wide_head:
+                want_m = min(want_m, 32 if for_smem else 64)
         tm = _p2_cap(min(T, want_m), lo, hi_m)
 
     if tile_n is not None:
@@ -183,6 +190,8 @@ def pick_cuda_cold_tiles(
             want_n = 32
         else:
             want_n = 64 if for_smem else 128
+            if wide_head:
+                want_n = min(want_n, 32 if for_smem else 64)
         tn = _p2_cap(min(T, want_n), lo, hi_n)
 
     if for_smem:
@@ -331,7 +340,9 @@ def tril_score_v_tiled_ref(
     if T == 0:
         return q.new_zeros(B, H, 0, Dv)
 
-    TM, TN = pick_cuda_cold_tiles(T, Dk, tile_m=tile_m, tile_n=tile_n)
+    TM, TN = pick_cuda_cold_tiles(
+        T, Dk, Dv=Dv, tile_m=tile_m, tile_n=tile_n
+    )
     score_budget = _cold_score_budget(T, TM)
 
     # Acc dtype: widen half/bf16 like the CUDA kernel's float accumulators.
