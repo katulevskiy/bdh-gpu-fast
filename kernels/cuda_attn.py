@@ -21,13 +21,20 @@ tril_score_v(q, k, v)           — native ext if built+compatible, else ref
 tril_decode_ref(q, k_past, v)   — pure PyTorch decode vs packed past (always)
 tril_decode(q, k_past, v)       — native ext if built, else ref
 
-Optional native build (scaffold in ``csrc/``)::
+Optional native build (``csrc/``)::
 
     pip install -e .                                 # pure Python (default)
     BDH_BUILD_EXT=1 pip install -e . --no-build-isolation
     BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 
-Without the extension, training and tests still work via the reference path.
+Cold CUDA kernel (``tril_score_v_cuda``) uses **tiled online** accumulation
+(shared-mem Q/K/V tiles; no global T×T scores). Decode remains a separate
+packed-past scaffold. Without the extension, training and tests still work
+via the pure-PyTorch reference (which may materialize T×T — that is OK for
+correctness, not the GPU path).
+
+Wire-up: ``BDH_ATTN_IMPL=cuda`` → cold ``bdh_attn`` / decode ``bdh_attn_decode``.
+Default remains ``eager``.
 """
 
 from __future__ import annotations

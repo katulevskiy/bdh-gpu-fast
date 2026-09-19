@@ -32,13 +32,14 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - CacheManager v2: layer-contiguous KR/V, page growth, generate **0× aten::cat** (`opt/cache-v2` #20)
 - Online fused strict-tril score×V (no full T×T) under `blocked`/`online` (`opt/fuse-scorev` #21)
 - GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
+- Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold`) — GPU measure still P0
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
 
 ## Ranked next work
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
-| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + CUDA/Triton scaffolds in-tree; **harness landed** `benchmarks/bench_gpu_attn.py` — **no CUDA on this box**. | Run harness on A100/H100; record ms + bit-identical | Env blocker |
+| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + cold CUDA **tiled** scaffold (`opt/cuda-cold`) + Triton scaffolds in-tree; **harness landed** `benchmarks/bench_gpu_attn.py` — **no CUDA on this box**. | A100/H100 microbench vs eager; bit-identical | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU parity / train bench** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. Compile path hardened (#22); **GPU inductor / CUDA graphs unmeasured**. | GPU compile train step vs eager | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). Remaining: incremental score×V kernel + fewer host copies. | GPU decode kernel bench; keep cat-free | Medium |
