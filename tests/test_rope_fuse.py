@@ -137,6 +137,32 @@ def test_fused_out_param_and_no_alias():
         fused_rope_rotate_pytorch(shifted_v, cos, sin, out=shifted_out)
 
 
+def test_rope_out_param_rejects_cis_aliases_before_pair_store():
+    """Output slots cannot overwrite broadcasted cosine/sine storage."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=4, seed=114)
+
+    for cis in (cos, sin):
+        out = cis.expand_as(v)
+        before = out.clone()
+        with pytest.raises(ValueError, match="alias"):
+            fused_rope_rotate_blocked(v, cos, sin, out=out, block=1)
+        assert torch.equal(out, before)
+
+
+def test_paired_out_param_rejects_cis_aliases_before_pair_store():
+    """Paired output slots cannot overwrite the cached cis pair views."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=1, seed=115)
+    cos_p = cos.reshape(*cos.shape[:-1], -1, 2)
+    sin_p = sin.reshape(*sin.shape[:-1], -1, 2)
+
+    for cis_p in (cos_p, sin_p):
+        out = cis_p.reshape(*cis_p.shape[:-2], -1).expand_as(v)
+        before = out.clone()
+        with pytest.raises(ValueError, match="alias"):
+            fused_rope_rotate_paired(v, cos_p, sin_p, out=out)
+        assert torch.equal(out, before)
+
+
 def test_rope_shape_contracts_reject_malformed_inputs():
     """Rotation entrypoints fail clearly before doing partial math."""
     _, _, cos, sin, v, _ = _cis_and_v(T=2, seed=111)

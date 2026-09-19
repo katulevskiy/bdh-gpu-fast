@@ -27,6 +27,29 @@ except Exception:  # pragma: no cover - import guard
     _HAS_TRITON = False
 
 
+def _validate_rope_out(
+    v: torch.Tensor,
+    out: Optional[torch.Tensor],
+    *cis: torch.Tensor,
+) -> None:
+    if out is None:
+        return
+    # dtype may differ: CacheManager.reserve can be fp32 storage while AMP
+    # compute is fp16/bf16 — historical rope wrote via assignment cast.
+    if out.shape != v.shape or out.device != v.device:
+        raise ValueError(
+            f"rope out= must match v shape/device, got out={tuple(out.shape)}/"
+            f"{out.device} vs v={tuple(v.shape)}/{v.device}"
+        )
+    tensors = (v, *cis)
+    if any(
+        out is tensor
+        or (out.device == tensor.device and torch._C._overlaps(out, tensor))
+        for tensor in tensors
+    ):
+        raise ValueError("rope out= must not alias v or cis")
+
+
 def _validate_rope_inputs(
     v: torch.Tensor,
     cos: torch.Tensor,
@@ -48,16 +71,7 @@ def _validate_rope_inputs(
             f"cos/sin leading dims {cos.shape[:-1]} are not broadcastable "
             f"with v leading dims {v.shape[:-1]}"
         ) from exc
-    if out is not None:
-        # dtype may differ: CacheManager.reserve can be fp32 storage while AMP
-        # compute is fp16/bf16 — historical rope wrote via assignment cast.
-        if out.shape != v.shape or out.device != v.device:
-            raise ValueError(
-                f"rope out= must match v shape/device, got out={tuple(out.shape)}/"
-                f"{out.device} vs v={tuple(v.shape)}/{v.device}"
-            )
-        if out is v or torch._C._overlaps(out, v):
-            raise ValueError("rope out= must not alias v")
+    _validate_rope_out(v, out, cos, sin)
 
 
 def _validate_paired_cis(
@@ -83,14 +97,7 @@ def _validate_paired_cis(
             f"paired cis leading dims {cos_p.shape[:-2]} are not broadcastable "
             f"with v leading dims {v.shape[:-1]}"
         ) from exc
-    if out is not None:
-        if out.shape != v.shape or out.device != v.device:
-            raise ValueError(
-                f"rope out= must match v shape/device, got out={tuple(out.shape)}/"
-                f"{out.device} vs v={tuple(v.shape)}/{v.device}"
-            )
-        if out is v or torch._C._overlaps(out, v):
-            raise ValueError("rope out= must not alias v")
+    _validate_rope_out(v, out, cos_p, sin_p)
 
 
 def _is_t1_seq(v: torch.Tensor) -> bool:
