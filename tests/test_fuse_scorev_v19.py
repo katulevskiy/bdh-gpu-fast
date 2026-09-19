@@ -1,7 +1,8 @@
 """Focused v19 contract coverage for dispatched score×V gradients.
 
 This stays CPU-safe: every public dispatch alias is checked against the eager
-strict-tril reference with distinct Q/K tensors and per-head V values.
+strict-tril reference with distinct Q/K tensors with both shared and per-head
+V values.
 """
 
 from __future__ import annotations
@@ -19,13 +20,16 @@ from kernels.attention_dispatch import bdh_attn  # noqa: E402
 
 
 @pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
-def test_dispatch_preserves_distinct_qk_per_head_v_gradients(impl):
-    """Dispatch aliases preserve raw strict-tril Q/K/V gradients on CPU."""
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_distinct_qk_shared_and_per_head_v_gradients(
+    impl, v_heads
+):
+    """Dispatch aliases preserve raw strict-tril gradients for V layouts."""
     B, H, T, N, D = 2, 3, 19, 7, 5
     generator = torch.Generator(device="cpu").manual_seed(1919)
     Q = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
     K = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
-    V = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+    V = torch.randn(B, v_heads, T, D, generator=generator, dtype=torch.float64)
     dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
 
     def run(name):
