@@ -317,3 +317,21 @@ def test_timing_backend_skip_preserves_no_timing_claim(monkeypatch, tmp_path):
     result_by_backend = {item["backend"]: item for item in summary["results"]}
     assert result_by_backend["flaky"]["median_ms"] is None
     assert result_by_backend["eager"]["median_ms"] is not None
+
+
+def test_cold_reference_uses_raw_strict_lower_triangle():
+    """The benchmark reference stays raw score × strict tril, without scaling."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    q = torch.tensor([[[[1.0, 2.0], [3.0, -1.0], [2.0, 1.0]]]])
+    k = torch.tensor([[[[2.0, 1.0], [-1.0, 3.0], [1.0, -2.0]]]])
+    v = torch.tensor([[[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]]])
+
+    expected = (q @ k.transpose(-2, -1)).tril(diagonal=-1) @ v
+    actual = namespace["BACKENDS_COLD"]["eager"](q, k, v)
+
+    assert torch.equal(actual, expected)
