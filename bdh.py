@@ -152,24 +152,33 @@ class Attention(torch.nn.Module):
 
         # Incremental: queries attend to all past positions + earlier positions
         # in this chunk (strict: no self). Equivalent to full tril(diagonal=-1)
-        # over concat(past, new). Single-token decode (T==1, S>0) is the hot path:
-        # QR @ past_kr.mT @ past_v — no tril needed (all keys are strictly past).
+        # over concat(past, new). Single-token decode (T==1, S>0) is the hot path.
         S = past_kr.size(2)
         assert past_v.size(2) == S
 
         if T == 1 and S == 0:
+            # First token: no keys to attend to → zeros
             out = V.new_zeros(B, nh, T, V.size(-1))
             return out, QR, V
 
+        impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
+
         if T == 1:
-            # Hot decode step: attend only to past (j < i). Correct for any
-            # BDH_ATTN_IMPL.
-            scores = QR @ past_kr.transpose(-2, -1)  # (B, nh, 1, S)
-            out = scores @ past_v
+            # Hot decode: attend only to past (j < i). New token does not attend
+            # to itself. blocked/triton use tiled decode vs packed KR/V slices
+            # (no full TxT); eager keeps the simple two-GEMM form.
+            if impl == "eager":
+                scores = QR @ past_kr.transpose(-2, -1)  # (B, nh, 1, S)
+                out = scores @ past_v
+            else:
+                from kernels.attention_dispatch import bdh_attn_decode
+
+                out = bdh_attn_decode(QR, past_kr, past_v, impl=impl)
             return out, QR, V
 
-        # Multi-token chunk with past. Non-eager: concat + dispatched tril attn.
-        impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
+        # Multi-token chunk with past (prefill continuation / speculative).
+        # Prefer concat + dispatched tril attn when not eager so blocked/triton
+        # stay consistent with the cold path; eager keeps the split form.
         if impl != "eager":
             from kernels.attention_dispatch import bdh_attn
 

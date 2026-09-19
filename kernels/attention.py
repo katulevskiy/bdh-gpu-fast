@@ -301,3 +301,88 @@ def tril_attn(
     if impl == "triton":
         return triton_tril_attn(Q, K, V)
     raise ValueError(f"unknown attn impl={impl!r}")
+
+
+def blocked_decode_attn(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    block_size: int = 64,
+) -> torch.Tensor:
+    """Single-chunk decode against past KR/V only (strict tril diagonal=-1).
+
+    Q: (B, H, Tq, N) — typically Tq=1 for autoregressive decode
+    K: (B, H, S, N)  — packed past keys (length S); does **not** include Q's positions
+    V: (B, 1, S, D) or (B, H, S, D) — packed past values
+
+    Computes ``(Q @ K.mT) @ V`` tiled over the past axis. Because K/V are the
+    live cache prefix, every key is strictly earlier than the new queries, so
+    the new token never attends to itself (same as ``tril(diagonal=-1)``).
+
+    Never materializes an ``(S+Tq) x (S+Tq)`` score matrix (unlike concat + full
+    tril attn). Peak score tiles are at most ``(Tq x block_size)``.
+    """
+    B, H, Tq, N = Q.shape
+    S = K.size(2)
+    D = V.size(-1)
+    if K.shape[:2] != (B, H) or K.size(-1) != N:
+        raise ValueError(f"K shape {tuple(K.shape)} incompatible with Q {tuple(Q.shape)}")
+    if V.size(0) != B or V.size(2) != S:
+        raise ValueError(f"V shape {tuple(V.shape)} incompatible with K S={S}")
+
+    if S == 0:
+        return Q.new_zeros(B, H, Tq, D)
+
+    if V.size(1) == 1 and H != 1:
+        Vh = V.expand(B, H, S, D)
+    else:
+        Vh = V
+
+    BS = max(1, int(block_size))
+
+    # Modest past: one (Tq x S) score GEMM — still far smaller than full TxT.
+    if S <= BS or Tq * S <= BS * BS:
+        return (Q @ K.transpose(-2, -1)) @ Vh
+
+    out = Q.new_zeros(B, H, Tq, D)
+    for j0 in range(0, S, BS):
+        j1 = min(j0 + BS, S)
+        Kj = K[:, :, j0:j1, :]
+        Vj = Vh[:, :, j0:j1, :]
+        scores = Q @ Kj.transpose(-2, -1)
+        out = out + scores @ Vj
+    return out
+
+
+def triton_decode_attn(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    block_size: int = 64,
+) -> torch.Tensor:
+    """Decode against past KR/V. CUDA Triton not specialized yet → blocked.
+
+    On CPU (this box) and whenever Triton cannot run, uses
+    ``blocked_decode_attn`` so ``BDH_ATTN_IMPL=triton`` still gets the
+    no-full-TxT decode path.
+    """
+    # A dedicated Triton decode kernel is GPU work; CPU / no-CUDA → blocked.
+    return blocked_decode_attn(Q, K, V, block_size=block_size)
+
+
+def eager_decode_attn(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+) -> torch.Tensor:
+    """Reference decode: ``(Q @ K.mT) @ V`` (past-only; no self-attention)."""
+    B, H, Tq, _ = Q.shape
+    S = K.size(2)
+    D = V.size(-1)
+    if S == 0:
+        return Q.new_zeros(B, H, Tq, D)
+    if V.size(1) == 1 and H != 1:
+        Vh = V.expand(B, H, S, D)
+    else:
+        Vh = V
+    return (Q @ K.transpose(-2, -1)) @ Vh
