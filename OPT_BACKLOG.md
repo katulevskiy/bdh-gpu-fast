@@ -14,6 +14,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 ## Already landed (main)
 
 - RoPE without `stack→view`; skip redundant dtype casts
+- RoPE cos/sin table cache by (T, head_dim, device, dtype) (`opt/rope-cache`)
 - KV-style cache + incremental `generate`
 - MLP `permute → contiguous → view`
 - Vectorized `train.get_batch` (+ pin/non_blocking CUDA; optional DataLoader workers)
@@ -31,7 +32,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 | **P0** | **Fuse score×V epilogue (no materialize T×T)** | Ideal: `sum_{j<i} (Q_i·K_j) V_j` without full score tensor. | Complete Triton/CUDA fused kernel | High impact |
 | **P1** | **Cache packing / fewer cats** | Generate: `aten::cat` ~10% self CPU, 864 calls, ~201 MB — per-step cat on `kr`/`v`. | Prefill-sized buffer + write ptr | Medium |
 | **P1** | **`torch.compile` / inductor** | Forward: `copy_` ~23%, `mul` ~16%, LN ~9%, ReLU ~7%. **train-fuse:** optional `BDH_COMPILE=1` + fused AdamW + sync-light loop landed; measure on GPU. | GPU compile parity | Low |
-| **P2** | **Fused / cached RoPE** | Attn: mul/copy/trig/neg ~60% combined self. | Phase table or fused RoPE | Low–medium |
+| **P2** | **Fused / cached RoPE** | Attn: mul/copy/trig/neg ~60% combined self. | **Cached tables landed `opt/rope-cache`**; fused kernel still open | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; CPU wall ~noise vs tip | Low |
 | **P3** | **Hardware / dtype** | No GPU here; bf16/fp16 train optional later. | GPU box | Env |

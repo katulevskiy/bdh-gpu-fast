@@ -978,3 +978,56 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 - No change to CE loss / tril(-1) / train=first 90% val=last 10%
 - Do not default `BDH_DATALOADER=1` on CPU
 - Do not default `BDH_ATTN_IMPL=cuda`
+
+## opt/rope-cache — cached RoPE cos/sin tables (2026-09-19)
+
+**Branch:** `opt/rope-cache` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `ea0957a` (main tip after cuda-decode #15). Preserves `tril(-1)`, `CacheManager`, `BDH_ATTN_IMPL`, weight-layout.
+
+### Goal
+
+Avoid regenerating RoPE phase → cos/sin every forward when sequence length `T`
+is unchanged (training / full prefill). Tables are keyed by
+`(T, head_dim, device, dtype)` and reused across layers (existing caller share)
+and across batches.
+
+### What changed (`bdh.py` `Attention`)
+
+| Piece | Change |
+|-------|--------|
+| `_rope_cis_key` / `_rope_cis` | Single-slot cache for `rope_start=0` |
+| `_rope_cis_cache_key` | `(T, head_dim, device.type, device.index, dtype)` |
+| `rope_cos_sin` | Hit cache when key matches; else build, `detach()`, store |
+| Decode | `rope_start!=0` still computes fresh (absolute positions) |
+
+Unchanged: `rope()` math, baseline parity, shared `cos_sin` across layers in
+`BDH.forward`, KV `CacheManager`, attention dispatch.
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 155 passed, 7 skipped (CPU box; CUDA/native/Triton skips)
+# includes tests/test_rope_cache.py — cache hit identity, vs fresh phases,
+# baseline rope bit-identical, T key change, rope_start!=0 not aliased to 0,
+# multi-batch forward reuses tables
+```
+
+### Benchmarks (CPU — honest)
+
+```text
+rope_cos_sin T=128 uncached median: 0.108 ms
+rope_cos_sin T=128 cached   median: 0.001 ms  (~79× on the table build alone)
+forward B=4 T=128 layers=4 median:  ~10.8 ms  (full step; RoPE table is a
+  small slice of wall time once shared across layers — win is alloc/trig
+  elimination across batches, not a new GEMM kernel)
+```
+
+No GPU on this box. Do not claim end-to-end train speedup from table cache alone.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- No softmax / diagonal / SDPA
+- No change to weight-layout or `BDH_ATTN_IMPL` defaults
+

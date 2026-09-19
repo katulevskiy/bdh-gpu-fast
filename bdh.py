@@ -52,6 +52,10 @@ class Attention(torch.nn.Module):
         self.freqs = torch.nn.Buffer(
             get_freqs(N, theta=2**16, dtype=torch.float32).view(1, 1, 1, N)
         )
+        # Cached (cos, sin) for rope_start=0, keyed by (T, head_dim, device, dtype).
+        # Reused across layers (caller) and across batches while T is unchanged.
+        self._rope_cis_key = None
+        self._rope_cis = None
 
     @staticmethod
     def phases_cos_sin(phases):
@@ -102,9 +106,35 @@ class Attention(torch.nn.Module):
         ).view(1, 1, -1, 1)
         return positions * self.freqs
 
+    def _rope_cis_cache_key(self, T: int, device):
+        """Cache key: (T, head_dim, device, dtype) — training/prefill hot path."""
+        head_dim = self.freqs.shape[-1]
+        return (T, int(head_dim), device.type, device.index, self.freqs.dtype)
+
     def rope_cos_sin(self, T: int, rope_start: int, device):
-        """Precompute (cos, sin) once per forward; reuse across layers."""
-        return self.phases_cos_sin(self._rope_phases(T, rope_start, device))
+        """Precompute (cos, sin); cache by (T, head_dim, device, dtype) when rope_start=0.
+
+        Training / full prefill (rope_start=0) regenerates phases only when T,
+        head_dim, device, or dtype change — reused across layers and batches.
+        Decode (rope_start!=0) computes fresh so absolute positions stay correct
+        without polluting the fixed-T training table.
+        """
+        if rope_start != 0:
+            return self.phases_cos_sin(self._rope_phases(T, rope_start, device))
+
+        key = self._rope_cis_cache_key(T, device)
+        hit = self._rope_cis
+        if hit is not None and self._rope_cis_key == key:
+            cos, sin = hit
+            if cos.device == device and cos.shape[-2] == T:
+                return cos, sin
+
+        cos, sin = self.phases_cos_sin(self._rope_phases(T, 0, device))
+        # Detach so a cached table never holds an autograd graph across steps.
+        cos, sin = cos.detach(), sin.detach()
+        self._rope_cis_key = key
+        self._rope_cis = (cos, sin)
+        return cos, sin
 
     def forward(
         self,
