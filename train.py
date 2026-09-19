@@ -214,6 +214,21 @@ USE_PREFETCH_ASYNC = os.environ.get("BDH_PREFETCH_ASYNC", "1") not in ("0", "fal
 # Set BDH_PREFETCH_H2D=0 to keep host prefetch but issue H2D on the caller stream.
 USE_PREFETCH_H2D = os.environ.get("BDH_PREFETCH_H2D", "1") not in ("0", "false", "False")
 
+
+def prefetch_h2d_skip_reason() -> str | None:
+    """Return the CPU-safe reason why CUDA H2D staging is unavailable.
+
+    ``None`` means the requested device is CUDA and the CUDA runtime is
+    available. This probe intentionally performs no allocation, stream, or
+    event construction, so CPU tests can inspect the gate safely.
+    """
+    if device.type != "cuda":
+        return f"device-not-cuda: {device.type}"
+    if not torch.cuda.is_available():
+        return "CUDA unavailable: torch.cuda.is_available() is false"
+    return None
+
+
 input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
 
 
@@ -391,10 +406,12 @@ class BatchPrefetcher:
         requested_cuda_staging = (
             USE_PREFETCH_H2D if cuda_staging is None else bool(cuda_staging)
         )
-        # Gate the opt-in by the actual device before constructing any CUDA
-        # object. On CPU this keeps the stream/event path and device lookahead
-        # as clean no-ops, even when BDH_PREFETCH_H2D=1 (the default).
-        self._cuda_staging = bool(requested_cuda_staging and device.type == "cuda")
+        # Gate the opt-in before constructing any CUDA object. On CPU, or
+        # when a CUDA device is requested without a live CUDA runtime, this
+        # keeps the stream/event path and device lookahead as clean no-ops.
+        self._cuda_staging = bool(
+            requested_cuda_staging and prefetch_h2d_skip_reason() is None
+        )
         self._stream = (
             torch.cuda.Stream(device=device) if self._cuda_staging else None
         )

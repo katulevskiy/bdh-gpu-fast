@@ -116,6 +116,36 @@ def test_batch_prefetch_defaults_unchanged(tr):
     assert tr.USE_PREFETCH_H2D is True
 
 
+def test_prefetch_h2d_skip_reason_is_cpu_safe(tr, monkeypatch):
+    """The H2D gate reports CPU/runtime skips without CUDA construction."""
+    assert tr.prefetch_h2d_skip_reason() == "device-not-cuda: cpu"
+
+    monkeypatch.setattr(tr, "device", torch.device("cuda"))
+    monkeypatch.setattr(tr.torch.cuda, "is_available", lambda: False)
+    assert (
+        tr.prefetch_h2d_skip_reason()
+        == "CUDA unavailable: torch.cuda.is_available() is false"
+    )
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("unavailable CUDA must not construct stream/event objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    monkeypatch.setattr(
+        tr.BatchPrefetcher,
+        "_gather_pinned_host",
+        lambda self: (torch.zeros(1, 1, dtype=torch.int64),) * 2,
+    )
+    loader = tr.BatchPrefetcher("train", async_host=False, cuda_staging=True)
+    try:
+        assert loader._cuda_staging is False
+        assert loader._stream is None
+        assert loader._device_next is None
+    finally:
+        loader.close()
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="CUDA required: CPU-only runs cover the no-op contract, not H2D lookahead",
