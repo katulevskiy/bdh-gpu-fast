@@ -245,6 +245,22 @@ def test_attn_auto_restores_all_threshold_environment_after_exception(monkeypatc
     assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
 
 
+def test_attn_auto_applies_zero_thresholds_and_restores_them(monkeypatch):
+    """Zero is a valid strict gate and must not be treated as omitted."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "old-decode")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "old-cold")
+
+    with bench_generate._attn_auto(True, threshold=0, cold_threshold=0):
+        assert os.environ["BDH_ATTN_AUTO"] == "1"
+        assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "0"
+        assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "0"
+
+    assert os.environ["BDH_ATTN_AUTO"] == "0"
+    assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
+    assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
+
+
 def test_attn_auto_only_overrides_requested_threshold(monkeypatch):
     """An omitted cold gate stays independent during a decode-only override."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "0")
