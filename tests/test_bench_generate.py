@@ -90,6 +90,23 @@ def test_should_run_labels_available_cuda_triton_without_fallback(monkeypatch):
     ) == (True, "effective=triton")
 
 
+def test_should_run_labels_available_cuda_extension_without_fallback(monkeypatch):
+    """A CUDA extension probe reports its native effective backend."""
+    monkeypatch.setattr(
+        bench_generate,
+        "backend_info",
+        lambda: {
+            "effective": "cuda_ext",
+            "has_triton": False,
+            "has_cuda_ext": True,
+        },
+    )
+
+    assert bench_generate._should_run(
+        "cuda", bench_generate.torch.device("cuda")
+    ) == (True, "effective=cuda_ext")
+
+
 def test_should_run_labels_cpu_cuda_fallback_without_gpu_claim(monkeypatch):
     """CPU CUDA probes stay runnable but report the pure-PyTorch fallback."""
     monkeypatch.setattr(
