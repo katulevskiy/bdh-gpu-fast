@@ -97,6 +97,29 @@ def test_cuda_runtime_diagnostics_classify_states(monkeypatch):
     assert diagnostics(cuda_available=True)["cuda_runtime_state"] == "available"
 
 
+def test_cuda_runtime_diagnostics_survives_device_probe_failure(monkeypatch):
+    """A failing CUDA device probe remains an honest runtime skip."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    diagnostics = namespace["_cuda_runtime_diagnostics"]
+
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+
+    def fail_device_probe():
+        raise RuntimeError("driver query failed")
+
+    monkeypatch.setattr(torch.cuda, "device_count", fail_device_probe)
+    result = diagnostics(cuda_available=False)
+
+    assert result["cuda_built"] is True
+    assert result["cuda_device_count"] == 0
+    assert result["cuda_runtime_state"] == "runtime_unavailable"
+
+
 def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
     """Forced smoke timings are explicitly marked as CPU-only."""
     summary_path = tmp_path / "cpu-summary.json"
