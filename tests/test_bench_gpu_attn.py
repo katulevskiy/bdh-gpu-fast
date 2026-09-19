@@ -149,3 +149,27 @@ def test_force_cpu_overrides_available_cuda():
     assert select_device(cuda_available=True, force_cpu=True).type == "cpu"
     assert select_device(cuda_available=True, force_cpu=False).type == "cuda"
     assert select_device(cuda_available=False, force_cpu=True).type == "cpu"
+
+
+def test_force_cpu_bench_does_not_synchronize_cuda(monkeypatch):
+    """CPU smoke must not synchronize CUDA merely because CUDA is present."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def fail_if_called():
+        raise AssertionError("CPU smoke synchronized CUDA")
+
+    monkeypatch.setattr(torch.cuda, "synchronize", fail_if_called)
+    device = torch.device("cpu")
+    namespace["_bench"](
+        lambda value: value,
+        (torch.ones(1),),
+        device=device,
+        warmup=0,
+        iters=1,
+    )

@@ -143,8 +143,9 @@ def _skip_summary() -> dict[str, Any]:
     }
 
 
-def _sync() -> None:
-    if torch.cuda.is_available():
+def _sync(device: torch.device) -> None:
+    """Synchronize only the device whose work is being measured."""
+    if device.type == "cuda":
         torch.cuda.synchronize()
 
 
@@ -152,17 +153,18 @@ def _bench(
     fn: Callable[..., torch.Tensor],
     args: tuple[torch.Tensor, ...],
     *,
+    device: torch.device,
     warmup: int,
     iters: int,
 ) -> float:
     for _ in range(warmup):
         fn(*args)
-    _sync()
+    _sync(device)
     times: list[float] = []
     for _ in range(iters):
         t0 = time.perf_counter()
         fn(*args)
-        _sync()
+        _sync(device)
         times.append((time.perf_counter() - t0) * 1000.0)
     return statistics.median(times)
 
@@ -306,7 +308,9 @@ def main() -> int:
 
     print("--- median wall time (ms) ---")
     timings: dict[str, float] = {}
-    t_eager = _bench(ref_fn, (Q, K, V), warmup=args.warmup, iters=args.iters)
+    t_eager = _bench(
+        ref_fn, (Q, K, V), device=device, warmup=args.warmup, iters=args.iters
+    )
     timings["eager"] = t_eager
     print(f"  eager   {t_eager:8.3f} ms  (baseline)")
     for name, fn in backends.items():
@@ -315,7 +319,9 @@ def main() -> int:
         if name not in outs:
             continue
         try:
-            t = _bench(fn, (Q, K, V), warmup=args.warmup, iters=args.iters)
+            t = _bench(
+                fn, (Q, K, V), device=device, warmup=args.warmup, iters=args.iters
+            )
         except Exception as exc:
             comparisons[name] = _backend_skip(name, phase="timing", exc=exc)
             print(
