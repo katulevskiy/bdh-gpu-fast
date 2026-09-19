@@ -215,7 +215,10 @@ def test_train_backward_probe_without_targets_soft_falls_back(monkeypatch, capsy
         importlib.reload(tr)
 
     assert out is model
-    assert "requires example_y" in capsys.readouterr().out
+    captured = capsys.readouterr().out
+    assert "probe=train_bwd requires example_y" in captured
+    assert "pass example_y to maybe_compile" in captured
+    assert "BDH_COMPILE_PROBE=train" in captured
 
 
 def test_maybe_compile_train_probe_fallback_and_enable():
@@ -861,6 +864,39 @@ def test_compile_failure_reports_requested_probe_and_fullgraph(monkeypatch, caps
     assert "soft-fallback to original eager module" in captured
     assert "probe=train_bwd" in captured
     assert "fullgraph=True" in captured
+
+
+def test_compile_first_probe_failure_reports_retry_guidance(monkeypatch, capsys):
+    """First-probe failures identify the eager fallback and retry inputs."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    class ProbeFailure(torch.nn.Module):
+        def forward(self, *args, **kwargs):
+            raise RuntimeError("synthetic first-probe failure")
+
+    monkeypatch.setattr(tr.torch, "compile", lambda model, **kwargs: ProbeFailure())
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert out is model
+    assert "first probe failed" in captured
+    assert "soft-fallback to original eager module" in captured
+    assert "check the probe inputs and backend" in captured
 
 
 @pytest.mark.parametrize("autograd", [False, True])

@@ -6844,3 +6844,22 @@ pytest -q tests/test_fuse_scorev.py tests/test_inc_decode.py
 
 These tests are CPU parity/graph-safety checks only. No GPU timing or hardware
 correctness claim is made.
+## opt/compile-train-v4 — first-probe fallback diagnostics (2026-09-19)
+
+**Branch:** `opt/compile-train-v4` (private `katulevskiy/bdh-gpu-opt` only;
+no public PR). **Base:** `7719e9a` (#164).
+
+`train.maybe_compile()` now distinguishes an unprobed compile from a failed
+first probe, and the `train_bwd` missing-target fallback states the exact
+remediation: pass `example_y` or select the explicit forward-only `train`
+probe. First-probe failures identify the original eager fallback and point to
+probe inputs/backend checks. Defaults remain `BDH_COMPILE=0`,
+`BDH_COMPILE_PROBE=train_bwd`, `IMPL=eager`; no attention math or GPU claim
+changed.
+
+CPU validation:
+
+```bash
+.venv/bin/python -m pytest tests/test_compile.py -q
+OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/ -q
+```
