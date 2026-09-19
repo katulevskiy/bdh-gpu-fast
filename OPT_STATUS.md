@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#128)
+# OPT status — landed work (#1–#130)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `45b4afe` (`#128` packed Triton decode KR/V strides, after `#127` profile-ci and `#126` docs update). The historical matrix below is aligned through #125; `OPT_NOTES.md` § `opt/profile-v13` records the CPU re-profile on this tip. CPU evidence remains operator-level only: no GPU timing, kernel win, correctness, or speedup claim was added; GPU validation remains the P0 blocker. Default eager attention and the strict raw-score × `tril(-1)` semantics remain unchanged.
+Tip pointer: `5200b4f` (`#130` attn-bwd-v2 / `#129` profile-v13 / `#128` decode-gemm-v2 / `#127` profile-ci / `#126` docs-matrix-v30). The landed matrix below is aligned through #130; #129 records the clean post-#128 CPU profile, and #130 keeps the blocked/online analytic-attention GPU train matrix together with the CPU-safe parity/skip contract. Default eager remains unchanged; #128 retains raw score×V and strict past-only decode semantics, while #129/#130 add no GPU timing or speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -73,7 +73,7 @@ export BDH_ATTN_AUTO_THRESHOLD=512
 ### `BDH_ROPE_IMPL` — RoPE rotate (default `eager`)
 
 | Value | Behavior |
-|-------|----------|
+|---------|----------|
 | `eager` | Historical strided even/odd rotate (bit-identical default) |
 | `fused` | Pair-contiguous PyTorch; Triton on CUDA when usable |
 
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#125)
+## Landed opts (#1–#130)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -248,7 +248,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **70** | `opt/dropout-compile` | Harden dropout=0 / eval identity for compile; FX/Dynamo tests; COMPILE=1 dropout A/B bench | Identity + 0 Dynamo breaks; CPU dropout A/B ~noise | GPU compile still P1 |
 | **71** | `opt/docs-matrix` (through #69) | Refresh optimization matrix through #69 (`962a3b6`) | Docs only | — |
 | **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e then deepened by #75 | GPU thr re-tune open |
-| **73** | `opt/attn-mem-probe` | CPU peak-mem probe eager vs blocked vs online (`bench_attn_mem.py`) | Mid-T: peak↓ wall↑; long-T both; default eager | No GPU claims |
+| **73** | `opt/attn-mem-probe` | CPU peak-mem probe eager vs blocked vs online (`bench_attn_mem.py`) | Mid-T peak↓ wall↑; long-T both; default eager | No GPU claims |
 | **74** | `opt/docs-matrix` (through #73) | Refresh optimization matrix through #73 (`5d63bc2`) | Docs only | — |
 | **75** | `opt/prefill-blocked` | Deepen blocked/online cold (adaptive BS@T≥256); AUTO long-T cold+decode | AUTO e2e 1.26×@1024 / 1.39×@2048; cats=0; default eager | GPU thr re-tune open |
 | **76** | `opt/docs-matrix-v10` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #75; update documented tip metadata | Docs only | — |
@@ -301,6 +301,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **123** | `opt/sparse-v2` | Gate `BDH_SPARSE_PROBE`, add conservative density guardrails, and test that production BDH stays dense/default-off | CPU density re-smoke x=26.63% / xy=11.37% at step 150; sparse did not beat dense; keep OFF | No GPU timing or sparse-kernel claim; GPU validation remains open |
 | **124** | `opt/rope-gpu-scaffold` | Route paired T=1 RoPE through the selected `BDH_ROPE_IMPL`; add a zero-stride cis-row Triton launch without expanding broadcast rows; retain eager default and CPU fallback/parity | CPU paired parity; CUDA/Triton coverage is skip-gated here; no GPU timing | **P0** GPU fused-RoPE validation remains open |
 | **125** | `opt/docs-matrix-v29` | Docs-only refresh through #123 on the #124 code tip; this v30 refresh carries the #124 scaffold into the matrix and updates the tip pointer | Docs only | — |
+| **126** | `opt/docs-matrix-v30` | Docs-only refresh carrying the #124/#125 documentation tip forward and keeping the private code/docs pointer current | Docs only | — |
+| **127** | `opt/profile-ci` | Add CPU profile smoke plus optional manual/nightly Chrome trace upload; keep traces gitignored and avoid PR-triggered or GPU claims | CPU smoke only; no GPU timing | — |
+| **128** | `opt/decode-gemm-v2` | Preserve capacity-padded packed CacheManager Q/K/V strides in the T=1 Triton decode launcher; avoid per-step contiguous staging while retaining eager defaults, raw score×V, and strict past-only decode semantics | CPU parity; CUDA/Triton coverage remains skip-gated; no GPU timing | **P0** GPU decode measure / cold CUDA-Triton validation |
+| **129** | `opt/profile-v13` | Re-profile the clean #128 tip and record attention/forward/generate operator evidence without changing semantics | CPU-only profile: attention `copy_`=2/call, forward=12/call, generate=394/call; `cat=0`, `contiguous=0` | No GPU timing or speedup claim |
+| **130** | `opt/attn-bwd-v2` | Include the `online` alias alongside `blocked` in the analytic-attention GPU train matrix, crossed with `AUTOGRAD=0|1`, while retaining the CPU-safe parity gate | CPU parity/skip contract; full smoke 525 passed, 19 skipped; GPU matrix unrun | **P2** GPU analytic-attention train measure remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -356,3 +361,4 @@ python benchmarks/bench_gpu_attn.py --mode decode --T 512
 - Re-introducing `aten::cat` in packed `generate`
 - Wiring sparse ReLU into default `BDH.forward` without a measured win
 - Treating CPU density or sparse crossover as a GPU sparse-kernel result; `BDH_SPARSE_PROBE` remains explicit opt-in
+
