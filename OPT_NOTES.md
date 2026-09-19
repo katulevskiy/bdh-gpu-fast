@@ -1457,3 +1457,67 @@ See updated `OPT_BACKLOG.md`: P0 = GPU measure of fused score×V; P1 = compile G
 - No PRs to `pathwaycom/*`
 - No softmax / diagonal / SDPA
 - No GPU speedup claims from these CPU % figures
+## opt/bf16-train — optional train AMP via BDH_AMP_DTYPE (2026-09-19)
+
+**Branch:** `opt/bf16-train` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `3d3ed2b` (compile-harden on main).
+
+### Goal
+
+Make mixed-precision **training** opt-in (default remains **fp32**), matching the
+decode-amp philosophy. Env `BDH_AMP_DTYPE` selects autocast dtype; GradScaler
+only for **fp16 + CUDA**. Preserve `tril(diagonal=-1)` / no-softmax / no-scale.
+
+### Knobs (`train.py`)
+
+| Env / API | Default | Meaning |
+|-----------|---------|---------|
+| `BDH_AMP_DTYPE` | unset → `float32` | `float32`/`fp32`/`off`, `bfloat16`/`bf16`, `float16`/`fp16`/`half` |
+| `configure_amp(name)` | from env | Reconfigure module `ctx` / `scaler` (tests) |
+| `cpu_bf16_available()` | — | CPU bf16 autocast smoke / gate |
+| GradScaler | **off** unless `float16` **and** CUDA | bf16 never loss-scales |
+
+Previously `train.py` auto-picked bf16/fp16 whenever CUDA was present and left
+CPU on a nullcontext. Now AMP is **explicit** via env; CPU autocast runs when
+requested (bf16/fp16) so smoke/parity work on this box.
+
+### Semantics (unchanged)
+
+```text
+out = tril(Q @ K.T, diagonal=-1) @ V   # no softmax, no 1/sqrt(d)
+```
+
+Attention / Parameter layout untouched. `train_step` still wraps forward in
+`ctx` and branches scaler vs plain `backward`+`step`.
+
+### AMP correctness (CPU autocast — documented atol)
+
+| path | dtype | atol | rtol |
+|------|-------|------|------|
+| train forward logits + loss | float16 / bfloat16 | 5e-2 | 5e-2 |
+| train grads (1× fwd+bwd) | float16 / bfloat16 | 1e-1 | 1e-1 |
+
+Observed on this box (tiny cfg, torch 2.14 CPU): bf16 logits max ~4e-3, grads
+~5e-3; fp16 lower. Table uses headroom (same order as decode-amp forward).
+**Not bit-identical** — expected under autocast.
+
+```text
+.venv/bin/python -m pytest tests/test_bf16_train.py -v
+# CPU bf16 smoke + parity vs fp32; GradScaler gate; tril(-1) smoke
+```
+
+### Honest limits
+
+- **No GPU on this box** (`cuda=False`) — no train throughput claim for AMP.
+  GradScaler path is unit-gated (`_use_scaler = dtype==float16 and cuda`) but
+  not timed here.
+- CPU bf16/fp16 autocast often **slower** than fp32 (cast overhead); useful for
+  correctness smoke, not a speed win.
+- If `BDH_AMP_DTYPE=bfloat16` on a CPU without bf16, `configure_amp` raises.
+- Still no softmax / diagonal inclusion / SDPA / PRs to `pathwaycom/*`.
+
+### Non-goals
+
+- No default AMP on (stays float32 until env set)
+- No attention math changes
+- No pathwaycom PRs
