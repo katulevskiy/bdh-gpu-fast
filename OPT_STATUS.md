@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#204; #160 docs scope retained)
+# OPT status — landed work (#1–#209; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `5995a7c` (`opt/profile-v18`, #204) follows #203 `opt/prefetch-v4` and #202 docs refresh through #201. Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #202 is docs-only, #203 adds CPU-only unavailable-CUDA H2D skip gating before stream/event construction, and #204 records the profile-v18 counts; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `a48b7e1` (Triton RoPE skip-reason contract, #209) follows #208 blocked-tile long-path gradient parity, #207 CPU AMP failure-state coverage, #206 docs refresh through #204, and #205 zerograd logger lifecycle coverage. Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #205 adds CPU-only logger close/update-after-close contracts, #206 is docs-only, #207 adds CPU-only AMP failure-state coverage, #208 adds CPU-only long-path blocked gradient parity, and #209 stabilizes CPU-safe Triton RoPE skip diagnostics; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -164,7 +164,7 @@ BDH_PREFETCH_H2D=0 python train.py  # caller-stream H2D
 Optional `BDH_AMP_FORWARD_ONLY=1` (#54/#119): autocast **logits only**; CE in fp32 outside.
 Default `0` keeps `model(x,y)` under the same autocast ctx.
 
-CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here). #119 makes capability checks transactional, soft-skips unsupported matrix arms, and reports full vs forward-only scope plus scaler state.
+CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here). #119/#142/#179 make capability checks transactional, soft-skip unsupported matrix arms, and report full vs forward-only scope plus scaler state; #207 verifies an unavailable CPU request preserves the complete prior AMP configuration state.
 **AMP helps on GPU** (Tensor Cores / HBM); never cite CPU medians as speedups.
 Decode path AMP (older #5) is separate from this train knob (#24+#54).
 
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#204)
+## Landed opts (#1–#209)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -384,7 +384,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **202** | `opt/docs-v51` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #201 while preserving the real-GPU P0 blocker | Docs only | — |
 | **203** | `opt/prefetch-v4` | Gate opt-in H2D staging on both CUDA device type and live CUDA availability; expose actionable CPU-safe skip reasons before stream/event construction | CPU-only skip/identity coverage; no H2D timing or correctness claim | **P1** GPU H2D overlap/throughput remains unmeasured |
 | **204** | `opt/profile-v18` | Re-profile the #199–#201 tip with the matched profile-v17 schedule; record unchanged attention/forward/generate `copy_` counts and `cat`/`contiguous` floors | CPU-only: `copy_`=2/12/394 per call; `cat=0`; `contiguous=0`; flat versus v17 | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
-
+| **205** | `test/zerograd-v3` | Deepen the CPU-safe `TrainLossLogger` lifecycle contract: flush a partial window exactly once on `close()` and reject updates after close | CPU-only lifecycle coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **206** | `opt/docs-v52` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #204 while preserving profile-v18 counts and the real-GPU P0 blocker | Docs only | — |
+| **207** | `test/amp-train-contracts-v4` | Deepen the CPU AMP failure-state contract so an unavailable request reports an actionable error without mutating the complete prior configuration | CPU-only failure-state coverage; no GPU timing or throughput claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **208** | `test/prefill-blocked` | Deepen CPU long-path blocked attention parity with exact autograd gradient checks at the tiled boundary; preserve raw strict-tril semantics and defaults | CPU-only forward/gradient parity coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **209** | `test/rope-fuse` | Stabilize the Triton RoPE skip-reason contract by validating the primary input before optional runtime probing; preserve eager defaults and safe fallbacks | CPU-only skip-diagnostic coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -427,7 +431,12 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#202** docs refresh merged as `3d3d1fe`; carries the matrix through #201 and preserves the real-GPU P0 blocker.
 - **#203** `opt/prefetch-v4` merged as `9669e06`; gates unavailable-CUDA H2D staging before stream/event construction and adds CPU-safe skip-reason coverage, with no GPU timing or overlap claim.
 - **#204** `opt/profile-v18` merged as `5995a7c`; matched CPU counts remain flat versus profile-v17 (`copy_`=2/12/394 per call, `cat=0`, `contiguous=0`), with no GPU timing or speedup claim.
-- **Current tip #204** `opt/profile-v18` is at `5995a7c`; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#205** zerograd logger lifecycle tests merged as `e8ad099`; CPU-only coverage locks one-shot partial flush and rejects updates after close, with no GPU timing or speedup claim.
+- **#206** docs refresh merged as `6e0f313`; carries the matrix through #204 and preserves profile-v18 counts plus the real-GPU blocker.
+- **#207** CPU AMP failure-state tests merged as `dd11718`; unavailable requests preserve the complete prior AMP configuration, with no GPU timing or throughput claim.
+- **#208** blocked-tile long-path gradient tests merged as `dd4fc90`; CPU-only forward/gradient parity covers shared and head-matched V layouts at the tiled boundary, with no GPU timing or speedup claim.
+- **#209** Triton RoPE skip-reason tests merged as `a48b7e1`; invalid primary inputs are diagnosed before runtime probing, with no GPU timing or speedup claim.
+- **Current tip #209** `a48b7e1` stabilizes CPU-safe RoPE diagnostics; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
