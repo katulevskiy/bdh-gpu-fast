@@ -80,6 +80,25 @@ def test_explicit_cold_threshold_is_strict_and_decode_scoped(monkeypatch):
     assert resolve_decode_impl(7) == "blocked"
 
 
+def test_valid_cold_threshold_isolates_invalid_shared_threshold(monkeypatch):
+    """A valid cold override keeps prefill usable when decode config is invalid."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "not-an-int")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "2")
+    monkeypatch.setattr(
+        "kernels.attention_dispatch.triton_decode_available", lambda: False
+    )
+
+    assert resolve_cold_impl(2) == "eager"
+    assert resolve_cold_impl(3) == "blocked"
+
+    with pytest.raises(ValueError, match="must be an int"):
+        resolve_decode_impl(2)
+
+    assert resolve_cold_impl(2) == "eager"
+
+
 def test_empty_cold_threshold_mirrors_live_shared_threshold(monkeypatch):
     """An empty cold override follows the live shared threshold."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
