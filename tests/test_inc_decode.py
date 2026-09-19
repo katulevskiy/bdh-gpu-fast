@@ -690,9 +690,13 @@ def test_cuda_tiled_ref_blocked_parity_inc():
         atol=1e-4,
     )
 
-@pytest.mark.skipif(not _HAS_TRITON, reason="Triton launcher unavailable")
 def test_triton_decode_launcher_preserves_packed_strides(monkeypatch):
-    """Host launcher passes capacity-padded packed views without staging copies."""
+    """Host launcher passes packed views without staging copies.
+
+    The fake launcher makes this a CPU-safe contract test: real Triton remains
+    covered by the CUDA-only tests below, while the no-copy stride contract is
+    exercised even when Triton is not installed on the test host.
+    """
     B, H, S, N, D = 2, 4, 7, 8, 16
     cm = CacheManager(
         n_layer=1,
@@ -722,7 +726,9 @@ def test_triton_decode_launcher_preserves_packed_strides(monkeypatch):
             return launch
 
     monkeypatch.setattr(attention_impl, "_can_use_triton", lambda _: True)
-    monkeypatch.setattr(attention_impl, "_bdh_decode_fwd_kernel", _FakeKernel())
+    monkeypatch.setattr(
+        attention_impl, "_bdh_decode_fwd_kernel", _FakeKernel(), raising=False
+    )
     got = attention_impl.triton_decode_attn(Q, K, V)
     ref = eager_decode_attn(Q, K, V)
 
@@ -731,3 +737,42 @@ def test_triton_decode_launcher_preserves_packed_strides(monkeypatch):
     assert captured["vptr"].data_ptr() == V.squeeze(1).data_ptr()
     assert captured["kf"].stride() == K.reshape(B * H, S, N).stride()
     assert captured["vptr"].stride() == V.squeeze(1).stride()
+
+
+@pytest.mark.parametrize("S", [_DECODE_ONESHOT_ELEMS, _DECODE_ONESHOT_ELEMS + 1])
+@pytest.mark.parametrize("B", [1, 2])
+def test_packed_cache_t1_decode_oneshot_boundary_cpu_parity(S, B):
+    """Packed padded KR/V views stay exact across the oneshot budget boundary."""
+    H, N, D = 4, 8, 16
+    cm = CacheManager(
+        n_layer=1,
+        max_seq=S + 17,
+        batch_size=B,
+        n_head=H,
+        n_latent=N,
+        n_embd=D,
+        device="cpu",
+    )
+    torch.manual_seed(500 + B + S)
+    cm._kr_buf[0].normal_()
+    cm._v_buf[0].normal_()
+    cm.seq_len = S
+    K, V = cm.get_past(0)
+    assert K is not None and V is not None
+    # A singleton B=1 V dimension can make ``is_contiguous()`` true despite
+    # the live prefix retaining the larger capacity stride. Check the actual
+    # packed strides instead of relying on that ambiguous predicate.
+    assert K.stride() == (H * cm.capacity * N, cm.capacity * N, N, 1)
+    assert V.stride() == (cm.capacity * D, cm.capacity * D, D, 1)
+
+    Q = torch.randn(B, H, 1, N)
+    ref = eager_decode_attn(Q, K, V)
+    for impl in ("blocked", "online", "triton"):
+        got = bdh_attn_decode(Q, K, V, impl=impl)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+            f"impl={impl} B={B} S={S} "
+            f"maxdiff={(got - ref).abs().max().item()}"
+        )
+    assert max_decode_score_elems(S) <= S
+    if S > _DECODE_ONESHOT_ELEMS:
+        assert max_decode_score_elems(S) < S

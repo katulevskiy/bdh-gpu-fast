@@ -66,6 +66,21 @@ def _as_contiguous(t: torch.Tensor) -> torch.Tensor:
     return t if t.is_contiguous() else t.contiguous()
 
 
+def _reshape_decode_view(t: torch.Tensor, *shape: int) -> torch.Tensor:
+    """Flatten decode batch/head dimensions without copying view-compatible input.
+
+    Packed ``CacheManager`` prefixes are intentionally capacity-strided rather
+    than contiguous.  ``view`` makes that no-copy contract explicit; unusual
+    caller layouts retain the old ``reshape`` fallback.  Triton receives the
+    resulting strides either way, so this helper never adds an unconditional
+    staging ``contiguous()`` to the T=1 path.
+    """
+    try:
+        return t.view(*shape)
+    except RuntimeError:
+        return t.reshape(*shape)
+
+
 def _pick_triton_cold_tiles(
     T: int,
     N: int,
@@ -1245,11 +1260,11 @@ def triton_decode_attn(
 
     # The decode kernel already receives explicit element strides. Preserve
     # packed CacheManager views instead of staging a contiguous K/V copy on
-    # every T=1 step; reshape keeps the dense per-head matrices while retaining
-    # the capacity-padded batch stride. For a non-packed multi-token input,
-    # reshape may still materialize the ordinary contiguous fallback.
-    Qf = Q.reshape(B * H, Tq, N)
-    Kf = K.reshape(B * H, S, N)
+    # every T=1 step; the view-first helper keeps the dense per-head matrices
+    # while retaining the capacity-padded batch stride. For a non-packed
+    # multi-token input, it may still use the ordinary reshape fallback.
+    Qf = _reshape_decode_view(Q, B * H, Tq, N)
+    Kf = _reshape_decode_view(K, B * H, S, N)
     Of = out.view(B * H, Tq, D)
 
     if v_broadcast:
@@ -1257,7 +1272,7 @@ def triton_decode_attn(
         V_ptr = V1
         stride_vb, stride_vt, stride_vd = V1.stride(0), V1.stride(1), V1.stride(2)
     else:
-        Vf = V.reshape(B * H, S, D)
+        Vf = _reshape_decode_view(V, B * H, S, D)
         V_ptr = Vf
         stride_vb, stride_vt, stride_vd = Vf.stride(0), Vf.stride(1), Vf.stride(2)
 
