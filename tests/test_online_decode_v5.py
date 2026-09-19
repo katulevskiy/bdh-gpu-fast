@@ -180,6 +180,23 @@ def test_online_decode_multi_query_packed_shared_v_tiled_parity():
     )
 
 
+def test_online_decode_block_size_invariance_for_shared_v():
+    """Shared-V decode stays past-only across single and split tiles."""
+    B, H, S, Tq, N, D = 2, 3, 65, 3, 4, 2
+    g = torch.Generator().manual_seed(1213)
+    Q = torch.randn(B, H, Tq, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    V_storage = torch.randn(B, 1, S + 9, D, generator=g)
+    V = V_storage.narrow(2, 4, S)
+
+    ref = eager_decode_attn(Q, K, V)
+    for block_size in (1, 16, 64, 128):
+        got = online_decode_attn(Q, K, V, block_size=block_size)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+            f"block_size={block_size} maxdiff={(got - ref).abs().max().item()}"
+        )
+
+
 def test_online_decode_preserves_offset_packed_shared_v_views():
     """Long CPU decode keeps nonzero-offset packed K/V views exact and read-only."""
     B, H, S, N, D = 2, 3, 1025, 4, 2
