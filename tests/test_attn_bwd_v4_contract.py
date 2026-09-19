@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from kernels.attention import eager_tril_attn
 from kernels.attention_bwd import strict_tril_attn
 
 
@@ -62,3 +63,40 @@ def test_single_query_backward_only_reaches_strict_past(impl, v_heads):
     # Diagonal and future keys/values are excluded by tril(diagonal=-1).
     assert torch.equal(K.grad[:, :, query:, :], torch.zeros_like(K.grad[:, :, query:, :]))
     assert torch.equal(V.grad[:, :, query:, :], torch.zeros_like(V.grad[:, :, query:, :]))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_single_query_shared_v_backward_reduces_head_grads(impl):
+    """Shared V must reduce only the strict-past per-head gradients."""
+    generator = torch.Generator().manual_seed(2028)
+    query = 3
+    Q = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        2, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO = torch.zeros(2, 3, 5, 6, dtype=torch.float64)
+    dO[:, :, query, :] = torch.randn(
+        2, 3, 6, generator=generator, dtype=torch.float64
+    )
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    out.backward(dO)
+
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_full = V.detach().expand(2, 3, 5, 6).clone().requires_grad_(True)
+    eager_tril_attn(Q_ref, K_ref, V_full).backward(dO)
+
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-8, atol=1e-8)
+    assert torch.allclose(K.grad, K_ref.grad, rtol=1e-8, atol=1e-8)
+    assert torch.allclose(
+        V.grad, V_full.grad.sum(dim=1, keepdim=True), rtol=1e-8, atol=1e-8
+    )
+    assert torch.equal(
+        V.grad[:, :, query:, :], torch.zeros_like(V.grad[:, :, query:, :])
+    )
