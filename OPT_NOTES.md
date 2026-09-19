@@ -6651,3 +6651,45 @@ execution, kernel correctness, or speedup claim.
 - No default eager, cache, generate, or attention math change.
 - No unsafe layout flip, sampler rewrite, custom RNG path, or channels-last path.
 - No GPU claims and no repository/public-PR scope beyond the private target.
+
+## opt/profile-v15 — CPU re-profile after #152/#154 (2026-09-19)
+
+**Branch:** `opt/profile-v15` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR).
+**Base tip:** `e1248ce` (`main`, after #156 layout-v3; includes #152
+generate-copy ceiling and #154 rope-fuse-v3). This profile is CPU-only and
+makes no GPU claim.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+/workspace/bdh-gpu-opt/.venv/bin/python benchmarks/profile_forward.py \
+  --device cpu --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The harness uses two warmups, one wait, and three active steps. Percentages are
+self-CPU percentages from the three active steps; counts are aggregate counts
+followed by the per-active-call count. `cat` and `contiguous` were absent from
+all three CPU traces (zero calls).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators | copy_ / cat / contiguous |
+|------|-------------------------|---------------------------|
+| Attention | `aten::bmm` **31.99%**, `aten::mul` **22.22%**, `aten::complex` **19.12%**, `aten::copy_` **8.87%**, `aten::add` **7.14%**, `aten::sub` **5.44%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
+| Forward | `aten::bmm` **29.05%**, `aten::mm` **23.15%**, `aten::mul` **15.99%**, `aten::complex` **11.42%**, `aten::copy_` **7.05%**, `aten::clamp_min_` **2.79%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
+| Generate | `aten::mm` **21.81%**, `aten::bmm` **14.15%**, `aten::mul` **3.05%**, `aten::matmul` **2.40%**, `aten::native_layer_norm` **2.36%**, `aten::einsum` **2.04%**, `aten::copy_` **0.86%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
+
+The tip preserves raw scores × strict `tril(diagonal=-1)` attention: no
+softmax, scale, or SDPA. The observed copy counts remain at the warmed
+CPU-build floor from profile-v14, with no `cat` or `contiguous` calls. These
+CPU percentages and operator counts are not GPU performance measurements.
+
+### Verdict / non-goals
+
+- CPU profile recorded after #152/#154 on the post-#156 main tip.
+- No GPU timing, kernel-on-hardware result, correctness, or speedup claim.
+- No attention-semantic change, public PR, or PR to `pathwaycom/*`.
