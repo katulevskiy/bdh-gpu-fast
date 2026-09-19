@@ -98,6 +98,24 @@ def test_empty_cold_threshold_mirrors_live_shared_threshold(monkeypatch):
     assert resolve_decode_impl(7) == "eager"
 
 
+def test_empty_cold_threshold_propagates_shared_validation(monkeypatch):
+    """A fallback cold gate must not hide later shared-threshold failures."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "")
+
+    assert resolve_cold_impl(4) == "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "not-an-int")
+    with pytest.raises(ValueError, match="must be an int"):
+        resolve_cold_impl(5)
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "6")
+    assert resolve_cold_impl(6) == "eager"
+    assert resolve_cold_impl(7) != "eager"
+
+
 @pytest.mark.parametrize(
     ("impl", "expected"),
     [
