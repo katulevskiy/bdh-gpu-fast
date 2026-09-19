@@ -219,8 +219,6 @@ class Attention(torch.nn.Module):
         # tril attn when not eager so blocked/triton stay consistent with the
         # cold path; eager keeps the split form (also cat-free).
         if impl != "eager":
-            from kernels.attention_dispatch import bdh_attn
-
             # Contiguous past||new without torch.cat (generate profile cares).
             _, _, _, Ndim = QR.shape
             Ddim = V.size(-1)
