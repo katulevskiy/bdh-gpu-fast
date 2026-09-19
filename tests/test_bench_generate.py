@@ -49,6 +49,32 @@ def test_run_impls_rejects_invalid_selection_before_model_setup(
         assert expected in capsys.readouterr().out
 
 
+def test_run_auto_ab_rejects_invalid_inputs_before_model_setup(
+    monkeypatch, capsys
+):
+    """Invalid AUTO inputs fail closed before model/device work."""
+    monkeypatch.setattr(
+        bench_generate,
+        "_cfg",
+        lambda args: pytest.fail("invalid AUTO inputs must not build a model config"),
+    )
+
+    cases = (
+        (dict(prompts="", auto_threshold=512, auto_cold_threshold=None), "--prompts"),
+        (
+            dict(prompts="8,-1", auto_threshold=512, auto_cold_threshold=None),
+            "prompt lengths must be > 0",
+        ),
+        (
+            dict(prompts="8", auto_threshold=-1, auto_cold_threshold=None),
+            "AUTO thresholds must be >= 0",
+        ),
+    )
+    for values, expected in cases:
+        assert bench_generate.run_auto_ab(argparse.Namespace(**values), None) == 2
+        assert expected in capsys.readouterr().out
+
+
 def test_attn_impl_restores_environment_after_exception(monkeypatch):
     """An interrupted impl run must not leak its dispatch override."""
     monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
