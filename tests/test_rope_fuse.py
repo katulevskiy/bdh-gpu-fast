@@ -127,6 +127,35 @@ def test_fused_out_param_and_no_alias():
         fused_rope_rotate_pytorch(v, cos, sin, out=v)
 
 
+def test_rope_shape_contracts_reject_malformed_inputs():
+    """Rotation entrypoints fail clearly before doing partial math."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=2, seed=111)
+
+    with pytest.raises(ValueError, match="must be even"):
+        fused_rope_rotate_pytorch(v[..., :3], cos[..., :3], sin[..., :3])
+    with pytest.raises(ValueError, match="shape mismatch"):
+        fused_rope_rotate_pytorch(v, cos, sin[..., :-1])
+    with pytest.raises(ValueError, match="last dim"):
+        fused_rope_rotate_pytorch(v, cos[..., :-2], sin[..., :-2])
+    with pytest.raises(ValueError, match="rope out"):
+        fused_rope_rotate_pytorch(v, cos, sin, out=torch.empty_like(v[..., :-1]))
+
+
+def test_paired_rope_shape_contract_rejects_malformed_inputs():
+    """The paired T=1 contract validates its pair-axis geometry too."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=1, seed=112)
+    cos_p = cos.reshape(*cos.shape[:-1], -1, 2)
+    sin_p = sin.reshape(*sin.shape[:-1], -1, 2)
+
+    with pytest.raises(ValueError, match="trailing dims"):
+        fused_rope_rotate_paired(v, cos_p[..., :-1, :], sin_p[..., :-1, :])
+    with pytest.raises(ValueError, match="shape mismatch"):
+        fused_rope_rotate_paired(v, cos_p, sin_p[..., :-1, :])
+    with pytest.raises(ValueError, match="must be even"):
+        fused_rope_rotate_paired(v[..., :3], cos_p, sin_p)
+
+
+
 @pytest.mark.parametrize("T", [1, 7])
 def test_cpu_rope_out_param_mixed_dtype_preserves_parity(T):
     """CPU RoPE entries cast fp16 math into fp32 cache-style output slots."""
