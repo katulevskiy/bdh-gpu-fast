@@ -1,7 +1,8 @@
 """Tests for strict tril(diagonal=-1) score×V kernel API.
 
-CPU reference always runs. Native CUDA path is skipped when unavailable
-(no extension build and/or no CUDA device) — that is expected on CPU boxes.
+CPU reference always runs. Native CUDA tests use an explicit, actionable
+skip reason when the extension or CUDA device is unavailable — expected on CPU
+boxes; no GPU claim is implied by the CPU mirrors.
 
 Import of ``kernels.cuda_attn`` must never raise when ``bdh_cuda_ext`` is
 missing (build smoke / soft-fail).
@@ -35,9 +36,31 @@ def _naive(q, k, v):
     return scores @ v
 
 
+def _cuda_skip_reason() -> str | None:
+    """Return an actionable reason for skipping native CUDA tests."""
+    if not torch.cuda.is_available():
+        return "CUDA unavailable: torch.cuda.is_available() is false (CPU-safe skip)"
+    if not has_cuda_ext():
+        return "CUDA extension unavailable: bdh_cuda_ext is not built (CPU-safe skip)"
+    if not has_cuda_kernel():
+        return "CUDA kernel unavailable: bdh_cuda_ext has_cuda=False (CPU-safe skip)"
+    return None
+
+
+_CUDA_SKIP_REASON = _cuda_skip_reason()
+
+
 @pytest.fixture(params=["cpu"])
 def device(request):
     return torch.device(request.param)
+
+
+def test_cuda_skip_diagnostic_is_actionable():
+    """CPU runs expose why native CUDA coverage is skipped."""
+    if _CUDA_SKIP_REASON is None:
+        pytest.skip("native CUDA available; diagnostic contract is not needed")
+    assert "CPU-safe skip" in _CUDA_SKIP_REASON
+    print(f"native CUDA tests: SKIP: {_CUDA_SKIP_REASON}")
 
 
 def test_import_fails_soft():
@@ -172,8 +195,8 @@ def test_native_cpu_matches_ref():
 
 
 @pytest.mark.skipif(
-    not (has_cuda_kernel() and torch.cuda.is_available()),
-    reason="CUDA kernel not built or no CUDA device",
+    _CUDA_SKIP_REASON is not None,
+    reason=_CUDA_SKIP_REASON or "native CUDA unavailable",
 )
 def test_cuda_kernel_matches_ref():
     torch.manual_seed(5)
@@ -187,8 +210,8 @@ def test_cuda_kernel_matches_ref():
 
 
 @pytest.mark.skipif(
-    not (has_cuda_kernel() and torch.cuda.is_available()),
-    reason="CUDA kernel not built or no CUDA device",
+    _CUDA_SKIP_REASON is not None,
+    reason=_CUDA_SKIP_REASON or "native CUDA unavailable",
 )
 def test_cuda_broadcast_v():
     torch.manual_seed(6)
@@ -220,8 +243,8 @@ def test_cpu_ref_larger_t_no_diag(device):
 
 
 @pytest.mark.skipif(
-    not (has_cuda_kernel() and torch.cuda.is_available()),
-    reason="CUDA kernel not built or no CUDA device",
+    _CUDA_SKIP_REASON is not None,
+    reason=_CUDA_SKIP_REASON or "native CUDA unavailable",
 )
 def test_cuda_tiled_cold_matches_ref_multi_tile():
     """Tiled cold kernel (TILE_M=16) vs ref across >1 query tile + V broadcast."""
@@ -339,8 +362,8 @@ def test_tril_score_v_dispatch_long_t_uses_tiled(device):
 
 
 @pytest.mark.skipif(
-    not (has_cuda_kernel() and torch.cuda.is_available()),
-    reason="CUDA kernel not built or no CUDA device",
+    _CUDA_SKIP_REASON is not None,
+    reason=_CUDA_SKIP_REASON or "native CUDA unavailable",
 )
 def test_cuda_adaptive_cold_long_t_matches_ref():
     """Soft-skip without GPU: adaptive cold CUDA vs eager @ long T + V broadcast."""

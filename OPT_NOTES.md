@@ -6432,3 +6432,40 @@ No GPU is available on this box; CUDA/Triton hardware tests remain skip-gated.
 - No default eager, cache, generate, or attention math change.
 - No softmax, scaling, diagonal inclusion, or full-score materialization.
 - No GPU timing, kernel-on-hardware, GPU correctness, or speedup claim.
+## opt/cuda-cold-v4 — actionable CPU-safe CUDA skips (2026-09-19)
+
+**Branch:** `opt/cuda-cold-v4` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `2a2b1fb` (`main`, after #145 sparse-v3; audited from #114 tip `ca353f2`).
+
+### Audit / deepen
+
+The #114 CUDA cold-tile tests now report an actionable collection-time reason
+for every native CUDA skip: missing CUDA device, missing `bdh_cuda_ext`, or a
+loaded extension without a CUDA kernel. A CPU-only run still exercises all
+reference, tiled, wide-head bound, strict raw-score × `tril(diagonal=-1)`, and
+build-smoke coverage; only native CUDA execution is skipped. Defaults remain
+eager and AUTO-off. This is a skip-diagnostic polish only: it adds no CUDA
+compilation, timing, correctness, or speedup claim.
+
+### Tests (CPU-only; no GPU claims)
+
+```text
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/test_cuda_attn.py -q -rs
+# 18 passed, 5 skipped in 1.18s
+# Native CUDA skips name the missing device/extension condition.
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest -q
+# 545 passed, 19 skipped, 3 warnings in 60.92s
+```
+
+No GPU is available on this box.
+
+### Non-goals
+
+- No default eager or AUTO behavior change.
+- No softmax, scaling, diagonal inclusion, or change to raw score × strict
+  `tril(diagonal=-1)` semantics.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.
