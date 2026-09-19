@@ -36,10 +36,10 @@ def test_t1_excludes_self_attention_in_output_and_backward(impl, v_heads):
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 @pytest.mark.parametrize("v_heads", [1, 3])
-def test_single_query_backward_only_reaches_strict_past(impl, v_heads):
+@pytest.mark.parametrize("query", [0, 3, 4])
+def test_single_query_backward_only_reaches_strict_past(impl, v_heads, query):
     """A loss at query q can reach Q[q], but only K/V positions j < q."""
     generator = torch.Generator().manual_seed(2027)
-    query = 3
     Q = torch.randn(
         1, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
     )
