@@ -57,22 +57,17 @@ def fetch_data():
 
 
 def get_batch(split):
-    # treat the file as bytes
+    # treat the file as bytes; vectorized window gather (no Python per-row loop)
     data = np.memmap(input_file_path, dtype=np.uint8, mode="r")
     if split == "train":
         data = data[: int(0.9 * len(data))]
     else:
         data = data[int(0.9 * len(data)) :]
-    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,))
-    x = torch.stack(
-        [torch.from_numpy((data[i : i + BLOCK_SIZE]).astype(np.int64)) for i in ix]
-    )
-    y = torch.stack(
-        [
-            torch.from_numpy((data[i + 1 : i + 1 + BLOCK_SIZE]).astype(np.int64))
-            for i in ix
-        ]
-    )
+    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,)).numpy()
+    offsets = np.arange(BLOCK_SIZE, dtype=np.int64)[None, :]
+    idx_x = ix[:, None] + offsets
+    x = torch.from_numpy(np.asarray(data[idx_x], dtype=np.int64))
+    y = torch.from_numpy(np.asarray(data[idx_x + 1], dtype=np.int64))
     if torch.cuda.is_available():
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(

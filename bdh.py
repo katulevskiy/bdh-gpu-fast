@@ -1,7 +1,9 @@
 # Copyright 2025 Pathway Technology, Inc.
+# Optimized fork (private): see OPT_NOTES.md
 
 import dataclasses
 import math
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +32,14 @@ def get_freqs(n, theta, dtype):
 
 
 class Attention(torch.nn.Module):
+    """BDH attention: raw (unnormalized) scores with strict causal mask.
+
+    Mask is tril(diagonal=-1): position i attends only to j < i (diagonal
+    EXCLUDED). No softmax and no 1/sqrt(d) scale — matching the original paper
+    code. Do NOT substitute F.scaled_dot_product_attention(is_causal=True);
+    that would both include the diagonal and apply softmax+scale.
+    """
+
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -43,35 +53,89 @@ class Attention(torch.nn.Module):
     @staticmethod
     def phases_cos_sin(phases):
         phases = (phases % 1) * (2 * math.pi)
-        phases_cos = torch.cos(phases)
-        phases_sin = torch.sin(phases)
-        return phases_cos, phases_sin
+        return torch.cos(phases), torch.sin(phases)
 
     @staticmethod
     def rope(phases, v):
-        v_rot = torch.stack((-v[..., 1::2], v[..., ::2]), dim=-1).view(*v.size())
+        """Rotate adjacent pairs. Skips redundant casts when dtypes match."""
+        v_rot = torch.empty_like(v)
+        v_rot[..., 0::2] = -v[..., 1::2]
+        v_rot[..., 1::2] = v[..., 0::2]
         phases_cos, phases_sin = Attention.phases_cos_sin(phases)
-        return (v * phases_cos).to(v.dtype) + (v_rot * phases_sin).to(v.dtype)
+        if v.dtype != phases_cos.dtype:
+            return (v * phases_cos).to(v.dtype) + (v_rot * phases_sin).to(v.dtype)
+        return v * phases_cos + v_rot * phases_sin
 
-    def forward(self, Q, K, V):
+    def _rope_phases(self, T: int, rope_start: int, device):
         assert self.freqs.dtype == torch.float32
+        positions = torch.arange(
+            rope_start,
+            rope_start + T,
+            device=device,
+            dtype=self.freqs.dtype,
+        ).view(1, 1, -1, 1)
+        return positions * self.freqs
+
+    def forward(
+        self,
+        Q,
+        K,
+        V,
+        rope_start: int = 0,
+        past_kr: Optional[torch.Tensor] = None,
+        past_v: Optional[torch.Tensor] = None,
+    ):
+        """
+        Q, K: (B, nh, T, N) — K must be Q (shared latent).
+        V:    (B, 1, T, D).
+
+        Returns (out, kr_to_store, v_to_store) where store tensors are the
+        RoPE'd keys / values for this block only (caller concatenates cache).
+        """
         assert K is Q
-        _, _, T, _ = Q.size()
-
-        r_phases = (
-            torch.arange(
-                0,
-                T,
-                device=self.freqs.device,
-                dtype=self.freqs.dtype,
-            ).view(1, 1, -1, 1)
-        ) * self.freqs
+        B, nh, T, _ = Q.size()
+        r_phases = self._rope_phases(T, rope_start, Q.device)
         QR = self.rope(r_phases, Q)
-        KR = QR
 
-        # Current attention
-        scores = (QR @ KR.mT).tril(diagonal=-1)
-        return scores @ V
+        if past_kr is None:
+            # Training / cold prefill: full TxT then strict lower-triangular.
+            scores = QR @ QR.transpose(-2, -1)
+            scores.tril_(diagonal=-1)
+            out = scores @ V
+            return out, QR, V
+
+        # Incremental: queries attend to all past positions + earlier positions
+        # in this chunk (strict: no self). Equivalent to full tril(diagonal=-1)
+        # over concat(past, new).
+        S = past_kr.size(2)
+        parts = []
+        if S > 0:
+            parts.append(QR @ past_kr.transpose(-2, -1))  # (B, nh, T, S)
+        if T > 1:
+            self_scores = QR @ QR.transpose(-2, -1)
+            self_scores.tril_(diagonal=-1)
+            parts.append(self_scores)  # (B, nh, T, T)
+        elif T == 1 and S == 0:
+            # First token: no keys to attend to → zeros
+            out = V.new_zeros(B, nh, T, V.size(-1))
+            return out, QR, V
+
+        if not parts:
+            # T==1, S>0: only past
+            scores = QR @ past_kr.transpose(-2, -1)
+            out = scores @ past_v
+            return out, QR, V
+
+        if S > 0 and T > 1:
+            scores = torch.cat(parts, dim=-1)  # (B, nh, T, S+T)
+            V_all = torch.cat([past_v, V], dim=2)
+            out = scores @ V_all
+        elif S > 0:
+            out = parts[0] @ past_v
+        else:
+            out = parts[0] @ V
+
+        return out, QR, V
 
 
 class BDH(nn.Module):
@@ -106,7 +170,12 @@ class BDH(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, cache: Optional[list] = None):
+        """
+        cache: optional list len n_layer of None | {'kr', 'v'}. Mutated in place.
+        When cache is provided, idx is the new token block; RoPE continues from
+        cached length.
+        """
         C = self.config
 
         B, T = idx.size()
@@ -115,31 +184,48 @@ class BDH(nn.Module):
         N = D * C.mlp_internal_dim_multiplier // nh
 
         x = self.embed(idx).unsqueeze(1)
+        x = self.ln(x)
 
-        # actually helps with training
-        x = self.ln(x)  # B, 1, T, D
+        rope_start = 0
+        if cache is not None and cache[0] is not None:
+            rope_start = cache[0]["kr"].size(2)
 
         for level in range(C.n_layer):
             x_latent = x @ self.encoder
+            x_sparse = F.relu(x_latent)
 
-            x_sparse = F.relu(x_latent)  # B, nh, T, N
+            past_kr = past_v = None
+            if cache is not None and cache[level] is not None:
+                past_kr = cache[level]["kr"]
+                past_v = cache[level]["v"]
 
-            yKV = self.attn(
+            yKV, new_kr, new_v = self.attn(
                 Q=x_sparse,
                 K=x_sparse,
                 V=x,
+                rope_start=rope_start,
+                past_kr=past_kr,
+                past_v=past_v,
             )
+            if cache is not None:
+                if cache[level] is None:
+                    cache[level] = {"kr": new_kr, "v": new_v}
+                else:
+                    cache[level] = {
+                        "kr": torch.cat([past_kr, new_kr], dim=2),
+                        "v": torch.cat([past_v, new_v], dim=2),
+                    }
+
             yKV = self.ln(yKV)
 
             y_latent = yKV @ self.encoder_v
             y_sparse = F.relu(y_latent)
-            xy_sparse = x_sparse * y_sparse  # B, nh, T, N
-
+            xy_sparse = x_sparse * y_sparse
             xy_sparse = self.drop(xy_sparse)
 
-            yMLP = (
-                xy_sparse.transpose(1, 2).reshape(B, 1, T, N * nh) @ self.decoder
-            )  # B, 1, T, D
+            # Contiguous (B, T, nh, N) before merge — friendlier for compile/GEMM
+            xy = xy_sparse.permute(0, 2, 1, 3).contiguous().view(B, 1, T, N * nh)
+            yMLP = xy @ self.decoder
             y = self.ln(yMLP)
             x = self.ln(x + y)
 
@@ -158,14 +244,23 @@ class BDH(nn.Module):
         temperature: float = 1.0,
         top_k: int | None = None,
     ) -> torch.Tensor:
+        was_training = self.training
+        self.eval()
+
+        cache: list = [None] * self.config.n_layer
+        logits, _ = self(idx, cache=cache)
+
         for _ in range(max_new_tokens):
-            idx_cond = idx
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature
+            step_logits = logits[:, -1, :] / temperature
             if top_k is not None:
-                values, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < values[:, [-1]]] = float("-inf")
-            probs = F.softmax(logits, dim=-1)
+                values, _ = torch.topk(step_logits, min(top_k, step_logits.size(-1)))
+                step_logits = step_logits.clone()
+                step_logits[step_logits < values[:, [-1]]] = float("-inf")
+            probs = F.softmax(step_logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, idx_next), dim=1)
+            logits, _ = self(idx_next, cache=cache)
+
+        if was_training:
+            self.train()
         return idx
