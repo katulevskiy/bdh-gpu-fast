@@ -21,6 +21,12 @@ COMPILE × ATTN_IMPL × AUTOGRAD matrix (opt/compile-blocked):
   Set BDH_BENCH_COMPILE_BLOCKED=1 (default on when this section is wanted;
   also runs if BDH_BENCH_COMPILE=1 and BDH_BENCH_COMPILE_BLOCKED unset → on).
   Tiny cfg, soft-skip per cell on compile/probe failure. CPU medians only.
+
+COMPILE_MODE default vs reduce-overhead (opt/compile-reduce):
+  Set BDH_BENCH_COMPILE_MODE=1 (default on). COMPILE=1 only; modes
+  {default, reduce-overhead} on tiny cfg. Soft-skip per mode if unsupported.
+  On CPU, reduce-overhead is **not useful** (CUDA graphs need a GPU) — still
+  measured honestly; no graph-capture claim. Opt out: BDH_BENCH_COMPILE_MODE=0.
 """
 
 from __future__ import annotations
@@ -342,6 +348,137 @@ def bench_compile_blocked_matrix(cfg, device, fused_ok: bool) -> None:
 
 
 
+def bench_compile_mode_matrix(cfg, device, fused_ok: bool) -> None:
+    """Honest COMPILE=1: BDH_COMPILE_MODE=default vs reduce-overhead.
+
+    Soft-skips a mode (prints reason) if compile/probe unavailable or the
+    train_step raises. Restores env + ``tr.COMPILE_MODE`` after each cell.
+    Absolute ms are device-local. On CPU, ``reduce-overhead`` does **not**
+    enable CUDA graphs — document that honesty; do not claim graph wins.
+    """
+    print("--- COMPILE=1 MODE default vs reduce-overhead (honest train-step) ---")
+    print(
+        f"device={device} probe={os.environ.get('BDH_COMPILE_PROBE', tr.COMPILE_PROBE)} "
+        f"cuda={torch.cuda.is_available()} cfg=layers={cfg.n_layer} d={cfg.n_embd} "
+        f"B=4 T=64 dropout={cfg.dropout}"
+    )
+    if device.type != "cuda":
+        print(
+            "warn: CUDA graphs need a GPU — mode=reduce-overhead is not useful "
+            "on CPU (no graph capture). Measuring wall medians only for honesty."
+        )
+
+    modes = ("default", "reduce-overhead")
+    saved = {
+        "BDH_COMPILE": os.environ.get("BDH_COMPILE"),
+        "BDH_COMPILE_MODE": os.environ.get("BDH_COMPILE_MODE"),
+    }
+    was_use = tr.USE_COMPILE
+    was_mode = tr.COMPILE_MODE
+    x, y = _batch(device)
+    rows = []
+
+    def _restore():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tr.USE_COMPILE = was_use
+        tr.COMPILE_MODE = was_mode
+
+    try:
+        for mode in modes:
+            tag = f"COMPILE=1 MODE={mode}"
+            os.environ["BDH_COMPILE"] = "1"
+            os.environ["BDH_COMPILE_MODE"] = mode
+            tr.USE_COMPILE = True
+            tr.COMPILE_MODE = mode
+
+            torch.manual_seed(0)
+            m = bdh.BDH(cfg).to(device)
+            m.train()
+
+            try:
+                m = tr.maybe_compile(m, example_x=x, example_y=y)
+            except Exception as e:
+                print(
+                    f"{tag}: soft-skip maybe_compile "
+                    f"{type(e).__name__}: {e}"
+                )
+                rows.append((tag, None, "soft-skip compile"))
+                continue
+
+            if not _is_dynamo_compiled(m):
+                print(
+                    f"{tag}: soft-skip (fell back to eager — "
+                    "inductor/probe unavailable or mode unsupported)"
+                )
+                rows.append((tag, None, "soft-skip eager-fallback"))
+                continue
+
+            opt = torch.optim.AdamW(
+                m.parameters(),
+                lr=tr.LEARNING_RATE,
+                weight_decay=tr.WEIGHT_DECAY,
+                fused=fused_ok,
+            )
+
+            def step():
+                return tr.train_step(m, opt, x, y)
+
+            try:
+                med = timed(step, warmup=2, reps=10)
+            except Exception as e:
+                print(
+                    f"{tag}: soft-skip train_step "
+                    f"{type(e).__name__}: {e}"
+                )
+                rows.append((tag, None, f"soft-skip step:{type(e).__name__}"))
+                continue
+
+            ms = med * 1000.0
+            print(f"{tag}: median {ms:.2f} ms")
+            rows.append((tag, ms, "ok"))
+    finally:
+        _restore()
+
+    print("--- MODE summary (median ms; soft-skip = —) ---")
+    print(f"{'MODE':>16} {'median_ms':>12} {'status':>22}")
+    default_ms = None
+    for tag, ms, status in rows:
+        parts = dict(p.split("=", 1) for p in tag.split())
+        mode = parts["MODE"]
+        med_s = f"{ms:.2f}" if ms is not None else "—"
+        print(f"{mode:>16} {med_s:>12} {status:>22}")
+        if mode == "default" and ms is not None:
+            default_ms = ms
+
+    if default_ms is not None:
+        for tag, ms, status in rows:
+            mode = dict(p.split("=", 1) for p in tag.split())["MODE"]
+            if mode == "reduce-overhead" and ms is not None and default_ms > 0:
+                ratio = default_ms / ms
+                print(
+                    f"ratio default/reduce-overhead: {ratio:.2f}x  "
+                    f"(>1 means reduce-overhead faster on this device)"
+                )
+
+    if device.type != "cuda":
+        print(
+            "honest: CPU wall medians only — reduce-overhead does **not** "
+            "enable CUDA graphs here. Prefer MODE=default on CPU; "
+            "GPU + static B×T for real graph capture (see train_fast.py). "
+            "Defaults remain BDH_COMPILE=0, BDH_COMPILE_MODE=default."
+        )
+    else:
+        print(
+            "GPU box: reduce-overhead may enable CUDA graphs with static B×T "
+            "(see train_fast.py). Still opt-in; defaults unchanged."
+        )
+
+
+
 def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
     """Honest tiny train_step: fp32 vs opt-in AMP (bf16 / fp16).
 
@@ -505,6 +642,16 @@ def main():
             "(set BDH_BENCH_COMPILE_BLOCKED=1 to enable; default is on)"
         )
 
+    # COMPILE=1 MODE default vs reduce-overhead (opt/compile-reduce). Default on;
+    # opt out with BDH_BENCH_COMPILE_MODE=0.
+    if os.environ.get("BDH_BENCH_COMPILE_MODE", "1") in ("1", "true", "True"):
+        bench_compile_mode_matrix(cfg, device, fused_ok)
+    else:
+        print(
+            "skip compile-mode matrix "
+            "(set BDH_BENCH_COMPILE_MODE=1 to enable; default is on)"
+        )
+
     # Honest AMP vs fp32 (opt/amp-deepen). Default on; opt out BDH_BENCH_AMP=0.
     if os.environ.get("BDH_BENCH_AMP", "1") in ("1", "true", "True"):
         bench_amp_vs_fp32(cfg, device, fused_ok)
@@ -512,7 +659,8 @@ def main():
         print("skip AMP bench (set BDH_BENCH_AMP=1 to enable; default is on)")
 
     print(
-        "Note: CUDA graphs / reduce-overhead need a GPU; see train_fast.py + OPT_BACKLOG. "
+        "Note: CUDA graphs / reduce-overhead need a GPU; on CPU reduce-overhead "
+        "is not useful (see opt/compile-reduce + train_fast.py + OPT_BACKLOG). "
         "AMP throughput wins are GPU-only (see BDH_AMP_DTYPE section)."
     )
 

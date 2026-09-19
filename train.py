@@ -513,7 +513,8 @@ def maybe_compile(
     - On CPU, recommend ``BDH_COMPILE=1`` only with ``BDH_ATTN_IMPL=eager``
       (#46); ``blocked``/``online``/``triton`` log a warning (measured regression).
     - CUDA graphs (``mode='reduce-overhead'``) need a real GPU + static shapes;
-      on CPU this mode is accepted but does **not** claim graph capture wins.
+      on CPU this mode is accepted but is **not useful** (no CUDA graphs) —
+      prefer ``default``; soft-fallback still applies if compile/probe fails.
     """
     if not USE_COMPILE:
         print("torch.compile disabled (set BDH_COMPILE=1 to enable)")
@@ -536,8 +537,9 @@ def maybe_compile(
     )
     if COMPILE_MODE == "reduce-overhead" and device.type != "cuda":
         print(
-            f"torch.compile note: mode=reduce-overhead on {device_tag} "
-            "(no CUDA graphs on this device; inductor still may run)"
+            f"torch.compile warning: mode=reduce-overhead on {device_tag} "
+            "is not useful without CUDA graphs (CPU has none). "
+            "Prefer BDH_COMPILE_MODE=default on CPU; try reduce-overhead on a real GPU."
         )
 
     compile_kwargs = dict(mode=COMPILE_MODE)
