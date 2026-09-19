@@ -170,3 +170,41 @@ def test_sampler_idx_out_accepts_noncontiguous_decode_narrow():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1:2], ref), name
+
+
+def test_sampler_idx_out_accepts_noncontiguous_full_vocab_topk_fallback():
+    """The full-vocab top-k fallback must preserve the strided output contract."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+
+    # k == V takes the fallback branch; overflow exercises its clamp to V.
+    for name, top_k_n in (("full", 32), ("overflow", 40)):
+        destination = torch.empty(2, 3, dtype=torch.long)
+        idx_out = destination[:, 1:2]
+        assert idx_out.stride() == (3, 1), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            scale=0.7,
+            do_topk=True,
+            top_k_n=top_k_n,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            scale=0.7,
+            do_topk=True,
+            top_k_n=top_k_n,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1:2], ref), name
