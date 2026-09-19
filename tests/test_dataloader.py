@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 import numpy as np
@@ -399,6 +400,27 @@ def test_batch_prefetcher_close_joins_after_consumed_batch(tr):
     assert y.shape == x.shape
 
     loader.close()
+
+    assert not thread.is_alive()
+    assert loader._thread is None
+    assert loader._q is None
+
+
+def test_batch_prefetcher_close_unblocks_full_queue_after_refill(tr):
+    """Shutdown joins a producer blocked behind a refilled one-slot queue."""
+    loader = tr.BatchPrefetcher("train", async_host=True)
+    thread = loader._thread
+    queue = loader._q
+    assert thread is not None and queue is not None
+
+    try:
+        loader.next()
+        deadline = time.monotonic() + 1.0
+        while not queue.full() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert queue.full()
+    finally:
+        loader.close()
 
     assert not thread.is_alive()
     assert loader._thread is None
