@@ -56,7 +56,7 @@ def test_forced_cuda_without_nvcc_is_clear_noop():
     output = _setup_name(env)
 
     assert "skipping CUDA extension build" in output
-    assert "nvcc not found" in output
+    assert "nvcc not found in CUDA_HOME/CUDA_PATH or PATH" in output
     assert "CPU refs remain available" in output
 
 
