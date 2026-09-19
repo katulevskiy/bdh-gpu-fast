@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#268; #160 docs scope retained)
+# OPT status — landed work (#1–#273; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `aebc449` (#268 tiled packed per-head decode gradients, current tip) follows #266 strict-tril backward boundary queries (`cbf0831`), #265 CUDA_PATH missing-nvcc skip contract (`6d6aaab`), #264 failed compile-probe eval cleanup (`3747356`), #263 mixed-dtype RoPE output (`7c0e969`), #262 sampler layout overflow (`1384ca5`), #261 docs through #260 (`8a243e7`), #260 signed raw-score decode (`9b6d0a8`), #259 score-V gradients for distinct query/key tensors (`f5a9cea`), #258 AUTO threshold fallback (`6abd53b`), #256 batched blocked-tile gradient parity (`b00dbd1`), #257 sparse density-only crossover boundary (`042a01d`), #255 absent generate-impl environment cleanup (`1b67d13`), #254 active AMP state on CPU failure (`94a4e55`), #253 docs refresh through profile-v20/#251/#252 (`53491cf`), and profile-v20 (`f4c7cab`). Profile-v20 remains the matched CPU-only re-profile: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; all later landings are CPU-only contract or docs coverage. #266 extends strict-tril backward locality to boundary queries, and #268 covers tiled packed per-head decode gradients. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `3b3c082` (#273 blocked-tile raw-score contract, current tip) follows #272 sparse guardrail terminal coverage (`b9bf6c8`), #271 run-level GPU skip status (`75597c9`), #270 explicit prefetch H2D opt-out coverage (`dae2e07`), #268 tiled packed per-head decode gradients (`aebc449`), #266 strict-tril backward boundary queries (`cbf0831`), #265 CUDA_PATH missing-nvcc skip contract (`6d6aaab`), and profile-v20 (`f4c7cab`). Profile-v20 remains the matched CPU-only re-profile: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; #270–#273 add only CPU-safe contract/skip coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#239)
+## Landed opts (#1–#273)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -433,7 +433,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **260** | `tests/test_online_decode_v5.py` | Cover signed raw-score decode with independent per-head values across eager, blocked, online, Triton-fallback, and CUDA-reference dispatch | CPU-only decode contract coverage; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 | **266** | `tests/test_attn_bwd_v4_contract.py` | Extend strict-tril backward locality coverage to first, interior, and final query rows | CPU-only backward contract coverage; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 | **268** | `tests/test_inc_decode.py` | Cover tiled packed per-head T=1 decode GEMM autograd parity across blocked, online, and Triton-fallback paths | CPU-only decode gradient parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
-| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through the current tip: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; flat versus profile-v19 | CPU-only profile evidence plus later CPU/docs contracts; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **270** | `tests/test_dataloader.py` | Explicit `BDH_PREFETCH_H2D=0` skips CUDA availability probes and stream/event allocation; defaults and runtime behavior unchanged | CPU-only no-probe/skip coverage; no H2D timing or overlap claim | **P1** GPU H2D overlap/throughput remains unmeasured
+| **271** | `benchmarks/bench_gpu_attn.py` | Mark run-level unavailable-device summaries with `status: skip` and carry the schema-v4 contract | CPU-safe skip coverage; no GPU timing or speedup claim | **P0** real GPU measurement remains open
+| **272** | `tests/test_sparse_probe_contract_v7.py` | Make an enforced sparse-density guardrail failure terminal before CPU crossover work; sparse remains opt-in/default-off | CPU-only terminal contract; no sparse-kernel or GPU claim | **P0** real GPU measurement / sparse validation remains open
+| **273** | `tests/test_prefill_blocked.py` | Add a deterministic blocked/online tile-boundary contract for raw `Q @ K.T` × `tril(diagonal=-1)` × `V` | CPU-only test coverage; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `3b3c082`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#273 add CPU-safe contract/skip coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -533,7 +537,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#265** CUDA_PATH missing-nvcc skip coverage landed as `6d6aaab`; a stale non-executable `CUDA_PATH` `nvcc` stub remains a clear CPU-safe no-op before CUDAExtension setup.
 - **#266** strict-tril backward boundary coverage landed as `cbf0831`; CPU tests now cover first, interior, and final query rows across the supported dispatches and V layouts.
 - **#268** tiled packed per-head decode gradient coverage landed as `aebc449`; CPU tests cover blocked, online, and Triton-fallback autograd parity for capacity-strided K/V views.
-- **Current tip** `aebc449` carries the flat profile-v20 counts plus the CPU-only force-CPU harness, prefetch gate, AMP state, generate-environment, batched blocked-gradient, sparse-boundary, AUTO-threshold fallback, score-V gradient, signed raw-score decode, sampler-layout, mixed-dtype RoPE, compile-probe cleanup, CUDA_PATH skip, strict-tril boundary, and tiled packed-decode gradient contracts; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#270** `dae2e07` adds explicit `BDH_PREFETCH_H2D=0` CPU-safe coverage: the opt-out returns before CUDA availability probing or stream/event allocation; no H2D timing or overlap claim.
+- **#271** `75597c9` marks run-level unavailable-device GPU summaries with `status: skip` under schema v4; no GPU timing or speedup evidence.
+- **#272** `b9bf6c8` makes an enforced sparse-density guardrail failure terminal before CPU crossover work; sparse remains opt-in/default-off with no GPU sparse claim.
+- **#273** `3b3c082` adds deterministic blocked/online tile-boundary coverage for raw strict-tril score×V semantics; CPU-only tests with no GPU timing or performance claim.
+- **Current tip** `3b3c082` carries the flat profile-v20 counts plus the CPU-only contracts through #273; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
