@@ -351,6 +351,58 @@ def test_cuda_amp_throughput_claim_requires_live_runtime(monkeypatch):
         assert tr.amp_throughput_claim_device() == "none"
 
 
+def test_forward_only_runs_logits_under_amp_and_ce_in_fp32(monkeypatch):
+    """Forward-only AMP calls logits-only forward and keeps CE outside autocast."""
+    events = []
+    ce_dtypes = []
+    active = False
+
+    class _ProbeContext:
+        def __enter__(self):
+            nonlocal active
+            active = True
+            events.append("enter")
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            nonlocal active
+            active = False
+            events.append("exit")
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.eye(3))
+
+        def forward(self, x, y=None):
+            assert active
+            events.append(("forward", y))
+            return (x @ self.weight).to(torch.float16), None
+
+    original_cross_entropy = torch.nn.functional.cross_entropy
+
+    def _record_cross_entropy(*args, **kwargs):
+        assert not active
+        ce_dtypes.append(args[0].dtype)
+        return original_cross_entropy(*args, **kwargs)
+
+    monkeypatch.setattr(tr, "ctx", _ProbeContext())
+    monkeypatch.setattr(tr, "_amp_forward_only", True)
+    monkeypatch.setattr(tr, "_use_scaler", False)
+    monkeypatch.setattr(tr, "scaler", None)
+    monkeypatch.setattr(torch.nn.functional, "cross_entropy", _record_cross_entropy)
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    x = torch.tensor([[[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]])
+    y = torch.tensor([[0, 1]])
+    loss = tr.train_step(model, optimizer, x, y)
+
+    assert loss.dtype is torch.float32
+    assert events == ["enter", ("forward", None), "exit"]
+    assert ce_dtypes == [torch.float32]
+
+
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
     """A live CUDA runtime is the only positive throughput claim surface."""
     with monkeypatch.context() as mp:
