@@ -21,8 +21,10 @@ from .rope import (
     _can_use_triton_rope,
     eager_rope_rotate,
     fused_rope_rotate,
+    fused_rope_rotate_blocked,
     fused_rope_rotate_pytorch,
     fused_rope_rotate_triton,
+    rope_rotate_paired,
     rope_rotate_t1,
 )
 
@@ -70,8 +72,9 @@ def bdh_rope_rotate(
 
     - eager: historical strided even/odd path (bit-identical to prior ``Attention.rope``);
       T=1 decode uses ``rope_rotate_t1`` (pair stores; same math)
-    - fused: Triton on CUDA when usable; else pure-PyTorch pair-contiguous path;
-      T=1 shares ``rope_rotate_t1`` (skips cis ``expand``)
+    - fused: Triton on CUDA when usable; else pure-PyTorch pair-contiguous path
+      (no cis ``expand`` / no ``stack``); T=1 shares ``rope_rotate_t1``. Triton
+      entry falls back to ``fused_rope_rotate_blocked`` on CPU (tile scaffold).
     """
     name = resolve_rope_impl(impl)
     if name == "eager":
@@ -98,6 +101,8 @@ __all__ = [
     "eager_rope_rotate",
     "fused_rope_rotate",
     "fused_rope_rotate_pytorch",
+    "fused_rope_rotate_blocked",
     "fused_rope_rotate_triton",
+    "rope_rotate_paired",
     "rope_rotate_t1",
 ]

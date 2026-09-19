@@ -16,6 +16,7 @@ import bdh
 import bdh_baseline as baseline
 from kernels.rope import (
     eager_rope_rotate,
+    fused_rope_rotate_blocked,
     fused_rope_rotate_pytorch,
     fused_rope_rotate_triton,
     _can_use_triton_rope,
@@ -168,3 +169,79 @@ def test_default_impl_is_eager_no_env(monkeypatch):
     out = bdh.Attention.rope(None, v, cos_sin=(cos, sin))
     assert torch.equal(out, baseline.Attention.rope(phases, v))
     assert resolve_rope_impl() == "eager"
+
+
+def test_fused_pytorch_no_expand_matches_eager_broadcast_cis():
+    """Cold T>1: cis (1,1,T,N) broadcasts without expand(v.shape)."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=16, seed=21)
+    assert cos.shape[0] == 1 and v.shape[0] == 2
+    a = eager_rope_rotate(v, cos, sin)
+    b = fused_rope_rotate_pytorch(v, cos, sin)
+    assert torch.equal(a, b)
+
+
+def test_blocked_tile_parity_vs_eager_and_fused():
+    """CPU blocked (Triton tile scaffold) ≡ eager ≡ fused pytorch."""
+    _, _, cos, sin, v, phases = _cis_and_v(T=12, seed=23)
+    ref = eager_rope_rotate(v, cos, sin)
+    blocked = fused_rope_rotate_blocked(v, cos, sin, block=8)
+    fused = fused_rope_rotate_pytorch(v, cos, sin)
+    assert torch.equal(blocked, ref)
+    assert torch.equal(fused, ref)
+    # Tiny block + large block
+    assert torch.equal(fused_rope_rotate_blocked(v, cos, sin, block=1), ref)
+    assert torch.equal(fused_rope_rotate_blocked(v, cos, sin, block=128), ref)
+    # Baseline phases path
+    assert torch.equal(blocked, baseline.Attention.rope(phases, v))
+
+
+def test_triton_entry_cpu_falls_back_to_blocked(monkeypatch):
+    """fused_rope_rotate_triton on CPU uses blocked scaffold (parity)."""
+    monkeypatch.setenv("BDH_ROPE_IMPL", "fused")
+    _, _, cos, sin, v, _ = _cis_and_v(T=8, seed=25)
+    assert not _can_use_triton_rope(v)
+    out_t = fused_rope_rotate_triton(v, cos, sin)
+    out_b = fused_rope_rotate_blocked(v, cos, sin)
+    out_e = eager_rope_rotate(v, cos, sin)
+    assert torch.equal(out_t, out_b)
+    assert torch.equal(out_t, out_e)
+
+
+def test_fused_out_none_pair_store_parity():
+    _, _, cos, sin, v, _ = _cis_and_v(T=10, seed=27)
+    # Explicit out=None path
+    y = fused_rope_rotate_pytorch(v, cos, sin, out=None)
+    assert torch.equal(y, eager_rope_rotate(v, cos, sin))
+
+
+def test_blocked_out_param_and_t1():
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    attn.ensure_rope_table(16, device)
+    cos, sin = attn.rope_cos_sin(1, 5, device)
+    torch.manual_seed(29)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    out = torch.empty_like(v)
+    y = fused_rope_rotate_blocked(v, cos, sin, out=out, block=16)
+    assert y is out
+    assert torch.equal(out, eager_rope_rotate(v, cos, sin))
+
+
+def test_generate_cache_continuity_fused_and_eager(monkeypatch):
+    """Generate tokens match baseline under both rope impls (cache phases)."""
+    cfg = _small_cfg(n_layer=2)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 5))
+    for impl in ("eager", "fused"):
+        monkeypatch.setenv("BDH_ROPE_IMPL", impl)
+        torch.manual_seed(0)
+        m = bdh.BDH(cfg).eval()
+        torch.manual_seed(0)
+        b = baseline.BDH(cfg).eval()
+        b.load_state_dict(m.state_dict())
+        torch.manual_seed(99)
+        out_m = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
+        torch.manual_seed(99)
+        out_b = b.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
+        assert torch.equal(out_m, out_b), impl
