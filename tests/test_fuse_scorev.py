@@ -114,6 +114,28 @@ def test_online_blocked_grad_matches_eager_for_aliased_self_qk():
         assert torch.allclose(got_v_grad, ref_v_grad, rtol=1e-9, atol=1e-9)
 
 
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
+def test_dispatch_grad_matches_eager_for_aliased_self_qk(impl):
+    """Dispatch backends must preserve aliased Q/K gradients on CPU."""
+    Q, _, V = _make_qkv(
+        B=2, H=3, T=19, N=7, D=5, seed=61, dtype=torch.float64
+    )
+    g = torch.Generator(device="cpu").manual_seed(62)
+    dO = torch.randn(2, 3, 19, 5, generator=g, dtype=Q.dtype)
+
+    def run(name):
+        q = Q.detach().clone().requires_grad_(True)
+        v = V.detach().clone().requires_grad_(True)
+        out = bdh_attn(q, q, v, impl=name)
+        out.backward(dO)
+        return out.detach(), q.grad.detach(), v.grad.detach()
+
+    ref = run("eager")
+    got = run(impl)
+    for got_value, ref_value in zip(got, ref):
+        assert torch.allclose(got_value, ref_value, rtol=1e-9, atol=1e-9)
+
+
 def test_pos0_zero_and_no_softmax():
     Q, K, V = _make_qkv(T=12, seed=11)
     out = online_tril_attn(Q, K, V, block_size=5)
