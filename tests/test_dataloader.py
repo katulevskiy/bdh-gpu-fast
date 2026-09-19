@@ -376,6 +376,18 @@ def test_batch_prefetcher_close_idempotent(tr):
     loader.close()  # second close must not raise
 
 
+def test_batch_prefetcher_close_joins_producer_thread(tr):
+    """Async shutdown joins the producer instead of only clearing its handle."""
+    loader = tr.BatchPrefetcher("val", async_host=True)
+    thread = loader._thread
+    assert thread is not None
+
+    loader.close()
+
+    assert not thread.is_alive()
+    assert loader._thread is None
+
+
 def test_batch_prefetcher_sync_close_clears_host_slot(tr, monkeypatch):
     """Sync shutdown releases the preloaded host batch and stays idempotent."""
     batch = (
