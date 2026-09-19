@@ -241,3 +241,79 @@ def test_force_cpu_main_skips_gpu_metadata_when_cuda_is_available(monkeypatch, t
     assert summary["device"] == "cpu"
     assert summary["timing_scope"] == "cpu"
     assert summary["gpu_name"] is None
+
+
+def test_timing_backend_skip_preserves_no_timing_claim(monkeypatch, tmp_path):
+    """A backend that fails only during timing stays an explicit skip."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    calls = 0
+
+    def flaky_backend(q, k, v):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise RuntimeError("timing backend disappeared")
+        return q
+
+    def eager_backend(q, k, v):
+        return q
+
+    monkeypatch.setitem(namespace, "eager_tril_attn", eager_backend)
+    monkeypatch.setitem(
+        namespace, "BACKENDS_COLD", {"eager": eager_backend, "flaky": flaky_backend}
+    )
+    summary_path = tmp_path / "timing-skip-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--force-cpu",
+            "--warmup",
+            "0",
+            "--iters",
+            "1",
+            "--B",
+            "1",
+            "--H",
+            "1",
+            "--T",
+            "2",
+            "--N",
+            "2",
+            "--D",
+            "2",
+            "--json-out",
+            str(summary_path),
+        ],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    assert summary["status"] == "cpu_smoke"
+    assert summary["timing_scope"] == "cpu"
+    assert summary["skips"] == [
+        {
+            "scope": "backend",
+            "backend": "flaky",
+            "status": "skip",
+            "reason": "backend_unavailable",
+            "phase": "timing",
+            "detail": "RuntimeError: timing backend disappeared",
+            "bit_identical": None,
+            "allclose_at_1e-4": None,
+            "max_abs_delta": None,
+            "max_rel_delta": None,
+            "median_ms": None,
+        }
+    ]
+    result_by_backend = {item["backend"]: item for item in summary["results"]}
+    assert result_by_backend["flaky"]["median_ms"] is None
+    assert result_by_backend["eager"]["median_ms"] is not None
