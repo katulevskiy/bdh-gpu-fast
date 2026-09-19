@@ -1,8 +1,8 @@
-# OPT backlog — ranked remaining work (docs-v72)
+# OPT backlog — ranked remaining work (docs-v73)
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Current tip: `8a5a94b` (#349). The requested #343–#348 refresh is included below; #349 is also recorded because it landed before this branch was written.
+Documentation coverage: #350–#363, with documented tip `8cc215c` (#363). This branch is based on current main tip `a59b542` (#364); #364 is outside this refresh scope.
 
 ## Hard constraints
 
@@ -15,31 +15,38 @@ Current tip: `8a5a94b` (#349). The requested #343–#348 refresh is included bel
 
 | Priority | Work | Current state | Acceptance evidence |
 |---|---|---|---|
-| **P0** | Real GPU cold attention | Blocked by absent live CUDA hardware | A100/H100 cold eager vs blocked/online/Triton/CUDA medians plus strict-tril parity |
+| **P0** | Real GPU cold attention | CPU reference and benchmark contracts are covered; no live CUDA measurement | A100/H100 cold eager vs blocked/online/Triton/CUDA medians plus strict-tril parity |
 | **P0** | Cold CUDA–Triton validation | Scaffolds and CPU fallbacks are present; no launch has been measured here | Successful build/launch, cold compile behavior, output parity, and median timing |
-| **P0** | T=1 decode on GPU | Packed K/V and shared/per-head score×V CPU contracts are covered | Real-GPU decode medians, peak memory, and parity at tile/oneshot boundaries |
-| **P1** | Long-T AUTO threshold/tile retune | CPU gates and independent cold threshold are covered; AUTO remains opt-in | GPU cold/decode sweep that justifies threshold and tile choices |
-| **P1** | Fused RoPE on GPU | CPU paired/layout contracts and skip gates are covered | Real-GPU fused/eager parity and timing across supported dtypes/layouts |
-| **P1** | AMP train and H2D overlap | CPU configuration/identity contracts are covered | CUDA bf16/fp16 train throughput and pinned H2D overlap measurements |
-| **P1** | Compile train step | CPU eager guidance and fallback contracts are covered | GPU inductor/CUDA-graph A/B with `BDH_COMPILE=0|1` |
-| **P2** | Analytic attention backward on GPU | CPU blocked/online tiled backward and gradient contracts are covered | GPU train-step parity and timing across eager/blocked/online/Triton/CUDA |
-| **P2** | Sparse production path | Probe is explicit and default-off; CPU density is not a kernel result | Density plus a measured GPU sparse-kernel win before any default change |
+| **P0** | T=1 decode on GPU | CPU score×V, packed-view, and empty-past contracts are covered by #362/#363 | Real-GPU decode medians, peak memory, and parity at tile/oneshot boundaries |
+| **P1** | Long-T AUTO threshold/tile retune | CPU cold-threshold sweep and blank/whitespace fallback are covered; AUTO remains opt-in | GPU cold/decode sweep that justifies threshold and tile choices |
+| **P1** | Fused RoPE on GPU | CPU shape/layout contracts are covered by #351 | Real-GPU fused/eager parity and timing across supported dtypes/layouts |
+| **P1** | AMP train and H2D overlap | CPU AMP throughput and worker-backed H2D identity contracts are covered; no CUDA throughput evidence | CUDA bf16/fp16 train throughput and pinned H2D overlap measurements |
+| **P1** | Compile train step | CPU invalid-probe fallback and force-CPU build guard are covered; GPU path unmeasured | GPU inductor/CUDA-graph A/B with `BDH_COMPILE=0|1` |
+| **P2** | Analytic attention backward on GPU | CPU strict-past tile-boundary and gradient contracts are covered; GPU path unmeasured | GPU train-step parity and timing across eager/blocked/online/Triton/CUDA |
+| **P2** | Sparse production path | No-sample guardrail is covered; probe is explicit and default-off | Density plus a measured GPU sparse-kernel win before any default change |
 
 ## Latest landed contracts
 
 | PR | Scope | Recorded outcome |
 |---:|---|---|
-| **#343** | Sparse truthy gate | Supported truthy tokens normalize correctly; density-only CPU probe remains opt-in and crossover work stays skipped |
-| **#344** | docs-v71 | Matrix/backlog refreshed through #342; no GPU evidence added |
-| **#345** | Blocked prefill | Capacity-padded non-contiguous shared/head-matched V views preserve raw strict-tril parity on CPU |
-| **#346** | AUTO threshold | Cold-only malformed overrides do not corrupt the shared decode gate; valid updates recover at strict boundaries |
-| **#347** | Online decode | Non-zero-offset packed K/V views support multi-query CPU parity without mutating inputs |
-| **#348** | Score×V | Long-path shared-V outputs and Q/K/V gradients match eager strict-tril raw score×V on CPU |
-| **#349** | Sampler layout | Narrow top-k strided output and neighboring backing values are protected; current tip |
+| **#350** | Docs-v72 | Matrix/backlog refreshed through #349; no GPU evidence added |
+| **#351** | RoPE shape contracts | Unpaired/paired malformed-shape cases are rejected safely on CPU |
+| **#352** | AUTO cold threshold | Explicit cold-threshold sweeps do not alter the independent decode gate |
+| **#353** | Compile probe fallback | Invalid probe values fail closed to `train_bwd` without changing defaults |
+| **#354** | CUDA build guard | Force-CPU mode remains opt-in-only and does not invoke native setup by itself |
+| **#355** | Attention backward tile boundary | Strict-past raw score×V gradients match the eager reference at the 64-row boundary |
+| **#356** | GPU attention measurement contract | CPU reference locks raw score×strict-tril×V semantics; no GPU timing was added |
+| **#357** | DataLoader worker identity | CPU worker-backed batches preserve tensor identity without CUDA setup |
+| **#358** | Sparse guardrail | No-sample exit is distinct and skips crossover work |
+| **#359** | AMP train contract | CPU execution cannot be reported as GPU throughput evidence |
+| **#360** | AUTO blank threshold | Blank/whitespace cold-threshold fallback preserves strict decode boundaries |
+| **#361** | Blocked prefill low precision | CPU float16/bfloat16 parity and input-dtype preservation hold across the partial tile |
+| **#362** | Decode score×V | CPU backend contracts preserve raw QK-transpose-times-V arithmetic and past-only semantics |
+| **#363** | Online decode empty past | Empty past returns exact zero score×V output with expected shape and dtype |
 
 ## Current evidence summary
 
-The profile-v20 call-count baseline remains attention `copy_` 2/call, forward `copy_` 12/call, generate `copy_` 394/call, `cat=0`, and `contiguous=0`. The #343–#349 additions are CPU-safe tests/docs/layout contracts; none adds CUDA timing, GPU throughput, sparse-kernel evidence, or cold CUDA–Triton validation.
+The profile-v20 call-count baseline remains attention `copy_` 2/call, forward `copy_` 12/call, generate `copy_` 394/call, `cat=0`, and `contiguous=0`. The #350–#363 additions are CPU-safe docs/tests/contracts; #356 names the GPU benchmark reference but adds no CUDA timing. None adds GPU throughput, sparse-kernel evidence, or cold CUDA–Triton validation.
 
 Defaults remain:
 
