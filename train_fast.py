@@ -51,16 +51,17 @@ def main():
     x, y = loader.next()
     model = tr.maybe_compile(model, example_x=x, example_y=y)
     optimizer = tr.make_optimizer(model)
-    loss_acc = 0.0
+    loss_acc = None
     loss_steps = 0
     for step in range(tr.MAX_ITERS):
         loss = tr.train_step(model, optimizer, x, y)
         x, y = loader.next()
-        loss_acc += float(loss.detach())
+        det = loss.detach()
+        loss_acc = det if loss_acc is None else (loss_acc + det)
         loss_steps += 1
         if step % tr.LOG_FREQ == 0:
-            print(f"Step: {step}/{tr.MAX_ITERS} loss {loss_acc / loss_steps:.3}")
-            loss_acc = 0.0
+            print(f"Step: {step}/{tr.MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
+            loss_acc = None
             loss_steps = 0
     print("Training done, now generating a sample ")
     model.eval()

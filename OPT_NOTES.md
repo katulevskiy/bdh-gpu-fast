@@ -268,7 +268,7 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 ### Correctness (this box)
 ```text
 .venv/bin/python -m pytest tests/ -q
-# 54 passed, 4 skipped (post-rebase onto main w/ triton+sparse)
+# 74 passed, 4 skipped (post-rebase onto main w/ triton+sparse)
 #   test_cuda_attn: 6 passed (CPU ref), 3 skipped (no bdh_cuda_ext / no CUDA)
 ```
 
@@ -425,8 +425,9 @@ notes for when a GPU exists.
 3. **Compile path** — `maybe_compile()` wraps `torch.compile(mode=BDH_COMPILE_MODE)`
    and **probes** with the first batch (inductor errors often appear only then).
    Falls back to eager. Env: `BDH_COMPILE=0`, `BDH_COMPILE_MODE=default|reduce-overhead|max-autotune`.
-4. **Graph-break hygiene** — logging uses `float(loss.detach())`; GradScaler only
-   when fp16+CUDA; batch fetch / print stay outside the compiled module.
+4. **Graph-break hygiene** — logging detaches loss; GradScaler only when
+   fp16+CUDA; batch fetch / print stay outside the compiled module.
+   (`opt/train-fuse` further defers `.item()` to `LOG_FREQ`.)
 5. **`BatchPrefetcher`** — one-slot prefetch; on CUDA uses a side stream for
    pin+`non_blocking` H2D overlapped with the previous step.
 6. **Reusable `_offsets`** arange for window gather (reset-safe if `BLOCK_SIZE` changes).
@@ -542,3 +543,41 @@ out = strict_tril_attn(Q, K, V, impl="eager", use_fn=True)
 ### Non-goals
 - No PRs to `pathwaycom/bdh`
 - No fused CUDA/Triton backward kernel yet (analytic PyTorch recompute of M)
+
+## opt/train-fuse — follow-up on compile-train (2026-09-19)
+
+**Branch:** `opt/train-fuse` (private only). Builds on `#10` / `opt/compile-train`.
+Still **no** `bdh.py` attention changes; loss math and 90/10 split unchanged.
+
+### Deltas vs main (`opt/compile-train`)
+
+1. **`BDH_COMPILE` default `0` (opt-in)** — set `BDH_COMPILE=1` to enable
+   `torch.compile`. Matches “optional compile” lane goal; CPU boxes without
+   inductor stay eager without an env override. `train_fast.py` still
+   `setdefault("BDH_COMPILE", "1")`.
+2. **Fewer host syncs in the train loop** — accumulate `loss.detach()` on-device
+   and call `.item()` only every `LOG_FREQ` (was `float(loss.detach())` every
+   step, which syncs on CUDA). Same printed loss semantics.
+3. **Re-measured CPU microbench** (quiet box) documented below.
+
+### Benchmarks (CPU — honest, re-measured)
+
+```text
+BDH_COMPILE=0 .venv/bin/python benchmarks/bench_train_step.py
+# device=cpu  layers=2 d=64 B=4 T=64  (torch 2.14.0+cu130, cuda=False)
+# train_step legacy (zero_grad fill, no fused) median: 7.76 ms
+# train_step fused+set_to_none median:                 8.21 ms  (0.95×)
+# zero_grad fill vs set_to_none:                       7.69 → 7.43 ms  (1.03×)
+# (quiet box; contended multi-agent runs inflate to seconds — ignore those)
+```
+
+On CPU, end-to-end step time is still ~noise vs compile-train (forward+backward
+dominates; `.item()` is cheap without a device). The sync reduction matters on
+**CUDA**. Do not claim GPU train speedups from these medians.
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 74 passed, 4 skipped
+```
