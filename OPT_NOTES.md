@@ -7171,3 +7171,18 @@ contiguous signature.
 This is CPU profiler coverage only. It does not flip an activation layout,
 change defaults, or alter sampler/RNG behavior. Raw scores × strict
 `tril(diagonal=-1)` attention is preserved; no GPU layout win is claimed.
+
+
+## opt/online-decode-v5 — B>1 long-S packed shared-V parity (2026-09-19)
+
+**Branch:** `opt/online-decode-v5` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `87ccac9` (#188).
+
+`tests/test_online_decode_v5.py` adds a CPU parity probe for a B=3, long-S
+packed CacheManager prefix with shared V. It checks the packed KR/V strides and
+compares blocked, online, Triton-fallback, and CUDA-reference dispatch against
+the eager decode result across a tiled boundary. This is coverage only: eager
+remains the default, raw scores × strict `tril(diagonal=-1)` is unchanged, and
+the autograd fallback remains available.
+
+Validation is CPU-only; no GPU decode timing or win claim is recorded.
