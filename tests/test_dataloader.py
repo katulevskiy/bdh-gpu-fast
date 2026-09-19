@@ -388,6 +388,23 @@ def test_batch_prefetcher_close_joins_producer_thread(tr):
     assert loader._thread is None
 
 
+def test_batch_prefetcher_close_joins_after_consumed_batch(tr):
+    """Shutdown joins the producer after it has refilled a consumed slot."""
+    loader = tr.BatchPrefetcher("train", async_host=True)
+    thread = loader._thread
+    assert thread is not None
+
+    x, y = loader.next()
+    assert x.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
+    assert y.shape == x.shape
+
+    loader.close()
+
+    assert not thread.is_alive()
+    assert loader._thread is None
+    assert loader._q is None
+
+
 def test_batch_prefetcher_sync_close_clears_host_slot(tr, monkeypatch):
     """Sync shutdown releases the preloaded host batch and stays idempotent."""
     batch = (
