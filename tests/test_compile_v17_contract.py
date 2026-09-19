@@ -240,9 +240,10 @@ def test_forward_probe_without_targets_returns_wrapper_and_restores_state(
     assert "first probe failed" not in captured
 
 
+@pytest.mark.parametrize("fullgraph", [False, True])
 @pytest.mark.parametrize("caller_training", [False, True])
 def test_failed_backward_probe_falls_back_cleanly(
-    monkeypatch, capsys, caller_training
+    monkeypatch, capsys, fullgraph, caller_training
 ):
     """A failed backward probe discards the wrapper and clears probe grads."""
     import train as tr
@@ -250,7 +251,7 @@ def test_failed_backward_probe_falls_back_cleanly(
     monkeypatch.setenv("BDH_COMPILE", "1")
     monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
     monkeypatch.setenv("BDH_COMPILE_MODE", "default")
-    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "1" if fullgraph else "0")
     importlib.reload(tr)
 
     compile_kwargs = {}
@@ -294,7 +295,10 @@ def test_failed_backward_probe_falls_back_cleanly(
         importlib.reload(tr)
 
     captured = capsys.readouterr().out
-    assert compile_kwargs == {"mode": "default"}
+    expected_compile_kwargs = {"mode": "default"}
+    if fullgraph:
+        expected_compile_kwargs["fullgraph"] = True
+    assert compile_kwargs == expected_compile_kwargs
     assert wrapper.calls == 1
     assert out is model
     assert out.training is caller_training
@@ -302,6 +306,7 @@ def test_failed_backward_probe_falls_back_cleanly(
     assert "torch.compile first probe failed" in captured
     assert "synthetic backward probe failure" in captured
     assert "the compiled wrapper is discarded" in captured
+    assert f"fullgraph={fullgraph}" in captured
 
 
 @pytest.mark.parametrize("caller_training", [False, True])
