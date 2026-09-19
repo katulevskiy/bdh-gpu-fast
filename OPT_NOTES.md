@@ -202,7 +202,7 @@ out = tril(Q @ K.T, diagonal=-1) @ V
 | Path | Role |
 |------|------|
 | `kernels/attention.py` | `eager_tril_attn` (reference), `blocked_tril_attn` (tiled, no full upper Δ), `triton_tril_attn` (CUDA Triton fused; CPU→blocked) |
-| `kernels/attention_dispatch.py` | `BDH_ATTN_IMPL=eager\|triton\|blocked` + `bdh_attn()` |
+| `kernels/attention_dispatch.py` | `BDH_ATTN_IMPL` + `bdh_attn()` (see opt/attn-unify for `cuda`) |
 | `bdh.py` | Thin cold-path hook; default **eager** (zero behavior change) |
 | `tests/test_triton_attn.py` | Correctness vs eager tril(-1); CUDA kernel test skipped without GPU |
 | `benchmarks/bench_triton_attn.py` | Microbench + honest CPU notes |
@@ -278,9 +278,8 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 - **This machine:** CPU-only (`cuda=False`). Default `pip install -e .` does not
   compile. `BDH_BUILD_EXT=1` fails here (torch 2.14 headers vs g++ 14
   `at::symint::sizes` error) — documented, not blocking.
-- **Not wired into `bdh.py` cold path yet** — call
-  `from kernels.cuda_attn import tril_score_v` when integrating; keeps default
-  training path unchanged until GPU validation.
+- **Wired via `BDH_ATTN_IMPL=cuda`** in `opt/attn-unify` (cold path only; see that section).
+  Default training path remains `eager` until GPU validation.
 - Still **do not** use `F.scaled_dot_product_attention`.
 
 ## Profiler (operator-level)
@@ -379,8 +378,9 @@ dispatch.
    `F.relu(x @ encoder, inplace=True)` / same for `encoder_v` — one buffer
    instead of GEMM out + separate ReLU out.
 
-4. **Attention cold path** — still `BDH_ATTN_IMPL=eager|triton|blocked`;
-   eager still `scores.tril_(diagonal=-1)` then `@ V`.
+4. **Attention cold path** — `BDH_ATTN_IMPL=eager|blocked|triton|cuda` via
+   unified dispatch (`opt/attn-unify`); eager still
+   `tril(diagonal=-1)` then `@ V`.
 
 ### Profiler delta (CPU, 4 layers, B=4 T=128 d=128, 5× forward)
 
@@ -395,15 +395,59 @@ Wall medians on this CPU box are noisy; the win is fewer RoPE/trig/copy
 allocs, not a new GEMM kernel. Full TxT score materialization remains the
 big GPU opportunity (`opt/triton-attn`).
 
+## opt/attn-unify — single dispatch for eager|blocked|triton|cuda (2026-09-19)
+
+**Branch:** `opt/attn-unify` (private `katulevskiy/bdh-gpu-opt` only).
+
+### Goal
+
+One clean cold-path dispatch for all attention backends behind `BDH_ATTN_IMPL`,
+including the CUDA scaffold from `opt/cuda-ext`. Preserve exact
+`tril(diagonal=-1)` math (no softmax, no `1/sqrt(d)`). Default remains **eager**.
+Compatible with `opt/qkv-fuse` (shared `cos_sin`, inplace ReLU) and
+`opt/cache-pack` (`CacheManager`).
+
+### What landed
+
+| Path | Change |
+|------|--------|
+| `kernels/attention_dispatch.py` | `resolve_attn_impl` / `bdh_attn` accept `eager|blocked|triton|cuda`; `backend_info()` reports effective backend |
+| `bdh.py` `Attention.forward` | Cold path (`past_kr is None`) always calls `bdh_attn`; docstring documents cache behavior |
+| `kernels/__init__.py`, `kernels/README.md` | Export `backend_info`; document four impls + generate caveat |
+| `tests/test_attn_unify.py` | Env switching, cuda→ref parity, cold-path hook, cache-path ignores impl |
+
+### Wire-up
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — full T×T then tril_
+export BDH_ATTN_IMPL=blocked   # tiled pure PyTorch
+export BDH_ATTN_IMPL=triton    # Triton on CUDA; blocked on CPU
+export BDH_ATTN_IMPL=cuda      # kernels.cuda_attn (ext if built, else ref)
+```
+
+### generate / KV-cache honesty
+
+- **Cold prefill** (empty cache / training): respects `BDH_ATTN_IMPL`.
+- **Incremental decode** (`past_kr` set, including every `generate()` step after
+  prefill): **always eager PyTorch**. Blocked / Triton / CUDA kernels do not
+  yet implement incremental score×V over `concat(past, new)`. Documented in
+  `Attention.forward` and `kernels/attention_dispatch.py` module docstring —
+  not a silent fallback.
+
 ### Correctness
 
 ```text
-.venv/bin/python -m pytest tests/ -v
-# pytest tests/ green on CPU (incl. cache_pack + vs_baseline + BDH_ATTN_IMPL)
-# includes test_vs_baseline (logits/grads/attn), tril(-1), BDH_ATTN_IMPL hook
+.venv/bin/python -m pytest tests/ -q
+# 81 passed, 4 skipped (CUDA/native/Triton GPU) on CPU-only box
+# test_attn_unify: env resolve, all 4 impls match eager, cold hook, cache ignores impl
 ```
 
-No intentional numerical approximations.
+### Non-goals
+
+- No Cursor cloud agents
+- No PRs to `pathwaycom/bdh`
+- No merge of this PR from the agent
+- No softmax / diagonal inclusion / SDPA
 
 ## opt/compile-train (train loop)
 

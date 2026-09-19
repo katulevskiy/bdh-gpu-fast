@@ -9,11 +9,32 @@ out    = scores @ V
 
 No softmax, no `1/sqrt(d)`, diagonal excluded.
 
+## Unified dispatch (`BDH_ATTN_IMPL`)
+
+| Value | Backend |
+|-------|---------|
+| `eager` (default) | Full T×T then `tril(diagonal=-1)` |
+| `blocked` | Tiled pure PyTorch (no full upper triangle) |
+| `triton` | Triton fused on CUDA; blocked fallback otherwise |
+| `cuda` | `kernels.cuda_attn.tril_score_v` (native ext if built, else ref) |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default
+export BDH_ATTN_IMPL=blocked
+export BDH_ATTN_IMPL=triton
+export BDH_ATTN_IMPL=cuda
+```
+
+Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
+The KV-cache / `generate()` decode path stays **eager** — custom kernels do not
+yet support incremental attention.
+
 ## Modules
 
 | Path | Role |
 |------|------|
-| `attention.py` / `attention_dispatch.py` | Triton + blocked/eager PyTorch (`BDH_ATTN_IMPL`) |
+| `attention.py` | `eager_tril_attn`, `blocked_tril_attn`, `triton_tril_attn` |
+| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `resolve_attn_impl()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref |
 
