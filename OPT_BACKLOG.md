@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b126d77` / documented tip `0215ca8` (post #64–#66 cuda-decode-v3 + docs-matrix + log-sync; #67 docs refresh; #68 profile-v6; #69 rope-decode; #70 dropout-compile; #71 docs; #72 gen-long-bench; #73 attn-mem-probe), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b126d77` / documented tip `43948b7` (post #64–#66 cuda-decode-v3 + docs-matrix + log-sync; #67 docs refresh; #68 profile-v6; #69 rope-decode; #70 dropout-compile; #71 docs; #72 gen-long-bench; #73 attn-mem-probe; #74 docs-matrix-v9; #75 prefill-blocked), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -76,6 +76,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Profile-v6 docs refresh (`opt/profile-v6` #68) — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; no GPU measurement
 - T=1 RoPE apply deepen (`opt/rope-decode` #69) — `rope_rotate_t1` pair stores; table-pair / last-position cis reuse; CPU wall ~0.83× (no win claim); GPU fused/Triton T=1 open
 - Docs matrix v9 refresh (`opt/docs-matrix-v9`) — docs-only through #73; documented tip `0215ca8`
+- Docs matrix v10 refresh (`opt/docs-matrix-v10`) — docs-only through #75; documented tip `43948b7`
 - Docs matrix v5 refresh (`opt/docs-matrix-v5` #60) — docs-only through #59; documented tip `71ba3a4`
 - Generate host-test repair (`opt/fix-gen-host-test` #61) — updated AUTO decode environ-get floor; semantics unchanged
 - Residual LN deepen: reuse inner LN out via `add_` (fewer add temps; `F.layer_norm` #30 path kept) (`opt/ln-deepen`) — CPU e2e ~noise
@@ -226,7 +227,7 @@ python benchmarks/bench_generate.py --device cuda --warmup 5 --iters 20
 python benchmarks/bench_generate.py --mode auto-ab --device cuda
 ```
 
-**CPU honesty (this box / tip `962a3b6`):**
+**CPU honesty (this box / tip `43948b7`):**
 - `--mode impls` short prompt: medians ~noise vs eager; match; `aten::cat=0`
 - `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO**
   **1.26× @1024 / 1.39× @2048** after `opt/prefill-blocked` (cold+decode);
