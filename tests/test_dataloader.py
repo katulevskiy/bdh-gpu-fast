@@ -338,6 +338,7 @@ def test_batch_prefetcher_producer_alive(tr):
     try:
         assert loader._thread is not None and loader._thread.is_alive()
         assert loader._q is not None
+        assert loader._q.maxsize == 1
         x, y = loader.next()
         assert x.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
         assert y.dtype == torch.int64
