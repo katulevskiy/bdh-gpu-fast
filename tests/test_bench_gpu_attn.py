@@ -193,3 +193,51 @@ def test_no_cuda_skip_returns_before_measurement(monkeypatch):
     monkeypatch.setattr(sys, "argv", [str(SCRIPT)])
 
     assert namespace["main"]() == 0
+
+
+def test_force_cpu_main_skips_gpu_metadata_when_cuda_is_available(monkeypatch, tmp_path):
+    """Forced CPU smoke must not initialize GPU metadata or claim GPU timing."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("CPU smoke initialized GPU metadata")
+
+    monkeypatch.setattr(torch.cuda, "get_device_properties", fail_if_called)
+    summary_path = tmp_path / "forced-cpu-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--force-cpu",
+            "--warmup",
+            "0",
+            "--iters",
+            "1",
+            "--B",
+            "1",
+            "--H",
+            "1",
+            "--T",
+            "2",
+            "--N",
+            "2",
+            "--D",
+            "2",
+            "--json-out",
+            str(summary_path),
+        ],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    assert summary["cuda_available"] is True
+    assert summary["device"] == "cpu"
+    assert summary["timing_scope"] == "cpu"
+    assert summary["gpu_name"] is None
