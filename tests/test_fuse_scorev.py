@@ -44,6 +44,22 @@ def test_online_blocked_matches_eager(T, block_size):
     assert torch.equal(got_b, got_o)
 
 
+def test_online_blocked_match_eager_for_distinct_qk():
+    """Score×V must preserve the contract when Q and K are not aliased."""
+    Q, _, V = _make_qkv(B=2, H=3, T=19, N=24, D=16, seed=31)
+    g = torch.Generator(device="cpu").manual_seed(32)
+    K = torch.randn(Q.shape, generator=g, dtype=Q.dtype)
+
+    ref = eager_tril_attn(Q, K, V)
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.allclose(ref, expected, rtol=1e-5, atol=1e-5)
+
+    got_b = blocked_tril_attn(Q, K, V, block_size=7)
+    got_o = online_tril_attn(Q, K, V, block_size=7)
+    assert torch.allclose(got_b, ref, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(got_o, ref, rtol=1e-4, atol=1e-4)
+
+
 def test_pos0_zero_and_no_softmax():
     Q, K, V = _make_qkv(T=12, seed=11)
     out = online_tril_attn(Q, K, V, block_size=5)
