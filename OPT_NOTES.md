@@ -6276,3 +6276,34 @@ GPU behavior is claimed to change.
 - No default eager or AUTO behavior change.
 - No softmax, scaling, diagonal inclusion, or full-score materialization.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+## opt/amp-train-v3 — explicit CPU-safe AMP dtype matrix (2026-09-19)
+
+**Branch:** `opt/amp-train-v3` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no `pathwaycom/*`).
+**Base tip:** `40eac80` (`main`, after #140 docs).
+
+### Audit / deepen
+
+The AMP train harness now has one parameterized configuration matrix covering
+`float32`, `bfloat16`, and `float16`. Each case asserts the resolved PyTorch
+dtype, the forward-only flag, and the GradScaler gate; CPU cases skip only when
+the requested autocast backend fails its existing smoke probe. This makes the
+CPU-safe dtype contract explicit without changing train execution behavior.
+Defaults remain fp32 / AMP-off, and GradScaler remains restricted to
+float16 + CUDA. Attention remains raw scores × strict `tril(diagonal=-1)`.
+
+### Tests (CPU-only; no GPU claims)
+
+```text
+python -m pytest tests/test_bf16_train.py -q
+# 21 passed in 2.12s
+```
+
+No GPU is available here; no throughput, kernel-on-hardware, GPU correctness,
+or speedup claim is made.
+
+### Non-goals
+
+- No default AMP, optimizer, attention, or mask behavior change.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.

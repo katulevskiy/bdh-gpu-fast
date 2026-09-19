@@ -99,6 +99,41 @@ def test_default_amp_is_fp32_no_scaler():
     assert tr.scaler is not None and tr.scaler.is_enabled() is False
 
 
+@pytest.mark.parametrize(
+    ("amp_name", "expected_ptdtype"),
+    [
+        ("float32", torch.float32),
+        ("bfloat16", torch.bfloat16),
+        ("float16", torch.float16),
+    ],
+)
+def test_amp_dtype_configuration_matrix(amp_name, expected_ptdtype):
+    """Every supported dtype has one explicit CPU-safe configuration outcome."""
+    if tr.device.type == "cpu":
+        available = (
+            tr.cpu_bf16_available()
+            if amp_name == "bfloat16"
+            else tr.cpu_fp16_available()
+            if amp_name == "float16"
+            else True
+        )
+        if not available:
+            pytest.skip(f"CPU {amp_name} autocast unavailable")
+
+    tr.configure_amp(amp_name, forward_only=True)
+    assert tr.dtype == amp_name
+    assert tr.ptdtype is expected_ptdtype
+    assert tr._amp_forward_only is (amp_name != "float32")
+
+    expected_scaler = (
+        amp_name == "float16"
+        and tr.device.type == "cuda"
+        and torch.cuda.is_available()
+    )
+    assert tr._use_scaler is expected_scaler
+    assert tr.scaler is not None and tr.scaler.is_enabled() is expected_scaler
+
+
 def test_gradscaler_only_fp16_cuda():
     """Scaler enabled iff float16 AND CUDA; bf16 never scales."""
     tr.configure_amp("bfloat16")
