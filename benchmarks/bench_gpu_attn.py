@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 6
+SUMMARY_SCHEMA_VERSION = 7
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -140,7 +140,18 @@ def _cuda_runtime_diagnostics(
     }
 
 
-def _skip_summary(*, mode: str) -> dict[str, Any]:
+def _skip_summary(
+    *,
+    mode: str,
+    B: int,
+    H: int,
+    T: int,
+    N: int,
+    D: int,
+    dtype: str,
+    warmup: int,
+    iters: int,
+) -> dict[str, Any]:
     cuda_runtime = _cuda_runtime_diagnostics(cuda_available=False)
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
@@ -155,6 +166,16 @@ def _skip_summary(*, mode: str) -> dict[str, Any]:
             }
         ],
         "mode": mode,
+        "request": {
+            "B": B,
+            "H": H,
+            "T": T,
+            "N": N,
+            "D": D,
+            "dtype": dtype,
+            "warmup": warmup,
+            "iters": iters,
+        },
         "device": "cpu",
         "timing_scope": "none",
         "cuda_available": False,
@@ -250,7 +271,17 @@ def main() -> int:
 
     cuda_ok = torch.cuda.is_available()
     if not cuda_ok and not args.force_cpu:
-        summary = _skip_summary(mode=args.mode)
+        summary = _skip_summary(
+            mode=args.mode,
+            B=args.B,
+            H=args.H,
+            T=args.T,
+            N=args.N,
+            D=args.D,
+            dtype=args.dtype,
+            warmup=args.warmup,
+            iters=args.iters,
+        )
         print(
             "GPU_ATTN_SKIP status=skip reason=cuda_unavailable device=cpu\n"
             "CUDA is required for Triton/CUDA timing; no CPU timings were substituted."

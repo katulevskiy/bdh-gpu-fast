@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 6
+    assert summary["schema_version"] == 7
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -123,7 +123,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 6
+    assert summary["schema_version"] == 7
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
@@ -509,4 +509,55 @@ def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
     assert f"cuda_built={summary['cuda_built']}" in result.stdout
     assert f"cuda_device_count={summary['cuda_device_count']}" in result.stdout
     assert "backend_info=" in result.stdout
+    assert "median ms" not in result.stdout
+
+
+def test_no_cuda_skip_records_requested_measurement_config(tmp_path):
+    """Skip diagnostics retain the exact CPU-side request for later GPU handoff."""
+    summary_path = tmp_path / "requested-summary.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--mode",
+            "decode",
+            "--B",
+            "3",
+            "--H",
+            "5",
+            "--T",
+            "17",
+            "--N",
+            "7",
+            "--D",
+            "11",
+            "--dtype",
+            "bfloat16",
+            "--warmup",
+            "4",
+            "--iters",
+            "9",
+            "--json-out",
+            str(summary_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(summary_path.read_text())
+    assert summary["status"] == "skip"
+    assert summary["timing_scope"] == "none"
+    assert summary["request"] == {
+        "B": 3,
+        "H": 5,
+        "T": 17,
+        "N": 7,
+        "D": 11,
+        "dtype": "bfloat16",
+        "warmup": 4,
+        "iters": 9,
+    }
     assert "median ms" not in result.stdout
