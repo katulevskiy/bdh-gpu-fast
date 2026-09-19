@@ -171,6 +171,10 @@ def main():
         "Note: cache-v2 cat-free generate + cache-page geometric growth. "
         "CPU medians are realloc/copy noise, not GPU GEMM wins."
     )
+    print(
+        "For full geometric vs linear page-size sweep (grows/bytes), see "
+        "benchmarks/bench_cache_page.py (opt/cache-page-bench)."
+    )
 
 
 if __name__ == "__main__":

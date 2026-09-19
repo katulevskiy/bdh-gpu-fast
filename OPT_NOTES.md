@@ -4556,3 +4556,98 @@ BDH_BENCH_COMPILE_FULLGRAPH=1 python benchmarks/bench_train_step.py
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No PRs to `pathwaycom/*`
 - No GPU / CUDA-graph speedup claims from these CPU medians
+
+## opt/cache-page-bench — CacheManager paging microbench (2026-09-19)
+
+**Branch:** `opt/cache-page-bench` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `006de27` (main after `#84` compile-fullgraph; post `#83` docs).
+
+### Goal
+
+Honest microbench of **geometric vs linear** `CacheManager` page growth for
+**long generate**: measure `n_grows` / `bytes_copied_on_grow` across page sizes.
+Defaults unchanged (`page_size=None` / `cache_page_size=None` → full prealloc,
+zero grows). No pathwaycom; no public PR. No GPU claims from CPU numbers.
+
+### What landed
+
+| Piece | Role |
+|-------|------|
+| `benchmarks/bench_cache_page.py` | Tokenwise fill to `max_seq`; geometric (tip) vs linear `+page` A/B; generate smoke (`aten::cat=0`, match fixed) |
+| `benchmarks/bench_cache_mem.py` | Pointer to the dedicated page sweep |
+| Docs | This note + light `OPT_STATUS` / `OPT_BACKLOG` pointers |
+
+```bash
+OMP_NUM_THREADS=2 python benchmarks/bench_cache_page.py
+OMP_NUM_THREADS=2 python benchmarks/bench_cache_page.py --max-seq 2048 --pages 8,16,32,64,128,256
+python benchmarks/bench_cache_page.py --smoke
+```
+
+Linear policy is **A/B only** (monkeypatched `_next_capacity`); tip default
+remains geometric `#57`. Closed-form linear bytes
+`stride * page * n(n+1)/2` matches measured `bytes_copied_on_grow`.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica / CEST)
+
+`OMP_NUM_THREADS=2`, `torch 2.14.0+cu130`, `cuda=False`, cfg
+`layers=2 d=64 nh=4 mlp_mult=32 B=1` fp32
+(`elem_stride = 16896` B/token of KR+V).
+
+#### max_seq=2048 — geometric vs linear
+
+| page | geo grows | lin grows | geo bytes | lin bytes | bytes× (lin/geo) | grows× |
+|------|-----------|-----------|-----------|-----------|------------------|--------|
+| 8 | 8 | 255 | 34,467,840 | 4,411,883,520 | **128.0×** | 31.9× |
+| 16 | 7 | 127 | 34,332,672 | 2,197,291,008 | **64.0×** | 18.1× |
+| 32 | 6 | 63 | 34,062,336 | 1,089,994,752 | **32.0×** | 10.5× |
+| 64 | 5 | 31 | 33,521,664 | 536,346,624 | **16.0×** | 6.2× |
+| 128 | 4 | 15 | 32,440,320 | 259,522,560 | **8.0×** | 3.8× |
+| 256 | 3 | 7 | 30,277,632 | 121,110,528 | **4.0×** | 2.3× |
+
+#### max_seq=512 — cross-check vs `#57` notes
+
+| page | geo grows | lin grows | geo bytes | lin bytes | bytes× |
+|------|-----------|-----------|-----------|-----------|--------|
+| 8 | 6 | 63 | 8,515,584 | 272,498,688 | 32.0× |
+| 16 | 5 | 31 | 8,380,416 | 134,086,656 | **16.0×** |
+| 32 | 4 | 15 | 8,110,080 | 64,880,640 | 8.0× |
+| 64 | 3 | 7 | 7,569,408 | 30,277,632 | 4.0× |
+
+`page=16 → 512`: geometric **5** grows (16→32→…→512) vs **31** linear; ~16×
+fewer copy bytes — same structural story as `#57` (absolute MB scale with cfg
+`elem_stride`).
+
+#### generate smoke
+
+```text
+generate prompt=32 +new=256 cache_page_size=16:
+  match_fixed=True  aten::cat=0
+  mirror paged decode: n_grows=5  bytes_copied=8,110,080
+```
+
+### Verdict
+
+| Claim | Result (CPU tip `006de27`) |
+|-------|----------------------------|
+| Geometric ≪ linear grows | **Yes** — O(log S) vs O(S/page) |
+| Geometric ≪ linear copy bytes | **Yes** — O(S) vs O(S²); **4–128×** less for pages 256→8 @ S=2048 |
+| `aten::cat` / tokens | **Yes** — cat=0; paged generate matches fixed |
+| Defaults | **Unchanged** — `cache_page_size=None` still full prealloc |
+| GPU | **Unmeasured** — realloc accounting only |
+
+Do **not** claim GPU / attention wall wins from these CPU grow-count deltas.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_cache_pack.py -q
+# 21 passed (geometric / ensure_capacity / long paged generate)
+python benchmarks/bench_cache_page.py --smoke
+```
+
+### Non-goals
+
+- No change to default `page_size` / `cache_page_size` (still `None`)
+- No PRs to `pathwaycom/*`; no public PR
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No fake GPU speedups from CPU grow/byte ratios

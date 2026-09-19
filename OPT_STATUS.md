@@ -279,6 +279,7 @@ python benchmarks/profile_forward.py --mode all
 BDH_BENCH_COMPILE=1 BDH_BENCH_COMPILE_MODE=1 BDH_BENCH_COMPILE_FULLGRAPH=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
 python benchmarks/bench_sparse_probe.py
 python benchmarks/bench_attn_mem.py --smoke
+python benchmarks/bench_cache_page.py --smoke
 # on a CUDA box:
 python benchmarks/bench_gpu_attn.py
 python benchmarks/bench_gpu_attn.py --mode decode --T 512
