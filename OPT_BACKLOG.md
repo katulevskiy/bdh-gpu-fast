@@ -18,7 +18,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 ## Already landed (main)
 
-- Analytic attn train path (`BDH_ATTN_AUTOGRAD` / `StrictTrilAttnFn`) — **landed** `opt/attn-bwd-train` (#34): cold+multi-token wiring, `bench_attn_bwd.py`, grad parity @ dropout=0; GPU train A/B still open
+- Analytic attn train path (`BDH_ATTN_AUTOGRAD` / `StrictTrilAttnFn`) — **landed** `opt/attn-bwd-train` (#39): cold+multi-token wiring, `bench_attn_bwd.py`, grad parity @ dropout=0
+- Blocked/online + **tiled** analytic bwd train (`opt/blocked-autograd`): no full T×T in fwd or bwd; `online` alias; GPU train A/B still open
 
 - RoPE without `stack→view`; skip redundant dtype casts
 - RoPE cos/sin table cache by (T, head_dim, device, dtype) (`opt/rope-cache` #18)
@@ -73,6 +74,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Vectorized CPU blocked tiles | **Landed** #38 `opt/blocked-vec` — still < eager; GPU measure open |
 | Re-profile post-mlp-fuse | **Landed** `opt/profile-v3` (this PR) — tip `b160469`; cats=0; contiguous=0 |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
+| Blocked/online tiled analytic bwd | **This PR** `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22; CPU 0-vs-1 train bench `opt/compile-bench`; remaining = **GPU** measure (P1) |
@@ -80,7 +82,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
 
-| **P2** | **Analytic attn train on GPU** | CPU `bench_attn_bwd.py` AUTOGRAD 0 vs 1 landed (#34). **GPU** train-step with `IMPL=blocked|triton|cuda` + AUTOGRAD=1 unmeasured. | A100/H100 `bench_attn_bwd.py` | Low |
+| **P2** | **Analytic attn train on GPU** | CPU blocked|online + tiled analytic bwd landed (`opt/blocked-autograd`). **GPU** train-step with `IMPL=blocked|triton|cuda` + AUTOGRAD=1 unmeasured. | A100/H100 `bench_attn_bwd.py` | Low |
 
 ## Explicit non-goals
 

@@ -5,10 +5,13 @@ Backends (``BDH_ATTN_IMPL``)::
     export BDH_ATTN_IMPL=triton   # blocked PyTorch on CPU; Triton on CUDA
     export BDH_ATTN_IMPL=eager    # default — full T×T then tril_(diagonal=-1)
     export BDH_ATTN_IMPL=blocked  # online fused tiles, no full T×T scores
+    export BDH_ATTN_IMPL=online   # alias of blocked
     export BDH_ATTN_IMPL=cuda    # native ext if built, else CPU/CUDA ref
     export BDH_ATTN_AUTOGRAD=1    # optional — StrictTrilAttnFn + analytic bwd
+                                   # blocked|online|triton|cuda → tiled analytic bwd
+                                   # (no full T×T); eager → dense M recompute
 
-Backends: eager, blocked, triton, or cuda.
+Backends: eager, blocked (=online), triton, or cuda.
 
 Wire-up in ``bdh.Attention.forward``:
 
@@ -42,15 +45,21 @@ from .attention_bwd import _env_autograd_enabled, strict_tril_attn
 
 ImplName = Literal["eager", "blocked", "triton", "cuda"]
 _VALID = ("eager", "blocked", "triton", "cuda")
+# "online" is accepted as an alias of blocked (fuse-scorev / OPT notes name).
+_ALIASES = {"online": "blocked"}
 
 
 def resolve_attn_impl(requested: str | None = None) -> ImplName:
-    """Resolve BDH_ATTN_IMPL (or explicit override) to a concrete backend name."""
+    """Resolve BDH_ATTN_IMPL (or explicit override) to a concrete backend name.
+
+    ``online`` is accepted and mapped to ``blocked``.
+    """
     raw = requested if requested is not None else os.environ.get("BDH_ATTN_IMPL", "eager")
     raw = (raw or "eager").strip().lower()
+    raw = _ALIASES.get(raw, raw)
     if raw not in _VALID:
         raise ValueError(
-            f"BDH_ATTN_IMPL must be {'|'.join(_VALID)}, got {raw!r}"
+            f"BDH_ATTN_IMPL must be {'|'.join(_VALID)}|online, got {raw!r}"
         )
     return raw  # type: ignore[return-value]
 
@@ -73,7 +82,9 @@ def bdh_attn(
 
     When ``use_autograd_fn`` is True (or BDH_ATTN_AUTOGRAD=1 and the arg is
     None), wraps the forward in ``StrictTrilAttnFn`` with analytic Q/K/V
-    backward. Default is False / env-off so the eager training path is
+    backward. For ``blocked`` / ``online`` / ``triton`` / ``cuda``, the
+    analytic bwd is **tiled** (no full T×T); eager still uses dense M
+    recompute. Default is False / env-off so the eager training path is
     unchanged.
     """
     name = resolve_attn_impl(impl)

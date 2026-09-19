@@ -15,14 +15,20 @@ No softmax, no `1/sqrt(d)`, diagonal excluded.
 |-------|---------|
 | `eager` (default) | Full T×T then `tril(diagonal=-1)` |
 | `blocked` | Tiled pure PyTorch (no full upper triangle) |
+| `online` | Alias of `blocked` |
 | `triton` | Triton fused on CUDA; blocked fallback otherwise |
 | `cuda` | `kernels.cuda_attn.tril_score_v` (native ext if built, else CPU ref) |
 
 ```bash
 export BDH_ATTN_IMPL=eager     # default
 export BDH_ATTN_IMPL=blocked
+export BDH_ATTN_IMPL=online    # alias of blocked
 export BDH_ATTN_IMPL=triton
 export BDH_ATTN_IMPL=cuda
+
+# train with fused/blocked forward + analytic bwd (tiled for non-eager)
+export BDH_ATTN_AUTOGRAD=1
+export BDH_ATTN_IMPL=blocked
 ```
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
@@ -38,7 +44,7 @@ CUDA decode is tiled online vs packed KR/V. Default remains **eager**.
 |------|------|
 | `attention.py` | cold tril + decode: `blocked_*` / `online_*`, `triton_*`, shared `_tiled_score_v` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
-| `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`; first-class train path) |
+| `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`); dense M-recompute for eager, **tiled** analytic for blocked/online/triton/cuda (no full T×T) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |
 | `rope.py` | RoPE rotate: eager / fused PyTorch / optional Triton |
 | `rope_dispatch.py` | `BDH_ROPE_IMPL` → `bdh_rope_rotate()` |

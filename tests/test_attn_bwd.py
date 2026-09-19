@@ -289,3 +289,111 @@ def test_cuda_impl_with_autograd_fn(monkeypatch):
     assert out[:, :, 0, :].abs().max().item() == 0.0
     out.sum().backward()
     assert Q.grad is not None and K.grad is not None and V.grad is not None
+
+
+# --- opt/blocked-autograd: tiled analytic bwd + blocked|online train path ---
+
+from kernels.attention_bwd import (  # noqa: E402
+    analytic_tril_attn_backward_blocked,
+    _use_blocked_analytic_bwd,
+)
+from kernels.attention_dispatch import resolve_attn_impl  # noqa: E402
+
+
+def test_online_alias_resolves_to_blocked():
+    assert resolve_attn_impl("online") == "blocked"
+    assert resolve_attn_impl("blocked") == "blocked"
+    assert _use_blocked_analytic_bwd("online")
+    assert _use_blocked_analytic_bwd("blocked")
+    assert _use_blocked_analytic_bwd("triton")
+    assert _use_blocked_analytic_bwd("cuda")
+    assert not _use_blocked_analytic_bwd("eager")
+
+
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_blocked_analytic_matches_dense(v_heads):
+    """Tiled analytic bwd ≡ dense M-recompute (float64)."""
+    Q, K, V = _qkv(B=2, H=3, T=17, N=5, D=7, seed=13, v_heads=v_heads)
+    dO = torch.randn(2, 3, 17, 7, dtype=torch.float64)
+    dQ1, dK1, dV1 = analytic_tril_attn_backward(Q, K, V, dO)
+    dQ2, dK2, dV2 = analytic_tril_attn_backward_blocked(Q, K, V, dO, block_size=4)
+    assert torch.allclose(dQ1, dQ2, rtol=1e-10, atol=1e-10)
+    assert torch.allclose(dK1, dK2, rtol=1e-10, atol=1e-10)
+    assert torch.allclose(dV1, dV2, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+def test_blocked_online_fn_grads_match_eager_autograd(impl):
+    """StrictTrilAttnFn(blocked|online) grads match eager autograd @ dropout=0 math."""
+    Q, K, V = _qkv(B=1, H=2, T=9, N=4, D=5, seed=21)
+    Qe = Q.clone().requires_grad_(True)
+    Ke = K.clone().requires_grad_(True)
+    Ve = V.clone().requires_grad_(True)
+    Qf = Q.clone().requires_grad_(True)
+    Kf = K.clone().requires_grad_(True)
+    Vf = V.clone().requires_grad_(True)
+
+    Oe = eager_tril_attn(Qe, Ke, Ve)
+    Of = strict_tril_attn(Qf, Kf, Vf, impl=impl, use_fn=True)
+    assert torch.allclose(Of, Oe, rtol=1e-7, atol=1e-7)
+    assert torch.allclose(Of[:, :, 0, :], torch.zeros_like(Of[:, :, 0, :]))
+
+    dO = torch.randn_like(Oe)
+    Oe.backward(dO)
+    Of.backward(dO.clone())
+    assert torch.allclose(Qf.grad, Qe.grad, rtol=1e-6, atol=1e-6)
+    assert torch.allclose(Kf.grad, Ke.grad, rtol=1e-6, atol=1e-6)
+    assert torch.allclose(Vf.grad, Ve.grad, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+def test_full_model_blocked_autograd_parity(impl, monkeypatch):
+    """Full BDH: IMPL=blocked|online + AUTOGRAD=1 matches eager+AUTOGRAD @ dropout=0."""
+    cfg = _tiny_cfg()
+    torch.manual_seed(0)
+    m_eager = bdh.BDH(cfg)
+    torch.manual_seed(0)
+    m_blk = bdh.BDH(cfg)
+    m_blk.load_state_dict(m_eager.state_dict())
+
+    torch.manual_seed(2)
+    x = torch.randint(0, 256, (2, 12))
+    y = torch.randint(0, 256, (2, 12))
+
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    m_eager.zero_grad(set_to_none=True)
+    _, loss_e = m_eager(x, y)
+    loss_e.backward()
+
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+    m_blk.zero_grad(set_to_none=True)
+    _, loss_b = m_blk(x, y)
+    loss_b.backward()
+
+    assert torch.allclose(loss_e, loss_b, rtol=1e-5, atol=1e-5)
+    for (n0, p0), (n1, p1) in zip(m_eager.named_parameters(), m_blk.named_parameters()):
+        assert p0.grad is not None and p1.grad is not None, n0
+        assert torch.allclose(p0.grad, p1.grad, rtol=1e-4, atol=1e-5), (
+            f"{n0} grad mismatch max={(p0.grad - p1.grad).abs().max().item()}"
+        )
+
+
+def test_dispatch_online_autograd_env(monkeypatch):
+    """BDH_ATTN_IMPL=online + AUTOGRAD=1 routes and matches eager grads."""
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "online")
+    Q, K, V = _qkv(B=1, H=2, T=5, N=3, D=3, seed=8)
+    Q = Q.float().requires_grad_(True)
+    K = K.float().requires_grad_(True)
+    V = V.float().requires_grad_(True)
+    out = bdh_attn(Q, K, V)
+    assert out[:, :, 0, :].abs().max().item() == 0.0
+    out.sum().backward()
+    Q2 = Q.detach().clone().requires_grad_(True)
+    K2 = K.detach().clone().requires_grad_(True)
+    V2 = V.detach().clone().requires_grad_(True)
+    eager_tril_attn(Q2, K2, V2).sum().backward()
+    assert torch.allclose(Q.grad, Q2.grad, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(K.grad, K2.grad, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(V.grad, V2.grad, rtol=1e-4, atol=1e-4)
