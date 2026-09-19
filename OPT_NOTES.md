@@ -3859,3 +3859,73 @@ box** — expect pair stores / skipped `expand` to matter more on CUDA with
 - No fake GPU speedups from CPU medians
 - No removal of `rope_cos_sin` / generate table cache
 - No attention math / `tril(-1)` changes
+
+## opt/dropout-compile — harden dropout=0 compile path (2026-09-19)
+
+**Branch:** `opt/dropout-compile` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `0739807` (main after `#69` rope-decode).
+
+### Goal
+
+Keep the `#17` `F.dropout` + identity `p=0` path compile-friendly on tip, extend
+eval identity (no RNG op when `not training`), lock FX / Dynamo coverage, and
+honestly measure `train_step` under `BDH_COMPILE=1` for `dropout=0` vs `0.1`.
+**No default flips** (`BDH_COMPILE=0`, `config.dropout=0.1`).
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `bdh._dropout` | Identity when `p==0` **or** `not self.training`; train+`p>0` → `F.dropout(..., training=True)` |
+| `tests/test_dropout_compile.py` | Same-object identity; FX no `bernoulli_` @ p=0 / eval; FX has RNG @ p>0 train; Dynamo 0 breaks; compile fullgraph parity; COMPILE train_step smoke @ p>0 |
+| `benchmarks/bench_train_step.py` | `bench_compile_dropout_matrix` (`BDH_BENCH_COMPILE_DROPOUT=1`, default on) |
+| Docs | This note + light `OPT_STATUS` / `OPT_BACKLOG` |
+
+Preserved: `tril(diagonal=-1)`, `CacheManager`, `BDH_ATTN_IMPL`, Parameter layout,
+CE / train-split, `#17` torch-RNG-only contract.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica)
+
+Tiny cfg: `layers=2 d=64 nh=2 B=4 T=64`, `COMPILE=1`, `mode=default`,
+`probe=train`, `torch` CPU (`cuda=False`):
+
+```text
+COMPILE=1 dropout=0.0: median 6.36 ms
+COMPILE=1 dropout=0.1: median 7.12 ms
+ratio dropout0/dropout0.1: 0.89×
+```
+
+**Honesty:** CPU inductor wall only. Ratio near 1 under load is **noise**, not a
+GPU win. Value of `dropout=0` is **graph cleanliness** (no `bernoulli_` /
+`native_dropout` in FX) for parity / compile benches — not a claimed speedup.
+Soft-skip still applies if inductor/probe falls back.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_dropout_compile.py tests/test_vs_baseline.py \
+  tests/test_correctness.py::test_train_mode_dropout_still_runs \
+  tests/test_compile.py::test_compile_forward_matches_eager_dropout_zero \
+  tests/test_compile.py::test_cold_forward_no_dynamo_graph_breaks_dropout_zero -q
+# 19 passed — identity; FX RNG absent @ p=0/eval; Dynamo 0 breaks; baseline parity
+```
+
+### Operator guidance
+
+```bash
+# defaults unchanged:
+python train.py
+
+# recommended CPU compile path (still opt-in):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager python train.py
+
+# dropout A/B under compile (honest CPU):
+BDH_BENCH_COMPILE_DROPOUT=1 python benchmarks/bench_train_step.py
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `dropout` / `BDH_COMPILE` / `BDH_ATTN_IMPL`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No GPU / CUDA-graph speedup claims from these CPU medians

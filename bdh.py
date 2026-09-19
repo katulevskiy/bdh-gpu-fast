@@ -418,7 +418,7 @@ class BDH(nn.Module):
         self._ln_eps = float(self.ln.eps)
         self.embed = nn.Embedding(config.vocab_size, D)
         # Float p + F.dropout (not nn.Dropout): torch RNG only, compile-friendly.
-        # p==0 is a true identity (no RNG op) — bit-identical to baseline Dropout(0).
+        # p==0 or eval → true identity (no RNG op) — bit-identical to baseline.
         self.dropout_p = float(config.dropout)
         self.encoder_v = nn.Parameter(torch.zeros((nh, D, N)).normal_(std=0.02))
 
@@ -632,14 +632,15 @@ class BDH(nn.Module):
         """Compile-friendly dropout via ``F.dropout`` (ATen / torch RNG only).
 
         Never uses Python ``random`` / NumPy RNG (those graph-break ``torch.compile``).
-        When ``dropout_p == 0`` (common under ``BDH_COMPILE`` benches / baseline
-        parity tests), returns ``x`` unchanged so the compiled graph has **no**
-        dropout RNG ops — bit-identical to ``nn.Dropout(0)``.
+        When ``dropout_p == 0`` **or** ``not self.training`` (eval), returns ``x``
+        unchanged so the compiled / FX graph has **no** dropout RNG ops
+        (``bernoulli_`` / ``native_dropout``) — bit-identical to ``nn.Dropout(0)``
+        and to eval-mode ``nn.Dropout(p)``.
         """
         p = self.dropout_p
-        if p == 0.0:
+        if p == 0.0 or not self.training:
             return x
-        return F.dropout(x, p=p, training=self.training)
+        return F.dropout(x, p=p, training=True)
 
     @staticmethod
     def _linear(x: torch.Tensor, weight_in_out: torch.Tensor, bias=None) -> torch.Tensor:

@@ -112,7 +112,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | OPT status docs refresh | **Landed** #43 `opt/docs-matrix-v2` — matrix through #40 |
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
-| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); remaining = **GPU** measure (P1) |
+| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63+#70; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); dropout=0 / eval identity hardened (#70); remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | T=1 RoPE apply deepen | **Landed** `opt/rope-decode` — `rope_rotate_t1` + table pairs / cis reuse; CPU wall ~noise; GPU open |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |

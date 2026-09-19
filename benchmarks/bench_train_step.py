@@ -27,6 +27,12 @@ COMPILE_MODE default vs reduce-overhead (opt/compile-reduce):
   {default, reduce-overhead} on tiny cfg. Soft-skip per mode if unsupported.
   On CPU, reduce-overhead is **not useful** (CUDA graphs need a GPU) — still
   measured honestly; no graph-capture claim. Opt out: BDH_BENCH_COMPILE_MODE=0.
+
+COMPILE=1 dropout=0 vs >0 (opt/dropout-compile):
+  Set BDH_BENCH_COMPILE_DROPOUT=1 (default on). Honest train_step medians under
+  BDH_COMPILE=1 for cfg.dropout in {0.0, 0.1}. Soft-skip if inductor/probe
+  unavailable. CPU wall only — dropout=0 is the compile-friendly identity path;
+  do not claim GPU wins. Opt out: BDH_BENCH_COMPILE_DROPOUT=0.
 """
 
 from __future__ import annotations
@@ -479,6 +485,111 @@ def bench_compile_mode_matrix(cfg, device, fused_ok: bool) -> None:
 
 
 
+def bench_compile_dropout_matrix(cfg_template, device, fused_ok: bool) -> None:
+    """Honest COMPILE=1 train_step: dropout=0 (identity) vs dropout>0.
+
+    Soft-skips a cell if maybe_compile / train_step fails. Restores
+    ``tr.USE_COMPILE`` after. Absolute ms are device-local; no GPU claim.
+    Documents that dropout=0 keeps RNG ops out of the compiled graph.
+    """
+    print("--- COMPILE=1 dropout=0 vs >0 (honest train-step) ---")
+    print(
+        f"device={device} mode={os.environ.get('BDH_COMPILE_MODE', tr.COMPILE_MODE)} "
+        f"probe={os.environ.get('BDH_COMPILE_PROBE', tr.COMPILE_PROBE)} "
+        f"cuda={torch.cuda.is_available()} cfg=layers={cfg_template.n_layer} "
+        f"d={cfg_template.n_embd} B=4 T=64"
+    )
+
+    dropouts = (0.0, 0.1)
+    x, y = _batch(device)
+    was_use = tr.USE_COMPILE
+    rows = []
+
+    try:
+        for p in dropouts:
+            tag = f"COMPILE=1 dropout={p}"
+            cfg = bdh.BDHConfig(
+                n_layer=cfg_template.n_layer,
+                n_embd=cfg_template.n_embd,
+                n_head=cfg_template.n_head,
+                mlp_internal_dim_multiplier=cfg_template.mlp_internal_dim_multiplier,
+                dropout=p,
+            )
+            torch.manual_seed(0)
+            m = bdh.BDH(cfg).to(device)
+            m.train()
+            tr.USE_COMPILE = True
+            try:
+                m = tr.maybe_compile(m, example_x=x, example_y=y)
+            except Exception as e:
+                print(
+                    f"{tag}: soft-skip maybe_compile "
+                    f"{type(e).__name__}: {e}"
+                )
+                rows.append((p, None, "soft-skip compile"))
+                continue
+            if not _is_dynamo_compiled(m):
+                print(
+                    f"{tag}: soft-skip (fell back to eager — "
+                    "inductor/probe unavailable)"
+                )
+                rows.append((p, None, "soft-skip eager-fallback"))
+                continue
+
+            opt = torch.optim.AdamW(
+                m.parameters(),
+                lr=tr.LEARNING_RATE,
+                weight_decay=tr.WEIGHT_DECAY,
+                fused=fused_ok,
+            )
+
+            def step():
+                return tr.train_step(m, opt, x, y)
+
+            try:
+                med = timed(step, warmup=2, reps=10)
+            except Exception as e:
+                print(
+                    f"{tag}: soft-skip train_step "
+                    f"{type(e).__name__}: {e}"
+                )
+                rows.append((p, None, f"soft-skip step:{type(e).__name__}"))
+                continue
+
+            ms = med * 1000.0
+            print(f"{tag}: median {ms:.2f} ms")
+            rows.append((p, ms, "ok"))
+    finally:
+        tr.USE_COMPILE = was_use
+
+    print("--- dropout summary (COMPILE=1 median ms; soft-skip = —) ---")
+    print(f"{'dropout':>10} {'median_ms':>12} {'status':>22}")
+    base = next((ms for p, ms, st in rows if p == 0.0 and ms is not None), None)
+    for p, ms, status in rows:
+        med_s = f"{ms:.2f}" if ms is not None else "—"
+        print(f"{p:>10} {med_s:>12} {status:>22}")
+    if base is not None:
+        for p, ms, status in rows:
+            if p > 0 and ms is not None and base > 0:
+                ratio = base / ms
+                print(
+                    f"ratio dropout0/dropout{p}: {ratio:.2f}x  "
+                    f"(>1 means identity path faster on this device)"
+                )
+    if device.type != "cuda":
+        print(
+            "honest: CPU inductor medians only — no CUDA-graph / GPU claim. "
+            "dropout=0 = identity (no bernoulli_/native_dropout in FX). "
+            "Defaults remain BDH_COMPILE=0, config.dropout=0.1."
+        )
+    else:
+        print(
+            "GPU box: re-check COMPILE=1 dropout A/B under real inductor; "
+            "defaults still COMPILE=0 / dropout=0.1."
+        )
+
+
+
 def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
     """Honest tiny train_step: fp32 vs opt-in AMP (bf16 / fp16).
 
@@ -650,6 +761,16 @@ def main():
         print(
             "skip compile-mode matrix "
             "(set BDH_BENCH_COMPILE_MODE=1 to enable; default is on)"
+        )
+
+    # COMPILE=1 dropout=0 vs >0 (opt/dropout-compile). Default on;
+    # opt out with BDH_BENCH_COMPILE_DROPOUT=0.
+    if os.environ.get("BDH_BENCH_COMPILE_DROPOUT", "1") in ("1", "true", "True"):
+        bench_compile_dropout_matrix(cfg, device, fused_ok)
+    else:
+        print(
+            "skip compile-dropout matrix "
+            "(set BDH_BENCH_COMPILE_DROPOUT=1 to enable; default is on)"
         )
 
     # Honest AMP vs fp32 (opt/amp-deepen). Default on; opt out BDH_BENCH_AMP=0.
