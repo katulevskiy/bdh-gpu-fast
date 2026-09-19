@@ -121,3 +121,64 @@ def test_batched_shared_v_autograd_fallback_is_graph_safe():
     assert torch.isfinite(Q.grad).all()
     assert torch.isfinite(K.grad).all()
     assert torch.isfinite(V.grad).all()
+
+
+def test_b1_shared_v_packed_view_writes_accumulation_in_place(monkeypatch):
+    """B=1 packed cache views keep the direct out= epilogue on beta=1 tiles."""
+    B, H, S, N, D = 1, 4, _DECODE_ONESHOT_ELEMS * 2 + 17, 7, 9
+    cm = CacheManager(
+        n_layer=1,
+        max_seq=S + 23,
+        batch_size=B,
+        n_head=H,
+        n_latent=N,
+        n_embd=D,
+        device="cpu",
+    )
+    torch.manual_seed(405)
+    cm._kr_buf[0].normal_()
+    cm._v_buf[0].normal_()
+    cm.seq_len = S
+    K, V = cm.get_past(0)
+    assert K is not None and V is not None
+    assert K.stride() == (H * cm.capacity * N, cm.capacity * N, N, 1)
+    assert V.stride() == (cm.capacity * D, cm.capacity * D, D, 1)
+
+    Q = torch.randn(B, H, 1, N)
+    calls = []
+    original = torch.baddbmm
+
+    def spy(input, batch1, batch2, *, beta=1, alpha=1, out=None):
+        if out is not None:
+            calls.append((beta, input.data_ptr(), out.data_ptr(), batch1.shape))
+        return original(input, batch1, batch2, beta=beta, alpha=alpha, out=out)
+
+    monkeypatch.setattr(torch, "baddbmm", spy)
+    with torch.inference_mode():
+        got = blocked_decode_attn(Q, K, V, block_size=64)
+        ref = eager_decode_attn(Q, K, V)
+
+    accumulated = [c for c in calls if c[0] == 1]
+    assert accumulated
+    assert all(input_ptr == out_ptr for _, input_ptr, out_ptr, _ in accumulated)
+    assert all(shape[0] == H for _, _, _, shape in accumulated)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
+
+
+def test_b1_shared_v_autograd_fallback_is_graph_safe():
+    """B=1 keeps the allocation-safe fallback when gradients are enabled."""
+    Q, K, V = _qkv(
+        B=1,
+        H=3,
+        S=_DECODE_ONESHOT_ELEMS + 129,
+        N=5,
+        D=7,
+        seed=406,
+        requires_grad=True,
+    )
+    got = blocked_decode_attn(Q, K, V, block_size=64)
+    got.square().mean().backward()
+    assert Q.grad is not None and K.grad is not None and V.grad is not None
+    assert torch.isfinite(Q.grad).all()
+    assert torch.isfinite(K.grad).all()
+    assert torch.isfinite(V.grad).all()
