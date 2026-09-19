@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#84)
+# OPT status — landed work (#1–#87)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `006de27` (`#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged; #69–#82 opt-ins are not exercised on the short window; re-profiled in `opt/profile-v7`). Latest #84 probes fullgraph compile with soft fallback; GPU validation remains open.
+Tip documented here: `f10bdd4` (`#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged; #69–#82 opt-ins are not exercised on the short window; re-profiled in `opt/profile-v7`). #85–#87 add the cache-page microbench, docs alignment, and zero-grad train-path hardening; defaults remain unchanged and GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -156,7 +156,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#84)
+## Landed opts (#1–#87)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -244,6 +244,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **82** | `opt/triton-cold-v2` | Deepen Triton cold tiles (adaptive BLOCK_M/N @T≥256; pair #75/#79); CPU→blocked adaptive; AUTO docs | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
 | **83** | docs matrix (#82 tip) | Refresh optimization docs through #82 | Docs only | — |
 | **84** | `opt/compile-fullgraph` | Probe `BDH_COMPILE_FULLGRAPH=1` eager×AUTOGRAD; graph-break docs; soft-skip | 0 breaks cold eager; bench matrix; soft-fallback | GPU inductor still P1 |
+| **85** | `opt/cache-page-bench` | CacheManager geometric-vs-linear page-growth microbench; pointer from `bench_cache_mem.py`; documented tables | CPU: 128×→4× fewer bytes copied across page sizes 8→256; generate smoke `aten::cat=0`, tokens match | No GPU claims |
+| **86** | `docs/opt-status-backlog-v84` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #84 | Docs only | — |
+| **87** | `opt/zerograd` | Harden `zero_grad(set_to_none=True)` and fused AdamW via `clear_grads()` chokepoint; compile `train_bwd` probe; `tests/test_zerograd.py` | CPU re-smoke: fused+set-to-none ~1.03× vs legacy; set-to-none alone ~1.05× vs fill | GPU train measurement open; defaults unchanged (`BDH_FUSED_ADAMW=1`, `BDH_COMPILE=0`) |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

@@ -7,11 +7,11 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `ca5038f` / documented code tip `006de27` (post #75–#77 prefill-blocked + docs + auto-tune; #78 docs refresh; #79 cuda-cold-v2; #80 profile-v7; #81 docs align; #82 triton-cold-v2; #83 docs matrix; #84 compile-fullgraph), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `ca5038f` / documented code tip `f10bdd4` (post #75–#77 prefill-blocked + docs + auto-tune; #78 docs refresh; #79 cuda-cold-v2; #80 profile-v7; #81 docs align; #82 triton-cold-v2; #83 docs matrix; #84 compile-fullgraph; #85 cache-page-bench; #86 docs refresh; #87 zerograd), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
-Post-#75–#77 re-profile (`opt/profile-v7`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #58 layout-v2 still visible on generate (`mm`/`linear`); #69–#79 not exercised on short default window (AUTO off / T=128 / prompt=16; #79 CUDA cold opt-in). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v7.
+Post-#75–#77 re-profile (`opt/profile-v7`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #58 layout-v2 still visible on generate (`mm`/`linear`); #69–#79 not exercised on short default window (AUTO off / T=128 / prompt=16; #79 CUDA cold opt-in). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v7. #85–#87 add no GPU measurements; the ranked queue remains P0 GPU Triton/CUDA measurement, then P1 GPU compile and decode GEMM.
 
 Post-#64–#66 re-profile (`opt/profile-v6`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #58 layout-v2 still visible on generate (`mm`/`linear`); #64–#66 not exercised on short default window (CUDA decode / train log). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v6.
 
@@ -49,7 +49,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - CacheManager v2: layer-contiguous KR/V, page growth, generate **0× aten::cat** (`opt/cache-v2` #20)
 - Decode-copy: `reserve` + in-place RoPE into packed KR; `narrow` past views; no intermediate `.to()` on `copy_` (`opt/decode-copy`)
 - Cache-page: geometric page growth + empty+prefix copy_; `ensure_capacity`; fewer realloc copies on long S (`opt/cache-page`)
-- Cache-page-bench: geometric vs linear grows/bytes microbench (`benchmarks/bench_cache_page.py`) (`opt/cache-page-bench`)
+- Cache-page-bench (#85): geometric vs linear grows/bytes microbench (`benchmarks/bench_cache_page.py`) (`opt/cache-page-bench`)
 - Decode GEMM polish: blocked/Triton/CUDA T=1 score×V vs packed KR/V — broadcast-V, Triton staging, tiled CUDA (`opt/decode-gemm`)
 - Decode-mm: `_two_gemm_decode` + CUDA Tq=1/`DECODE_TILE_N` + B=1 lm_head `mv`; default eager (`opt/decode-mm`)
 - Decode-online-v2: blocked/online T=1 tight oneshot + long-S tiles; peak helper (`opt/decode-online-v2`)
@@ -88,6 +88,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Residual LN deepen: reuse inner LN out via `add_` (fewer add temps; `F.layer_norm` #30 path kept) (`opt/ln-deepen`) — CPU e2e ~noise
 - Compile reduce-overhead guidance (`opt/compile-reduce` #63) — CPU mode matrix and non-CUDA warning; GPU CUDA graphs still open
 - Compile fullgraph probe (`opt/compile-fullgraph` #84) — FULLGRAPH=1 × eager×AUTOGRAD; 0 Dynamo breaks on tip cold path; soft-fallback; GPU still open
+- Docs refresh (#86) — docs-only alignment through #84; documented tip `006de27`
+- Zero-grad train-path hardening (#87, `opt/zerograd`) — `clear_grads()` chokepoint, `set_to_none=True` + fused AdamW path, compile `train_bwd` probe, and 8 smoke tests; CPU re-smoke ~1.03× fused+set-to-none vs legacy; defaults unchanged
 - Docs matrix v6 refresh (`opt/docs-matrix-v6` #65) — docs-only through #64; documented tip `4558501`
 
 ## Ranked next work
@@ -126,6 +128,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63+#70+#84; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); dropout=0 / eval identity hardened (#70); **FULLGRAPH=1** probed (#84; 0 breaks cold eager×AUTOGRAD; soft-fallback); remaining = **GPU** measure (P1) |
+| ~~Zero-grad / `set_to_none` train-path hardening~~ | **Landed** #87 `opt/zerograd` — `clear_grads()` chokepoint plus compile `train_bwd` probe; CPU re-smoke ~1.03× fused+set-to-none vs legacy; defaults unchanged |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | T=1 RoPE apply deepen | **Landed** `opt/rope-decode` — `rope_rotate_t1` + table pairs / cis reuse; CPU wall ~noise; GPU open |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
@@ -237,7 +240,7 @@ python benchmarks/bench_generate.py --device cuda --warmup 5 --iters 20
 python benchmarks/bench_generate.py --mode auto-ab --device cuda
 ```
 
-**CPU honesty (this box / profile source `ca5038f`; documented code tip `006de27`):**
+**CPU honesty (this box / profile source `ca5038f`; documented code tip `f10bdd4`):**
 - `--mode impls` short prompt: medians ~noise vs eager; match; `aten::cat=0`
 - `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO**
   **1.26× @1024 / 1.39× @2048** after `opt/prefill-blocked` (cold+decode);
