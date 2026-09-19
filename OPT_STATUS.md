@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#117)
+# OPT status — landed work (#1–#120)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `bcf2458` (`#117` opt/compile-train-v2 / `#116` opt/online-decode-t1-v2 / `#115` docs-matrix-v26 / `#114` opt/cuda-cold-v3 / `#113` docs-matrix-v25 / `#112` profile-v11 / `#111` docs-matrix-v24 / `#110` gen-vcopy-v1 / `#109` docs-matrix-v23 / `#108` triton-cold-v3 / `#107` docs-matrix-v22 / `#106` docs-matrix-v22 / `#105` opt/ln-resid-v2 / `#104` profile-v10 / `#103` docs-matrix-v21 / `#102` gen-copy-tax-v1 / `#101` docs-matrix-v20 / `#100` scorev-fuse-v2 / `#99` docs-matrix-v19 / `#98` profile-v9 / `#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v11 source is `4963b0f` (`#110`); profile-v10 source is `1363794` (`#102`), and the current code tip is `bcf2458`. Default eager remains unchanged; #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, #95/profile-v9 report CPU-only copy-call evidence (isolated forward `copy_`=18; warmed harness 16/call; generate remains copy_-heavy), #100 deepens blocked/online CPU score×V epilogues plus T=1 decode tiling, #102 introduced and #104 re-profiled the complex-view copy for RoPE pairs plus sampled `idx_out` into preallocated `out.narrow`, with generate `copy_` ~558→~398 and `cat` still 0, #105 confirms the existing eager residual-LN path is already the safe deepen, #108 keeps wide-head Triton cold tiles bounded while preserving shared CPU V as a view in the blocked fallback, and #110 cuts generate `copy_` ~398→~394 by using `_store_pairs` for T>1 RoPE plus a top-k `gather(out=)` path. The #110 probe ceiling is the remaining V-slot writes (~132/gen) and multinomial internals (~128/gen), which are not safely removable without changing cache-snapshot layout or RNG behavior. #109 and #111 are docs-only; #112 re-profiles the #110 tip with warmed forward `copy_`=12/call, isolated `copy_`=14, generate `copy_`=394/call, and `cat`/`contiguous`=0. #113 and #115 are docs-only; #114 bounds wide-head CUDA cold tiles with the #108-aligned 64×64 guard, keeps CPU parity, clean CUDA skips, and a C++20 build smoke; #116 deepens the opt-in blocked/online shared-V T=1 inference epilogue with direct `baddbmm(..., out=target)` while preserving the autograd fallback and cat-free generate; #117 makes the opt-in compile probe backward-aware (`BDH_COMPILE_PROBE=train_bwd`) while keeping the eager default and optimizer boundary unchanged. No GPU speedup evidence was added, so GPU measurement and cold CUDA/Triton validation remain open.
+Tip documented here: `f34adc0` (`#120` opt/auto-thr-v2 / `#119` opt/amp-train-v2 / `#118` docs-matrix-v27 / `#117` opt/compile-train-v2 / `#116` opt/online-decode-t1-v2 / `#115` docs-matrix-v26 / `#114` opt/cuda-cold-v3 / `#113` docs-matrix-v25 / `#112` profile-v11 / `#111` docs-matrix-v24 / `#110` gen-vcopy-v1 / `#109` docs-matrix-v23 / `#108` triton-cold-v3 / `#107` docs-matrix-v22 / `#106` docs-matrix-v22 / `#105` opt/ln-resid-v2 / `#104` profile-v10 / `#103` docs-matrix-v21 / `#102` gen-copy-tax-v1 / `#101` docs-matrix-v20 / `#100` scorev-fuse-v2 / `#99` docs-matrix-v19 / `#98` profile-v9 / `#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v11 source is `4963b0f` (`#110`); profile-v10 source is `1363794` (`#102`), and the current code tip is `f34adc0`. Default eager remains unchanged; #118 is docs-only; #119 makes CPU AMP availability transactional and soft-skippable, expands the full/forward-only train matrix, and gates GradScaler to enabled CUDA float16; #120 centralizes strict independent cold/decode AUTO gates and adds independent-threshold generate A/B coverage. No GPU speedup evidence was added, so real GPU measurement and cold CUDA/Triton validation remain open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -48,11 +48,11 @@ Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-
 When set (`1|true|yes|on`) and `BDH_ATTN_IMPL` is `eager`:
 - **T=1 decode** → **triton** (CUDA+Triton) else **blocked** once
   `past_len > BDH_ATTN_AUTO_THRESHOLD` (default **512**, retained after
-  `#55`/`#72`/`#73`/`#75`/`#77` — CPU wall crossover ~≥512).
+  `#55`/`#72`/`#73`/`#75`/`#77`/`#120` — CPU wall crossover ~≥512).
 - **Cold / prefill** → same prefer rule once
   `T > BDH_ATTN_AUTO_COLD_THRESHOLD` (unset → mirrors `AUTO_THRESHOLD`).
   Lower cold thr (e.g. 256) only when mid-T **peak-score** budget matters more
-  than wall (`#73`/`#77`: T∈{128,256} peak↓ wall↑).
+  than wall (`#73`/`#77`/`#120`: T∈{128,256} peak↓ wall↑).
 
 Explicit `IMPL∈{blocked,online,triton,cuda}` is never overridden. Default
 (AUTO unset) = eager cold and decode at every length.
@@ -63,7 +63,7 @@ export BDH_ATTN_IMPL=blocked
 export BDH_ATTN_IMPL=triton
 export BDH_ATTN_IMPL=cuda
 
-# opt-in long-T cold + long-S decode → blocked|triton (#75/#77/#82)
+# opt-in long-T cold + long-S decode → blocked|triton (#75/#77/#82/#120)
 export BDH_ATTN_AUTO=1
 export BDH_ATTN_AUTO_THRESHOLD=512
 # optional independent cold gate (unset → same as THRESHOLD):
@@ -153,12 +153,12 @@ BDH_PREFETCH_H2D=0 python train.py  # caller-stream H2D
 |-------|----------|------------|
 | `float32` / `fp32` / `off` / unset | Off | Off |
 | `bfloat16` / `bf16` | Yes | **Never** |
-| `float16` / `fp16` / `half` | Yes | Only if **CUDA** |
+| `float16` / `fp16` / `half` | Yes | Only if **live CUDA** |
 
-Optional `BDH_AMP_FORWARD_ONLY=1` (#54): autocast **logits only**; CE in fp32 outside.
+Optional `BDH_AMP_FORWARD_ONLY=1` (#54/#119): autocast **logits only**; CE in fp32 outside.
 Default `0` keeps `model(x,y)` under the same autocast ctx.
 
-CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here).
+CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here). #119 makes CPU capability checks real and transactional, soft-skips unsupported matrix arms, and reports full vs forward-only scope plus scaler state.
 **AMP helps on GPU** (Tensor Cores / HBM); never cite CPU medians as speedups.
 Decode path AMP (older #5) is separate from this train knob (#24+#54).
 
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#117)
+## Landed opts (#1–#120)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -293,6 +293,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **115** | `opt/docs-matrix-v26` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #114 | Docs only | — |
 | **116** | `opt/online-decode-t1-v2` | Deepen opt-in blocked/online T=1 shared-V decode: flatten score tiles over `B*H` and write inference/no-grad score×V directly with `baddbmm(..., out=target)`; preserve autograd fallback, strict `tril(-1)`, `S=0` zeros, cat-free generate, and default eager | CPU 507 passed, 18 skipped, 3 warnings; parity and cat-free generate coverage | No GPU timing or speedup; GPU validation remains open |
 | **117** | `opt/compile-train-v2` | Make `BDH_COMPILE_PROBE=train_bwd` the opt-in default; probe forward+backward, soft-fallback without targets, document the optimizer boundary and CPU bench matrix | CPU 506 passed, 18 skipped; CPU A/B 19.08 ms uncompiled vs 31.23 ms compile with `train_bwd` (not a speedup claim) | No GPU timing or speedup; GPU compile/CUDA graphs remain open |
+| **118** | `opt/docs-matrix-v27` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #117 | Docs only | — |
+| **119** | `opt/amp-train-v2` | Harden opt-in AMP availability and transactional configuration; expand the full/forward-only train matrix; gate GradScaler to enabled CUDA float16; defaults remain fp32/AMP-off | CPU-only smoke/soft-skip matrix; no throughput claim | GPU AMP train bench open |
+| **120** | `opt/auto-thr-v2` | Centralize strict independent AUTO cold/decode gates; add independent-threshold generate A/B and parity/default-eager coverage; defaults remain AUTO-off/eager | CPU parity + `aten::cat=0`; CPU wall only, no kernel claim | **P0** GPU threshold/tile validation open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -308,7 +311,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 |------|-------------------------|--------------|
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
-| `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75/#77); `THRESHOLD` default 512; optional `COLD_THRESHOLD` (#auto-tune) |
+| `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75/#77/#120); strict decode/cold gates, `THRESHOLD` default 512, optional `COLD_THRESHOLD` |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` / `MODE` / `FULLGRAPH` | `0` / `default` / `0` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); optional `FULLGRAPH=1` (#84; soft-fallback); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
