@@ -62,6 +62,9 @@ def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
         (256, 256, None),
         (512, 512, None),
     ]
+    assert args.auto_threshold == 999
+    assert args.auto_cold_threshold is None
+    assert args.auto_threshold_sweep == "256, 512,256"
 
 
 def test_run_auto_ab_sweep_preserves_explicit_cold_threshold(monkeypatch):
