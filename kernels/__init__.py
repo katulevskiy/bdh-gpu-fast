@@ -12,7 +12,11 @@ from .attention_dispatch import (
     resolve_cold_impl,
     resolve_decode_impl,
 )
-from .attention import pick_triton_cold_tiles, triton_decode_available
+from .attention import (
+    pick_triton_cold_tiles,
+    triton_cold_skip_reason,
+    triton_decode_available,
+)
 from .rope_dispatch import (
     backend_info as rope_backend_info,
     bdh_rope_rotate,
@@ -59,6 +63,7 @@ __all__ = [
     "attn_auto_enabled",
     "DEFAULT_ATTN_AUTO_THRESHOLD",
     "triton_decode_available",
+    "triton_cold_skip_reason",
     "pick_triton_cold_tiles",
     "backend_info",
     "strict_tril_attn",

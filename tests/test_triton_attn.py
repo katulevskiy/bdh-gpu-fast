@@ -24,6 +24,7 @@ from kernels.attention import (  # noqa: E402
     online_tril_attn,
     pick_cold_block_size,
     pick_triton_cold_tiles,
+    triton_cold_skip_reason,
     triton_decode_available,
     triton_tril_attn,
 )
@@ -101,7 +102,10 @@ def test_triton_api_matches_eager_on_cpu_fallback():
     assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or not _HAS_TRITON, reason="CUDA+Triton required")
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not _HAS_TRITON,
+    reason=triton_cold_skip_reason() or "CUDA+Triton available",
+)
 def test_triton_kernel_matches_eager_cuda():
     Q, K, V = _make_qkv(T=64, N=64, D=64, seed=6, device="cuda")
     ref = eager_tril_attn(Q, K, V)
@@ -216,6 +220,16 @@ def test_default_remains_eager_after_triton_cold(monkeypatch):
     assert resolve_attn_impl() == "eager"
 
 
+def test_triton_cold_skip_reason_is_cpu_safe():
+    """Unavailable Triton reports which import/device gate caused the skip."""
+    reason = triton_cold_skip_reason()
+    if torch.cuda.is_available() and _HAS_TRITON:
+        assert reason is None
+    else:
+        assert reason is not None
+        assert reason.startswith(("Triton unavailable:", "CUDA unavailable:"))
+
+
 # --- opt/triton-cold-v2: deepen long-T tiles (pair #75/#79) ---
 
 def test_pick_triton_cold_tiles_long_t_pairs_with_blocked():
@@ -283,7 +297,7 @@ def test_triton_cold_auto_interaction_documented(monkeypatch):
 
 @pytest.mark.skipif(
     not torch.cuda.is_available() or not _HAS_TRITON,
-    reason="CUDA+Triton required (soft-skip; no GPU claims on CPU box)",
+    reason=triton_cold_skip_reason() or "CUDA+Triton available",
 )
 @pytest.mark.parametrize("T", [256, 512])
 def test_triton_cold_kernel_long_t_vs_eager_soft_skip(T):
