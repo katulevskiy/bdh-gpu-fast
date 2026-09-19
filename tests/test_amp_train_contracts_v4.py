@@ -78,6 +78,30 @@ def test_cpu_amp_failure_message_is_actionable(monkeypatch, amp_name):
     assert tr._use_scaler is False
 
 
+def test_cpu_amp_failure_preserves_full_previous_state(monkeypatch):
+    """An unavailable CPU request leaves every prior AMP state field intact."""
+    if tr.device.type != "cpu":
+        pytest.skip("CPU-only backend skip contract")
+    tr.configure_amp("float32")
+    previous = {
+        "dtype": tr.dtype,
+        "ptdtype": tr.ptdtype,
+        "ctx": tr.ctx,
+        "scaler": tr.scaler,
+        "use_scaler": tr._use_scaler,
+        "forward_only": tr._amp_forward_only,
+    }
+    monkeypatch.setattr(tr, "cpu_fp16_available", lambda: False)
+    with pytest.raises(RuntimeError, match="autocast is unavailable"):
+        tr.configure_amp("float16", forward_only=True)
+    assert tr.dtype == previous["dtype"]
+    assert tr.ptdtype is previous["ptdtype"]
+    assert tr.ctx is previous["ctx"]
+    assert tr.scaler is previous["scaler"]
+    assert tr._use_scaler is previous["use_scaler"]
+    assert tr._amp_forward_only is previous["forward_only"]
+
+
 @pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
@@ -99,4 +123,3 @@ def test_gradscaler_gate_is_cuda_float16_only(
         mp.setattr(torch.cuda, "is_available", lambda: cuda_available)
         assert tr._grad_scaler_allowed(amp_name) is expected
     tr.configure_amp("float32")
-
