@@ -74,3 +74,45 @@ def test_cpu_triton_cold_fallback_preserves_padded_views(value_heads):
     assert not Q.is_cuda
     assert torch.allclose(got, expected, rtol=1e-9, atol=1e-9)
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_triton_cold_fallback_backward_preserves_padded_views(value_heads):
+    """CPU fallback maps gradients through padded Q/K/V feature views."""
+    B, H, T, N, D = 2, 2, 257, 3, 2
+    g = torch.Generator().manual_seed(431 + value_heads)
+    Q_storage0 = torch.randn(
+        B, H, T, N + 1, dtype=torch.float64, generator=g
+    )
+    K_storage0 = torch.randn(
+        B, H, T, N + 1, dtype=torch.float64, generator=g
+    )
+    V_storage0 = torch.randn(
+        B, value_heads, T, D + 1, dtype=torch.float64, generator=g
+    )
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q_storage = Q_storage0.clone().requires_grad_()
+        K_storage = K_storage0.clone().requires_grad_()
+        V_storage = V_storage0.clone().requires_grad_()
+        Q = Q_storage[..., :N]
+        K = K_storage[..., :N]
+        V = V_storage[..., :D]
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad(
+            (out * weight).sum(), (Q_storage, K_storage, V_storage)
+        )
+        return out, grads
+
+    ref, ref_grads = run(eager_tril_attn)
+    got, got_grads = run(triton_tril_attn)
+
+    assert not Q_storage0.is_cuda
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+    assert torch.count_nonzero(got_grads[0][..., N]) == 0
+    assert torch.count_nonzero(got_grads[1][..., N]) == 0
+    assert torch.count_nonzero(got_grads[2][..., D]) == 0
