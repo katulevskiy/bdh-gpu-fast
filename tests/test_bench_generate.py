@@ -41,6 +41,18 @@ def test_attn_impl_restores_environment_after_exception(monkeypatch):
     assert os.environ["BDH_ATTN_IMPL"] == "eager"
 
 
+def test_attn_impl_restores_unset_environment_after_exception(monkeypatch):
+    """An unset impl override must stay unset after an interrupted run."""
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+
+    with pytest.raises(RuntimeError, match="stop impl"):
+        with bench_generate._attn_impl("blocked"):
+            assert os.environ["BDH_ATTN_IMPL"] == "blocked"
+            raise RuntimeError("stop impl")
+
+    assert "BDH_ATTN_IMPL" not in os.environ
+
+
 def test_attn_auto_restores_all_threshold_environment_after_exception(monkeypatch):
     """An interrupted AUTO A/B run must restore every temporary gate value."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "0")
