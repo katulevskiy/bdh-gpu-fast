@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#154)
+# OPT status — landed work (#1–#157)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `6d2dff9` (`#154` rope-fuse-v3 reuses warmed T>1 table-backed RoPE narrows after `#153` docs refresh through #152; `#152` generate copy-ceiling probe after `#151` docs refresh through #149 and `#150` Triton cold-v4 CPU-safe skip diagnostics; `#150` Triton cold-v4; `#149` AUTO threshold sweep smoke; `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #154; #150 reports the import/device gate without allocating CUDA tensors or launching kernels during pytest collection, with this CPU box reporting `CUDA unavailable: torch.cuda.is_available() is false`; #151 and #153 are docs-only; #152 confirms the remaining default-eager generate copy ceiling without changing cache ownership, RNG behavior, or strict raw `tril` semantics; and #154 reuses the warmed T>1 RoPE table narrow while preserving the eager default and CPU parity. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. #150–#154 add no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `86315f0` (`#157` profile-v15 CPU re-profile follows `#156` layout-v3 and `#155` docs refresh through #154; `#156` probes remaining CPU layout materializations after `#154` rope-fuse-v3; `#155` is docs-only; `#154` reuses warmed T>1 table-backed RoPE narrows; `#153` docs refresh through #152; `#152` confirms the default-eager generate copy ceiling; `#151` docs refresh through #149; `#150` Triton cold-v4 CPU-safe skip diagnostics; `#149` AUTO threshold sweep smoke; `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #157. `#156` records one intentional eval encoder-cache materialization, warm eager clone signatures, and ATen sampler contiguous hotspots without changing defaults; `#157` records CPU-only self-CPU percentages and copy/cat/contiguous counts. Profile-v15 remains at the warmed CPU-build floor: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. `#150–#157` add no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#154)
+## Landed opts (#1–#157)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -333,6 +333,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **152** | `opt/gen-copy-v2` | Confirm the post-#110 default-eager generate copy ceiling: packed V snapshots, RoPE pair stores, prompt ownership, and ATen multinomial internals remain accounted for; preserve cat-free output, token parity, and strict raw `tril` semantics | CPU: 554 passed, 19 skipped, 3 warnings; focused copy/parity suite: 91 passed, 2 skipped; generate remains ~394 `copy_`/call with `cat=0` | **P0** GPU measure / copy-tax impact remains open |
 | **153** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #152 on the #154 code tip | Docs only | — |
 | **154** | `opt/rope-fuse-v3` | Reuse the warmed T>1 table-backed `(cos, sin)` narrow for callers that do not hoist `cos_sin`; invalidate the view cache when the generate table rebuilds; preserve eager defaults and CPU parity | CPU cache-hit/rebuild parity coverage; no GPU timing | **P0** GPU fused-RoPE validation remains open |
+| **155** | `opt/docs-matrix-v38` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #154 | Docs only | — |
+| **156** | `opt/layout-v3` | CPU `torch.profiler` probe of remaining layout materializations: one-time eval encoder-cache materialization, warm eager clone signatures, and ATen sampler contiguous hotspots; no unsafe layout flip or sampler/RNG rewrite | CPU-only evidence: warm eager forward remains `aten::contiguous`=0 and `aten::cat`=0, with two clone-backed shapes per layer; generate sampler retains `(B,V)` and `(B,)` contiguous hotspots | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **157** | `opt/profile-v15` | CPU re-profile after #152/#154 and #156; record self-CPU operator percentages plus `copy_`, `cat`, and `contiguous` counts without changing semantics | Attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; CPU-only evidence | **P0** GPU measure / cold CUDA-Triton validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
