@@ -145,6 +145,27 @@ def test_cpu_amp_failure_preserves_active_amp_state(monkeypatch):
     assert tr._amp_forward_only is previous["forward_only"]
 
 
+def test_invalid_amp_request_preserves_full_previous_state():
+    """An invalid dtype request cannot partially replace AMP configuration."""
+    tr.configure_amp("float32")
+    previous = {
+        "dtype": tr.dtype,
+        "ptdtype": tr.ptdtype,
+        "ctx": tr.ctx,
+        "scaler": tr.scaler,
+        "use_scaler": tr._use_scaler,
+        "forward_only": tr._amp_forward_only,
+    }
+    with pytest.raises(ValueError, match="BDH_AMP_DTYPE must be"):
+        tr.configure_amp("float64")
+    assert tr.dtype == previous["dtype"]
+    assert tr.ptdtype is previous["ptdtype"]
+    assert tr.ctx is previous["ctx"]
+    assert tr.scaler is previous["scaler"]
+    assert tr._use_scaler is previous["use_scaler"]
+    assert tr._amp_forward_only is previous["forward_only"]
+
+
 @pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
