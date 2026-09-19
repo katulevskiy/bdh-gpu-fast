@@ -157,6 +157,22 @@ def test_paired_rope_shape_contract_rejects_malformed_inputs():
         fused_rope_rotate_paired(v, cos_p, sin_p, out=v)
 
 
+def test_rope_shape_contracts_reject_unbroadcastable_cis():
+    """Cis leading dimensions must broadcast before pair math starts."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=2, seed=113)
+    n = v.shape[-1]
+    bad_cos = torch.empty(3, 1, 2, n)
+    bad_sin = torch.empty_like(bad_cos)
+
+    with pytest.raises(ValueError, match="not broadcastable"):
+        fused_rope_rotate_pytorch(v, bad_cos, bad_sin)
+
+    bad_cos_p = bad_cos.reshape(*bad_cos.shape[:-1], -1, 2)
+    bad_sin_p = bad_sin.reshape(*bad_sin.shape[:-1], -1, 2)
+    with pytest.raises(ValueError, match="not broadcastable"):
+        fused_rope_rotate_paired(v, bad_cos_p, bad_sin_p)
+
+
 
 @pytest.mark.parametrize("T", [1, 7])
 def test_cpu_rope_out_param_mixed_dtype_preserves_parity(T):
