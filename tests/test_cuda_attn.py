@@ -131,6 +131,29 @@ def test_tril_score_v_dispatch_cpu(device):
     assert torch.allclose(tril_score_v(q, k, v), tril_score_v_ref(q, k, v), rtol=1e-5, atol=1e-5)
 
 
+def test_tril_score_v_rejects_invalid_shapes_before_optional_backend(monkeypatch):
+    """Malformed cold inputs get stable ValueErrors before native probing."""
+    import kernels.cuda_attn as ca
+
+    class _UnexpectedBackend:
+        def tril_score_v(self, *_args):  # pragma: no cover - must not run
+            raise AssertionError("native backend was probed for invalid shapes")
+
+    monkeypatch.setattr(ca, "_ext", _UnexpectedBackend())
+    q = torch.randn(2, 2, 5, 8)
+    k = torch.randn(2, 2, 5, 8)
+    v = torch.randn(2, 1, 5, 4)
+
+    with pytest.raises(ValueError, match="4D"):
+        tril_score_v(q[0], k, v)
+    with pytest.raises(ValueError, match="q and k shapes must match"):
+        tril_score_v(q, k[:, :, :-1, :], v)
+    with pytest.raises(ValueError, match="v batch/seq must match q"):
+        tril_score_v(q, k, v[:1])
+    with pytest.raises(ValueError, match="v heads must equal q heads or 1"):
+        tril_score_v(q, k, torch.randn(2, 3, 5, 4))
+
+
 def test_t1_all_zeros(device):
     q = torch.randn(2, 3, 1, 8, device=device)
     k = torch.randn(2, 3, 1, 8, device=device)
