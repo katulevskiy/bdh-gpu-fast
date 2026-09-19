@@ -358,19 +358,25 @@ def test_reserve_writes_without_second_kr_copy():
 
 
 def test_generate_copy_calls_halved_vs_append_path():
-    """decode-copy: generate Tensor.copy_ ≈ 1 (prompt) + n_layer*(prompt_blocks + steps) V writes.
+    """decode-copy + gen-copy-tax: Tensor.copy_ accounting for generate.
 
-    Before reserve/in-place RoPE: 2 copy_ per layer per step (KR+V) → 265 for
-    4 layers, prompt=16 prefill block + 32 decode steps.
-    After: only V slot copy_ (+ 1 prompt out) → 133.
+    History:
+    - Pre-reserve: 2 copy_/layer/step (KR+V) → 265 for 4L, prompt=16 + 32 steps.
+    - decode-copy: in-place RoPE via setitem into reserved KR → V-only + prompt = 133.
+    - gen-copy-tax-v1: T=1 RoPE uses complex-view ``copy_`` (1/layer/step) so KR
+      stores show up on Tensor.copy_ again, but aten::copy_ aggregate still drops
+      (2 setitems → 1 copy_; see test_gen_copy_tax). Prefill T>1 RoPE stays setitem.
+
+    Expected Tensor.copy_: 1 prompt + n_layer*(1 prefill V + n_new decode V)
+    + n_layer*n_new decode KR complex copy_ (= 261 for 4L / 32 steps).
     """
     cfg = _small_cfg(n_layer=4, n_embd=64, n_head=4, mlp_internal_dim_multiplier=8)
     m = _model(cfg, seed=0)
     prompt = torch.randint(0, cfg.vocab_size, (1, 16))
     n_new = 32
     n_layer = cfg.n_layer
-    # Expected: 1 prompt out.copy_ + n_layer * (1 prefill V + n_new decode V)
-    expected = 1 + n_layer * (1 + n_new)
+    # prompt + all V writes + decode-only KR complex stores (prefill RoPE = setitem)
+    expected = 1 + n_layer * (1 + n_new) + n_layer * n_new
 
     counts = {"n": 0}
     orig = torch.Tensor.copy_
@@ -389,10 +395,11 @@ def test_generate_copy_calls_halved_vs_append_path():
 
     assert out.shape == (1, 16 + n_new)
     assert counts["n"] == expected, (
-        f"expected {expected} copy_ (V-only + prompt), got {counts['n']}"
+        f"expected {expected} copy_ (prompt+V+decode KR), got {counts['n']}"
     )
-    # Still well below the old KR+V append tax (2x V-only + prompt ≈ 265)
-    assert counts["n"] < 2 * expected
+    # Still below the old KR+V append tax (265) *on the V+prompt basis* doubled
+    # (legacy KR+V was 265; we land at 261 with KR complex counted).
+    assert counts["n"] <= 1 + n_layer * (1 + n_new) * 2
 
 
 def test_get_past_never_contiguous_call():

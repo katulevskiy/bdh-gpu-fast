@@ -649,6 +649,7 @@ class BDH(nn.Module):
         probs_buf: torch.Tensor,
         softmax,
         multinomial,
+        idx_out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Sample one token from ``(B, V)`` logits into reused ``probs_buf``.
 
@@ -657,6 +658,10 @@ class BDH(nn.Module):
         values only, then ``gather`` indices — same distribution as mask/-inf,
         fewer full-vocab softmax flops. Full-vocab multinomial kept when
         ``top_k`` is None (default) for RNG parity with prior generate.
+
+        ``idx_out``: optional ``(B, 1)`` long buffer (e.g. ``out.narrow`` in
+        generate). Multinomial / gather write straight into it — skips the
+        extra ``out[:, i] = idx[:, 0]`` ``aten::copy_`` per decode step.
         """
         if scale is not None:
             logits_bv.mul_(scale)
@@ -671,11 +676,18 @@ class BDH(nn.Module):
                 # else allocate a small (B, k) probs (k << V).
                 probs_k = softmax(values, dim=-1)
                 idx_k = multinomial(probs_k, num_samples=1)
-                return indices.gather(1, idx_k)
+                gathered = indices.gather(1, idx_k)
+                if idx_out is not None:
+                    idx_out.copy_(gathered)
+                    return idx_out
+                return gathered
             # k == V: fall through to full-vocab path using values order? Use mask.
             values_min = values[:, -1:]
             logits_bv.masked_fill_(logits_bv < values_min, float("-inf"))
         torch.softmax(logits_bv, dim=-1, out=probs_buf)
+        if idx_out is not None:
+            multinomial(probs_buf, num_samples=1, out=idx_out)
+            return idx_out
         return multinomial(probs_buf, num_samples=1)
 
     def _residual_ln(self, x: torch.Tensor, y_mlp: torch.Tensor) -> torch.Tensor:
@@ -1120,7 +1132,11 @@ class BDH(nn.Module):
                             sample_in = step
                     else:
                         sample_in = logits_buf
-                    idx_next = sample(
+                    # Write sampled ids straight into the preallocated token
+                    # buffer (multinomial/gather out=) — skips a per-step
+                    # ``out[:, i] = ...`` aten::copy_.
+                    idx_next = out.narrow(1, prompt_len + t, 1)
+                    sample(
                         sample_in,
                         scale=scale,
                         do_topk=do_topk,
@@ -1128,8 +1144,8 @@ class BDH(nn.Module):
                         probs_buf=probs_buf,
                         softmax=softmax,
                         multinomial=multinomial,
+                        idx_out=idx_next,
                     )
-                    out[:, prompt_len + t] = idx_next[:, 0]
                     self(idx_next, cache=cache, logits_out=logits_buf)
         finally:
             self.attn._attn_impl_override = None

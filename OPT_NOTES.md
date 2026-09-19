@@ -5114,3 +5114,63 @@ kernel or speedup win.
 - No default `BDH_ATTN_IMPL` change; eager remains the default.
 - No softmax, scale, SDPA, diagonal inclusion, or full score materialization.
 - No GPU claims from CPU timings.
+
+## opt/gen-copy-tax-v1 — cut generate RoPE + sample copy_ (2026-09-19)
+
+**Branch:** `opt/gen-copy-tax-v1` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `a0dd4db` (main after #101 docs-v20 / #100 scorev-fuse-v2 / #98 profile-v9).
+
+### Goal
+
+Cut generate-path `aten::copy_` tax from profile-v9 (~1674 / **558** per active
+generate). Keep `tril(diagonal=-1)`, **cat-free** generate, defaults unchanged.
+No fake GPU wins.
+
+### Audit (CPU, cfg layers=4 d=128 nh=4, prompt=16 / +32)
+
+| Bucket | ~copy_/gen | Notes |
+|--------|------------|-------|
+| RoPE `_store_pairs` into packed KR | 256 | 2× pair setitem / layer-step |
+| V cache slot writes | 128 | necessary |
+| multinomial `_to_copy` / `any` | ~128 | sampler internals |
+| token `out[:, i] =` | 32 | assign after multinomial |
+| prefill + prompt | ~14 | |
+
+Rejected: `torch.stack→reshape` halves RoPE `copy_` but **`aten::stack` cats
+under the hood** — violates generate `cat=0`.
+
+### What landed
+
+| Piece | Detail |
+|-------|--------|
+| `kernels/rope.py` `_store_pairs` | fp32/fp64: `view_as_complex(out).copy_(complex(y0,y1))` — **1** `copy_`, **0** `cat`, bit-identical to dual setitem; other dtypes keep setitem |
+| `BDH._sample_from_logits(..., idx_out=)` | multinomial / top-k gather write into optional `(B,1)` buffer |
+| `BDH.generate` | `idx_next = out.narrow(1, prompt+t, 1)` passed as `idx_out` — drops per-step token assign `copy_` |
+| Defaults | unchanged |
+| `tests/test_gen_copy_tax.py` | store parity, 1 `copy_`/store, sample RNG parity, generate≡baseline, cache continuity, profiler gate |
+
+### Profile (this box, CPU)
+
+| Metric | Before (profile-v9) | After |
+|--------|---------------------|-------|
+| `aten::copy_` / generate | **~558** | **~398** |
+| `aten::cat` | 0 | **0** |
+
+Breakdown of the cut: RoPE store 256→128 + token assign 32→0 ≈ **-160**/gen.
+Remaining: V writes + sampler internals (not safely removable without RNG /
+layout changes).
+
+### Correctness
+
+```bash
+.venv/bin/python -m pytest tests/test_gen_copy_tax.py tests/test_rope_decode.py \
+  tests/test_rope_fuse.py tests/test_cache_pack.py tests/test_copy_tax.py \
+  tests/test_gen_host.py -q
+```
+
+### Non-goals
+
+- Softmax / diagonal / SDPA
+- PRs to `pathwaycom/*`
+- Claiming GPU speedups from CPU copy_ counts
+- Changing default sampling distribution / RNG (only the write destination)
