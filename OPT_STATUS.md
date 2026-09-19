@@ -1,8 +1,8 @@
-# OPT status — landed work (#1–#509; docs-v83)
+# OPT status — landed work (#1–#524; docs-v84)
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #418–#509 plus documented tips `d9703b0` (#434) and `6181ba6`, with prior coverage retained. This branch is rebased onto current main tip `5aaef41` (#509).
+Documentation coverage: #418–#524 plus documented tips `d9703b0` (#434) and `6181ba6`, with prior coverage retained. This branch is rebased onto current main tip `eff6083` (#524).
 
 ## Evidence boundary
 
@@ -16,18 +16,18 @@ This sandbox is CPU-only (`torch 2.14.0+cu130`, `cuda=False`). CPU tests establi
 
 | Area | Current contract | Evidence boundary |
 |---|---|---|
-| Device | CPU-only; CUDA/Triton paths skip or fall back cleanly here; structured GPU skips classify build/device/runtime state and retain the requested configuration | No GPU claim |
-| Attention | `eager` default; `blocked`, `online`, `triton`, and `cuda` opt-in; strict-past backward now covers padded/strided/zero-stride Q/K/V, shared-Q batch/head-broadcast and zero-stride Q/K/V gradient reduction, head-broadcast upstream gradients, batched partial tiles, strided upstream gradients, packed-decode V, and empty-sequence contracts on CPU | Raw strict-tril parity on CPU; GPU measure open |
-| AUTO | Off by default; decode threshold remains independent from the optional cold threshold; blank/unset transitions, strict cold/decode boundaries, Triton preference when available, per-call requested-backend precedence, runtime disable/re-enable transitions, threshold preservation, caller-argument isolation, and malformed/continuing threshold sweeps fail closed before execution | CPU dispatch/parity only |
-| RoPE | `eager` default; fused path opt-in; paired output-slot aliasing, overlapping direct/view/shifted output aliases, public T>1 cosine/sine aliases, and incompatible cis leading dimensions are rejected safely; mixed-dtype, strided-output parity is covered through the public T>1 dispatcher | CPU shape/parity only; fused GPU validation open |
-| Compile | Off by default; invalid and normalized `BDH_COMPILE_PROBE` values fail closed to `train_bwd`, including missing-`example_y` training callers and missing-`example_x` no-probe callers, while failed probes and construction fallback preserve the eager module, caller mode, gradients, and compile options across both fullgraph settings | CUDA graphs/inductor unmeasured |
-| AMP | fp32/off by default; explicit `BDH_AMP_FORWARD_ONLY` off/on spellings remain CPU-safe; switching from active bf16/fp16 forward-only mode back to fp32 clears that mode, and a live CUDA runtime is required before exposing GPU throughput while failed context construction preserves the complete prior AMP state, CPU contexts remain contract-covered, and GradScaler stays disabled | CPU smoke only; GPU train throughput open |
+| Device | CPU-only; CUDA/Triton paths skip or fall back cleanly here; structured GPU skips classify build/device/runtime state, retain the requested configuration, and keep `BDH_BUILD_CUDA` exact (`1` only) | No GPU claim |
+| Attention | `eager` default; `blocked`, `online`, `triton`, and `cuda` opt-in; strict-past backward now covers padded/strided/zero-stride Q/K/V, shared-Q batch/head-broadcast and zero-stride Q/K/V gradient reduction, batch/head-broadcast upstream gradients, dispatcher-selected blocked/online partial long-prefill tiles, strided upstream gradients, packed-decode V, and empty-sequence contracts on CPU | Raw strict-tril parity on CPU; GPU measure open |
+| AUTO | Off by default; decode threshold remains independent from the optional cold threshold; blank/unset and zero-threshold transitions, strict cold/decode boundaries, Triton preference when available, per-call requested-backend precedence including the `online` alias over a conflicting eager environment, runtime disable/re-enable transitions, threshold preservation, caller-argument isolation, and malformed/continuing threshold sweeps fail closed before execution | CPU dispatch/parity only |
+| RoPE | `eager` default; fused path opt-in; paired output-slot aliasing, overlapping direct/view/shifted output aliases, public T>1 cosine/sine aliases including cached-cis overlap rejection before stores, and incompatible cis leading dimensions are rejected safely; mixed-dtype, strided-output parity is covered through the public T>1 dispatcher | CPU shape/parity only; fused GPU validation open |
+| Compile | Off by default; invalid and normalized `BDH_COMPILE_PROBE` values fail closed to `train_bwd`, including missing-`example_y` training callers and missing-`example_x` no-probe callers; successful probes clear probe gradients and restore caller training state, while failed probes and construction fallback preserve the eager module, caller mode, gradients, and compile options across both fullgraph settings | CUDA graphs/inductor unmeasured |
+| AMP | fp32/off by default; explicit `BDH_AMP_FORWARD_ONLY` off/on spellings remain CPU-safe; switching from active bf16/fp16 forward-only mode back to fp32 clears that mode, logits-only forward runs inside the forward-only context with cross-entropy afterward in fp32, and a live CUDA runtime is required before exposing GPU throughput while failed context construction preserves the complete prior AMP state, CPU contexts remain contract-covered, and GradScaler stays disabled | CPU smoke only; GPU train throughput open |
 | Sparse ReLU | Off by default; explicit probe guardrails distinguish no-sample and terminal density-floor failure exits, including CLI floor overrides, while a passing sample permits only a mocked CPU crossover sweep | CPU density/control flow only; no sparse-kernel result |
-| DataLoader | Validation split forwarding and repeated worker-backed batches preserve CPU tensor identity; asynchronous producer failures reach `next()` with the host-gather cause; worker initialization locks full batches, bounded prefetch, persistent workers, and distinct reproducible CPU RNG streams; zero-worker loading keeps `batch_size=None` so each item remains a full host batch; worker construction preserves the full-batch iterable and requested split, while negative `NUM_WORKERS` stays synchronous with pinning and persistent prefetch disabled | CPU identity/opt-out contracts only; H2D overlap unmeasured |
-| Sampling | Strided logits and sampler probability buffers across multinomial, narrow/full/overflow-clamped top-k, zero-stride, and combined non-unit-vocabulary-stride singleton output views preserve RNG parity, identity, and neighbor isolation | CPU contract only |
+| DataLoader | Validation split forwarding and repeated worker-backed batches preserve CPU tensor identity; asynchronous producer failures reach `next()` with the host-gather cause; worker initialization locks full batches, bounded one-slot prefetch, persistent workers, and distinct reproducible CPU RNG streams; zero-worker loading keeps `batch_size=None` so each item remains a full host batch; worker construction preserves the full-batch iterable and requested split, while negative `NUM_WORKERS` stays synchronous with pinning and persistent prefetch disabled | CPU identity/opt-out contracts only; H2D overlap unmeasured |
+| Sampling | Strided logits and sampler probability buffers across multinomial, narrow/full/overflow-clamped top-k, zero-stride, and combined padded non-unit-vocabulary scratch with strided singleton output views preserve RNG parity, identity, contiguous-reference parity, and neighbor isolation | CPU contract only |
 | Packed generate | Cache path remains cat-free (`aten::cat=0`); interrupted cat probes restore their hook; decode-only AUTO overrides remain isolated; packed decode preserves raw score×V semantics across capacity-strided V layouts; threshold sweeps continue after individual failures while retaining aggregate failure; omitted decode thresholds are not invented or leaked | CPU operator contract, not GPU timing |
 
-The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call for forward, and 394/call for generate, with `aten::cat=0` and `aten::contiguous=0`. The #403–#509 additions and tip follow-up are CPU-safe contracts, diagnostics, and docs; #450/#465/#479/#495 and the documented tip `6181ba6` refine CUDA-build/device/runtime skip handoffs and requested-config retention but add no timing. These are CPU call-count observations, not GPU performance claims.
+The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call for forward, and 394/call for generate, with `aten::cat=0` and `aten::contiguous=0`. The #403–#524 additions and tip follow-up are CPU-safe contracts, diagnostics, and docs; #450/#465/#479/#495/#512 and the documented tip `6181ba6` refine CUDA-build/device/runtime skip handoffs, exact build-flag handling, and requested-config retention but add no timing. These are CPU call-count observations, not GPU performance claims.
 
 ## Landed in this refresh
 
@@ -225,6 +225,26 @@ The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call
 | **#507** | `opt/cuda-build-v21` / CUDA build | Non-`1` `BDH_BUILD_CUDA` values remain CPU-only setup requests, including when a GPU is visible | CPU setup contract only; no GPU claim |
 | **#508** | `opt/prefetch-v22` / DataLoader | Worker construction preserves the full-batch iterable and requested split | CPU contract only; H2D overlap unmeasured |
 | **#509** | `opt/amp-train-v23` / AMP | Failed autocast-context construction preserves every field of the prior AMP state | CPU contract only; no GPU throughput |
+
+## Refresh additions (#510–#524)
+
+| PR | Branch / scope | What the matrix records | Result |
+|---:|---|---|---|
+| **#510** | `opt/sparse-probe-v23` / sparse probe | The opted-in all-skip path completes without training or CPU crossover work | CPU guardrail only; no GPU claim |
+| **#511** | `opt/docs-v83` / docs | Previous matrix/backlog refresh through #509 | Docs-only; P0 unchanged |
+| **#512** | `opt/gpu-measure-v21` / GPU measurement | Run-level CUDA skips retain self-contained build/device diagnostics and `timing_scope=none` | CPU diagnostics only; no GPU timing |
+| **#513** | `opt/blocked-tile-v23` / blocked prefill | Dispatcher-selected blocked/online partial long-prefill tiles cover shared and head-matched value layouts with raw-score output and Q/K/V gradient parity | CPU contract only; no GPU claim |
+| **#514** | `opt/online-decode-v24` / online decode | Offset-packed K/V views support multi-query per-head-V dispatch across decode backends without mutating cache inputs | CPU raw score×V contract only; no GPU claim |
+| **#515** | `opt/auto-thr-v24` / AUTO | The per-call `online` alias overrides a conflicting eager environment on cold and decode gates | CPU dispatch contract only; no GPU claim |
+| **#516** | `opt/scorev-v24` / score-V | Capacity-strided per-head-V forward and Q/K/V gradients preserve raw score×strict-tril×V parity across dispatch aliases | CPU contract only; no GPU claim |
+| **#517** | `opt/rope-fuse-v23` / RoPE | Public paired dispatch rejects output aliases of cached cis before any eager or fused store | CPU alias contract only; fused GPU validation open |
+| **#518** | `opt/layout-v23` / sampling | Padded non-unit-vocabulary scratch combined with strided decode output preserves full/top-k/overflow paths and excluded neighbors | CPU contract only |
+| **#519** | `opt/gen-bench-v22` / AUTO | Zero remains a valid strict cold/decode threshold and environment values restore cleanly | CPU dispatch contract only; no GPU claim |
+| **#520** | `opt/compile-v24` / compile | Successful `train_bwd` compile probes clear probe gradients and restore caller training state | CPU contract only; GPU path unmeasured |
+| **#521** | `opt/cuda-build-v22` / CUDA build | Empty, zero-padded, and whitespace `BDH_BUILD_CUDA` values remain CPU-only; only exact `1` selects CUDA setup | CPU setup contract only; no GPU claim |
+| **#522** | `opt/prefetch-v23` / DataLoader | The asynchronous BatchPrefetcher queue remains bounded to one-slot lookahead | CPU contract only; H2D overlap unmeasured |
+| **#523** | `opt/amp-train-v24` / AMP | Logits-only forward stays inside the AMP context and cross-entropy runs afterward in fp32 | CPU contract only; no GPU throughput |
+| **#524** | `opt/attn-bwd-v23` / attention backward | Batch/head-broadcast upstream gradients preserve raw strict-tril parity across implementation selectors | CPU contract only; no GPU claim |
 
 ## Defaults and operator guidance
 
