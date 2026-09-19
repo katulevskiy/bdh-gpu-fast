@@ -1,6 +1,8 @@
 """P2 sparse probe: ReLU density on short train runs + CPU sparse-vs-dense crossover.
 
 DEFAULT OFF — does not wire sparse into BDH.forward. Uses bdh_sparse helpers only.
+Run with ``BDH_SPARSE_PROBE=1``; an unset/false gate exits before training or
+benchmark work. This is a measurement harness, not a runtime sparse switch.
 
 Reports:
   1. x / y / xy post-ReLU density at init and during a short CPU train
@@ -34,6 +36,31 @@ os.environ.setdefault("BDH_DATALOADER", "0")
 import bdh
 import bdh_sparse as sp
 import train as tr
+
+
+def density_guardrail(
+    history: list[dict],
+    *,
+    min_final_x: float,
+    min_final_xy: float,
+) -> tuple[bool, str]:
+    """Check that the re-smoke still observes non-paper density on CPU.
+
+    The thresholds are deliberately below the prior ~27% x / ~12% xy result,
+    so this catches a surprising density collapse without pretending that a
+    short CPU run reproduces the paper's trained ~5% claim.
+    """
+    if not history:
+        return False, "no density samples collected"
+    final = history[-1]
+    x = float(final["x"])
+    xy = float(final["xy"])
+    ok = x >= min_final_x and xy >= min_final_xy
+    detail = (
+        f"final_x={x:.4f} final_xy={xy:.4f} "
+        f"required_x>={min_final_x:.4f} required_xy>={min_final_xy:.4f}"
+    )
+    return ok, detail
 
 
 def _sync() -> None:
@@ -258,7 +285,26 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-train", action="store_true")
     ap.add_argument("--skip-crossover", action="store_true")
+    ap.add_argument(
+        "--density-only",
+        action="store_true",
+        help="run only the short-train density re-smoke (implies --skip-crossover)",
+    )
+    ap.add_argument(
+        "--enforce-density-guardrail",
+        action="store_true",
+        help="fail if final density falls below the conservative re-smoke floor",
+    )
+    ap.add_argument("--min-final-x", type=float, default=0.20)
+    ap.add_argument("--min-final-xy", type=float, default=0.08)
     args = ap.parse_args()
+
+    if not sp.sparse_probe_enabled():
+        print(
+            "SPARSE PROBE DISABLED (default): no training or benchmark work. "
+            "Set BDH_SPARSE_PROBE=1 for the optional probe."
+        )
+        return
 
     device = torch.device("cpu")
     print(
@@ -293,8 +339,18 @@ def main() -> None:
             "show x/xy density falling but still >>5% at this scale."
         )
 
+    if history:
+        ok, detail = density_guardrail(
+            history,
+            min_final_x=args.min_final_x,
+            min_final_xy=args.min_final_xy,
+        )
+        print(f"density_guardrail={'pass' if ok else 'fail'} {detail}")
+        if args.enforce_density_guardrail and not ok:
+            raise SystemExit("density re-smoke guardrail failed")
+
     rows: list[dict] = []
-    if not args.skip_crossover:
+    if not args.skip_crossover and not args.density_only:
         print("--- CPU sparse vs dense crossover (decoder-shaped GEMM) ---")
         # B=4 T=128 → M=512; nh*N with tiny cfg is small — use mid shapes that
         # still finish quickly on CPU while stressing conversion overhead.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -21,6 +22,22 @@ import bdh_sparse as sp
 def _rand_latent(*shape, seed: int = 0):
     g = torch.Generator().manual_seed(seed)
     return torch.randn(*shape, generator=g)
+
+
+def test_sparse_probe_gate_defaults_off(monkeypatch):
+    """Optional sparse materialization requires an explicit env gate."""
+    monkeypatch.delenv(sp.SPARSE_PROBE_ENV, raising=False)
+    assert not sp.sparse_probe_enabled()
+    x = _rand_latent(2, 3, seed=0)
+    weight = _rand_latent(3, 4, seed=1)
+    dense = sp.encoder_relu_matmul(x, weight, use_sparse=False)
+    with pytest.raises(RuntimeError, match="BDH_SPARSE_PROBE=1"):
+        sp.encoder_relu_matmul(x, weight, use_sparse=True)
+
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "true")
+    assert sp.sparse_probe_enabled()
+    probed = sp.encoder_relu_matmul(x, weight, use_sparse=True)
+    assert torch.equal(probed, dense)
 
 
 def test_relu_density_random_approx_half():
@@ -146,8 +163,9 @@ def test_decoder_path_sparse_matches_bdh_layout():
         )
 
 
-def test_sparse_roundtrip_q_matches_relu():
-    """encoder_relu_matmul(use_sparse=True) densifies back to plain ReLU."""
+def test_sparse_roundtrip_q_matches_relu(monkeypatch):
+    """Gated encoder probe densifies back to plain ReLU."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
     B, T, D, nh, N = 2, 8, 64, 4, 32
     x = _rand_latent(B, 1, T, D, seed=30)
     # encoder: (nh, D, N) as in BDH — use einsum-style via broadcast matmul
@@ -172,8 +190,9 @@ def test_zeros_contribute_nothing_explicit_mask():
     assert torch.allclose(out, ref, rtol=1e-5, atol=1e-6)
 
 
-def test_default_bdh_unaffected_import():
-    """Importing bdh_sparse must not alter bdh.BDH forward (no hooks)."""
+def test_default_bdh_unaffected_import(monkeypatch):
+    """BDH.forward stays dense even when the optional probe gate is on."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
     cfg = bdh.BDHConfig(
         n_layer=1,
         n_embd=32,
@@ -185,7 +204,11 @@ def test_default_bdh_unaffected_import():
     m = bdh.BDH(cfg).eval()
     x = torch.randint(0, 256, (2, 6))
     logits_a, _ = m(x)
-    # Touch sparse module APIs
+    # If the production path were wired to sparse helpers this would fail.
+    def unexpected_sparse_call(*args, **kwargs):
+        raise AssertionError("BDH.forward must not call sparse helpers")
+
+    monkeypatch.setattr(sp, "sparse_relu_matmul", unexpected_sparse_call)
     _ = sp.relu_density(torch.relu(torch.randn(4, 4)))
     logits_b, _ = m(x)
     assert torch.equal(logits_a, logits_b)
