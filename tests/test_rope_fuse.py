@@ -294,6 +294,14 @@ def test_fused_paired_t1_cpu_parity():
     assert torch.equal(fused_rope_rotate_paired(v, paired[0], paired[1]), ref)
 
 
+@pytest.mark.parametrize("T", [1, 12])
+def test_blocked_rejects_nonpositive_block(T):
+    """The blocked contract rejects invalid tiles before its T=1 shortcut."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=T, seed=30 + T)
+    with pytest.raises(ValueError, match="block must be >= 1"):
+        fused_rope_rotate_blocked(v, cos, sin, block=0)
+
+
 def test_blocked_out_param_and_t1():
     cfg = _small_cfg()
     attn = bdh.Attention(cfg)
