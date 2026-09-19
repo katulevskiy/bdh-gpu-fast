@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#123)
+# OPT status — landed work (#1–#125)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `aea2501` (`#123` opt/sparse-v2 / `#121` profile-v12 / `#120` opt/auto-thr-v2 / `#119` opt/amp-train-v2 / `#118` docs-v27). The landed matrix below is aligned through #123; the prior closed #122 docs-only refresh is carried forward by this v29 refresh. `OPT_NOTES.md` § `opt/profile-v12` records the CPU re-profile of the pre-#123 tip, while #123 adds the gated sparse probe and dense-default guardrails. Profile-v11 source is `4963b0f` (`#110`), profile-v12 source is `f34adc0` (`#120`), and the current code tip is `aea2501`. Default eager remains unchanged; #116 keeps the opt-in blocked/online shared-V T=1 inference epilogue cat-free, #117 keeps compile backward probing opt-in, #118–#122 are docs/AMP/AUTO/profile follow-ups, and #123 keeps sparse probing explicitly gated with density x~27% / xy~11% and sparse OFF. No GPU speedup evidence was added, so GPU measurement and cold CUDA/Triton validation remain open.
+Tip pointer: `f16115c` (`#125` docs-matrix-v29 / `#124` rope-gpu-scaffold / `#123` opt/sparse-v2 / `#121` profile-v12). The landed matrix below is aligned through #125; #125 is a docs-only refresh through #123 on top of the #124 code tip, and this v30 refresh records both. `OPT_NOTES.md` § `opt/rope-gpu-scaffold` records the paired T=1 Triton scaffold: `BDH_ROPE_IMPL=fused` now reaches a zero-stride cis-row launch without expanding the broadcast row, while eager remains the default. Profile-v11 source is `4963b0f` (`#110`), profile-v12 source is `f34adc0` (`#120`), and the current code/docs tip is `f16115c`. Default eager remains unchanged; #116 keeps the opt-in blocked/online shared-V T=1 inference epilogue cat-free, #117 keeps compile backward probing opt-in, #118–#123 are docs/AMP/AUTO/profile/sparse follow-ups, and #124 keeps the RoPE GPU path opt-in with CPU parity only. No GPU speedup or correctness evidence was added, so GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#123)
+## Landed opts (#1–#125)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -299,6 +299,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **121** | `opt/profile-v12` | Re-profile the #116–#120 tip and carry CPU operator evidence into status/backlog | Forward warmed `copy_`=12/call, isolated=14; generate=394/call; `cat`/`contiguous`=0 | No GPU timing or speedup; GPU validation remains open |
 | **122** | `docs/opt-status-backlog-v28` | Prior docs-only refresh through #120; superseded/carried forward by this v29 refresh | Docs only | — |
 | **123** | `opt/sparse-v2` | Gate `BDH_SPARSE_PROBE`, add conservative density guardrails, and test that production BDH stays dense/default-off | CPU density re-smoke x=26.63% / xy=11.37% at step 150; sparse did not beat dense; keep OFF | No GPU timing or sparse-kernel claim; GPU validation remains open |
+| **124** | `opt/rope-gpu-scaffold` | Route paired T=1 RoPE through the selected `BDH_ROPE_IMPL`; add a zero-stride cis-row Triton launch without expanding broadcast rows; retain eager default and CPU fallback/parity | CPU paired parity; CUDA/Triton coverage is skip-gated here; no GPU timing | **P0** GPU fused-RoPE validation remains open |
+| **125** | `opt/docs-matrix-v29` | Docs-only refresh through #123 on the #124 code tip; this v30 refresh carries the #124 scaffold into the matrix and updates the tip pointer | Docs only | — |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
