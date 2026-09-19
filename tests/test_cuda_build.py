@@ -60,6 +60,33 @@ def test_forced_cuda_without_nvcc_is_clear_noop():
     assert "CPU refs remain available" in output
 
 
+def test_non_executable_nvcc_stub_is_clear_noop(tmp_path):
+    """A stale non-executable nvcc path must not enter CUDAExtension setup."""
+    nvcc = tmp_path / "cuda-home" / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\n", encoding="utf-8")
+    nvcc.chmod(0o644)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "CUDA_HOME": str(tmp_path / "cuda-home"),
+            "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
+            "PATH": str(empty_path),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "skipping CUDA extension build" in output
+    assert "nvcc not found in CUDA_HOME/CUDA_PATH or PATH" in output
+    assert "CPU refs remain available" in output
+
+
 def test_forced_cpu_ext_smoke_is_explicit():
     """BDH_FORCE_CPU_EXT=1 selects the CPU-only extension setup branch."""
     env = os.environ.copy()
