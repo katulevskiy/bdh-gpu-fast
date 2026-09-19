@@ -1,8 +1,8 @@
-# OPT backlog — ranked remaining work (docs-v90)
+# OPT backlog — ranked remaining work (docs-v91)
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #418–#583 plus documented tips `d9703b0` (#434) and `6181ba6`, with prior coverage retained. This refresh records the post-v89 contract deepens #607–#616; #540–#568, #573–#583, #589–#605, and #607–#616 are recorded below.
+Documentation coverage: #418–#583 plus documented tips `d9703b0` (#434) and `6181ba6`, with prior coverage retained. Docs-v90 (#621) covered #607–#616; this docs-v91 refresh adds the post-v90 contract deepens #622–#632 below without inventing metrics.
 
 ## Hard constraints
 
@@ -15,7 +15,7 @@ Documentation coverage: #418–#583 plus documented tips `d9703b0` (#434) and `6
 
 | Priority | Work | Current state | Acceptance evidence |
 |---|---|---|---|
-| **P0** | Real GPU cold attention | CPU reference, padded/strided/zero-stride-Q/K/V parity, capacity-padded V sequence storage, padded Q/K backing-storage gradients, batch/head-broadcast zero-stride-Q/K gradient reduction, shared-Q view backward, batch/head-broadcast and zero-upstream gradients, dispatcher-selected partial long-prefill tiles, first/second 64-row tile boundaries, strided-gradient, empty-sequence, packed-decode, and benchmark contracts, including multi-query rows spanning tile boundaries and aliased strided-Q/K duplicate-gradient routing, are covered; no live CUDA measurement | A100/H100 cold eager vs blocked/online/Triton/CUDA medians plus strict-tril parity |
+| **P0** | Real GPU cold attention | CPU reference, padded/strided/zero-stride-Q/K/V parity, capacity-padded V sequence storage, padded Q/K backing-storage gradients, batch/head-broadcast zero-stride-Q/K gradient reduction, shared-Q view backward, batch/head-broadcast and zero-upstream gradients, dispatcher-selected partial long-prefill tiles, first/second 64-row tile boundaries, strided-gradient, empty-sequence, packed-decode, and benchmark contracts, including multi-query rows spanning tile boundaries, aliased strided-Q/K duplicate-gradient routing, combined zero-stride self-attention Q/K and V views, and padded Q/K/V feature views, are covered; no live CUDA measurement | A100/H100 cold eager vs blocked/online/Triton/CUDA medians plus strict-tril parity |
 | **P0** | Cold CUDA–Triton validation | Scaffolds, executable `CUDA_PATH/bin/nvcc` and `PATH/nvcc` discovery, self-contained build/device/runtime skip diagnostics with stdout/JSON parity, exact requested-config handoff, explicit schema-v10 `timing_scope=none`, preserved CUDA device-probe and availability-probe errors, exact `BDH_BUILD_CUDA` flag handling, exact force-CPU selection without CUDA probing or a toolkit requirement, and CPU fallbacks are covered; no launch has been measured here | Successful build/launch, cold compile behavior, output parity, and median timing |
 | **P0** | T=1 decode on GPU | CPU score×V, packed-past views, empty-past including float64, capacity-strided-V, float64 packed-cache, shared-V multi-query/per-head-V views, T=1 offset-packed per-head-V dispatch, offset-strided query views, tiled shared/per-head-V autograd, explicit CPU device resolution, and public dispatch contracts are covered by #362/#363/#378/#388/#389/#395/#398/#410/#414/#425/#426/#440/#456/#470/#485/#500/#514/#530/#545/#549/#560/#574/#590/#604 | Real-GPU decode medians, peak memory, and parity at tile/oneshot boundaries |
 | **P1** | Long-T AUTO threshold/tile retune | CPU cold/decode threshold independence, blank/unset and zero-threshold transitions, invalid cold-threshold isolation including explicit-backend preservation, per-call backend precedence including `online` alias precedence, runtime disable/re-enable transitions, threshold preservation, caller-argument isolation, decode-only overrides, scoped cold gates, strict Triton-preference boundaries, omitted-threshold cleanup, nested gate/environment restoration, pre-run validation, and failure-continuing sweeps are covered by #352/#360/#368/#377/#394/#399/#409/#413/#424/#428/#439/#444/#454/#458/#469/#473/#484/#499/#503/#515/#519/#529/#544/#545/#559/#575/#589/#593/#602/#609; AUTO remains opt-in | GPU cold/decode sweep that justifies threshold and tile choices |
@@ -349,9 +349,25 @@ Documentation coverage: #418–#583 plus documented tips `d9703b0` (#434) and `6
 | **#615** Sparse guardrail miss | A missed density guardrail stays diagnostic-only by default while optional CPU crossover work remains available. |
 | **#616** CUDA availability skip | Availability-probe failures remain structured CPU-safe diagnostics; CPU timing is not substituted for GPU measurement. |
 
+## Refresh additions (#622–#632; docs-v91)
+
+| PR | Scope | Recorded outcome |
+|---:|---|---|
+| **#622** | Sampler layout | Padded non-unit-vocabulary storage covers `top_k=1` with a zero-stride decode output. |
+| **#623** | RoPE dispatch | Explicit `impl` takes precedence over `BDH_ROPE_IMPL` through both public entrypoints. |
+| **#624** | AUTO exception cleanup | Nested overrides restore outer gates and the original environment when an inner probe raises. |
+| **#625** | Eval compile probe | Caller modes and target presence remain covered while pre-existing parameter gradients survive the no-grad probe. |
+| **#626** | Force-CPU build metadata | Exact force-CPU mode emits only C++ compile metadata, with no CUDA flags or macros despite detected CUDA and `nvcc`. |
+| **#627** | Async prefetch shutdown | Shutdown joins the producer before clearing its handle. |
+| **#628** | Combined alias attention backward | Zero-stride self-attention Q/K and V views reduce duplicate and broadcast gradients to shared bases. |
+| **#629** | AMP optimizer cleanup | AMP train-step cleanup clears optimizer gradients when processing or the unscaled optimizer step raises. |
+| **#630** | Sparse probe gate | Empty and falsey gates keep the optional probe off; disabled enforced mode does no training or crossover work. |
+| **#631** | AUTO padded-feature prefill | Blocked cold prefill covers padded Q/K/V feature views with raw-score forward parity, analytic backward parity, layout preservation, and zero padding gradients. |
+| **#632** | CUDA build-probe skip | CUDA build-probe exceptions remain structured skip diagnostics with explicit no-timing scope. |
+
 ## Current evidence summary
 
-The profile-v20 call-count baseline remains attention `copy_` 2/call, forward `copy_` 12/call, generate `copy_` 394/call, `cat=0`, and `contiguous=0`. The #350–#583, #589–#605, and #607–#616 additions are CPU-safe docs/tests/contracts and diagnostics; #356, #373, #389, #404, #420, #433, #450, #465, #479, #495, #512, #525, #540, #579, #603, and #616 define GPU benchmark references, no-timing handoffs, explicit CPU fallback labels, or preserved device/availability-probe errors, while #552/#566/#582/#598/#611 keep explicit CPU extension selection safe. None adds GPU throughput, sparse-kernel evidence, or cold CUDA–Triton validation.
+The profile-v20 call-count baseline remains attention `copy_` 2/call, forward `copy_` 12/call, generate `copy_` 394/call, `cat=0`, and `contiguous=0`. The #350–#583, #589–#605, #607–#616, and #622–#632 additions are CPU-safe docs/tests/contracts and diagnostics; #356, #373, #389, #404, #420, #433, #450, #465, #479, #495, #512, #525, #540, #579, #603, #616, and #632 define GPU benchmark references, no-timing handoffs, explicit CPU fallback labels, or preserved device/availability-probe/build-probe errors, while #552/#566/#582/#598/#611/#626 keep explicit CPU extension selection safe. None adds GPU throughput, sparse-kernel evidence, or cold CUDA–Triton validation.
 
 Defaults remain:
 
