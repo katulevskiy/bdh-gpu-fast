@@ -772,6 +772,63 @@ def test_auto_cold_dispatch_preserves_padded_prefill_autograd(
         assert torch.count_nonzero(got_grad[:, :, T, :]) == 0
 
 
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_auto_cold_dispatch_preserves_padded_feature_prefill_autograd(
+    monkeypatch, value_heads
+):
+    """AUTO-selected cold tiles preserve gradients through padded feature views."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "256")
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump()
+
+    T, B, H, N, D = 257, 2, 2, 5, 4
+    g = torch.Generator().manual_seed(377 + value_heads)
+    Q_storage0 = torch.randn(
+        B, H, T, N + 1, dtype=torch.float64, generator=g
+    )
+    K_storage0 = torch.randn(
+        B, H, T, N + 1, dtype=torch.float64, generator=g
+    )
+    V_storage0 = torch.randn(
+        B, value_heads, T, D + 1, dtype=torch.float64, generator=g
+    )
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q_storage = Q_storage0.clone().requires_grad_()
+        K_storage = K_storage0.clone().requires_grad_()
+        V_storage = V_storage0.clone().requires_grad_()
+        Q = Q_storage[..., :N]
+        K = K_storage[..., :N]
+        V = V_storage[..., :D]
+        assert not Q.is_contiguous()
+        assert not K.is_contiguous()
+        assert not V.is_contiguous()
+        assert Q.stride(-2) == N + 1
+        assert K.stride(-2) == N + 1
+        assert V.stride(-2) == D + 1
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad(
+            (out * weight).sum(), (Q_storage, K_storage, V_storage)
+        )
+        return out, grads
+
+    assert resolve_cold_impl(T) == "blocked"
+    ref, ref_grads = run(eager_tril_attn)
+    got, got_grads = run(
+        lambda Q, K, V: bdh_attn(Q, K, V, use_autograd_fn=True)
+    )
+
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+    assert torch.count_nonzero(got_grads[0][..., N]) == 0
+    assert torch.count_nonzero(got_grads[1][..., N]) == 0
+    assert torch.count_nonzero(got_grads[2][..., D]) == 0
+
+
 def test_auto_does_not_override_explicit_blocked(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
