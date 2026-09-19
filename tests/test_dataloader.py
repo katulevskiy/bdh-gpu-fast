@@ -386,6 +386,20 @@ def test_dataloader_num_workers_zero(tr, monkeypatch):
     assert dl.persistent_workers is False
 
 
+def test_dataloader_worker_prefetch_contract(tr, monkeypatch):
+    """Worker DataLoader keeps full host batches and bounded lookahead."""
+    monkeypatch.setattr(tr, "NUM_WORKERS", 2)
+    src = tr.DataLoaderBatchSource("train")
+    try:
+        dl = src._loader
+        assert dl.batch_size is None
+        assert dl.prefetch_factor == 2
+        assert dl.worker_init_fn is tr._dataloader_worker_init
+        assert dl.persistent_workers is True
+    finally:
+        del src
+
+
 def test_dataloader_cpu_h2d_identity_does_not_probe_cuda(tr, monkeypatch):
     """CPU DataLoader H2D remains identity-only without CUDA initialization."""
     host_x = torch.zeros((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64)
