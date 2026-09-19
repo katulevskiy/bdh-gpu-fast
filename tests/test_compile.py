@@ -390,3 +390,109 @@ def test_cold_autograd_self_attn_no_dynamo_graph_breaks(monkeypatch):
         pytest.skip(f"dynamo.explain unavailable: {type(e).__name__}: {e}")
     assert expl.graph_break_count == 0, expl.break_reasons
     assert expl.graph_count >= 1
+
+
+# --- opt/compile-guidance: warn COMPILE+blocked; eager+AUTOGRAD compile path ---
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton"])
+def test_maybe_compile_warns_compile_with_blocked(impl, monkeypatch, capsys):
+    """COMPILE=1 + blocked|online|triton must log the CPU regression warning.
+
+    Defaults are unchanged; warning is advisory only (see #46 matrix).
+    """
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+    importlib.reload(tr)
+    assert tr.USE_COMPILE is True
+
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert "torch.compile warning" in captured
+    assert f"BDH_ATTN_IMPL={impl}" in captured
+    assert "regression" in captured.lower() or "slower" in captured.lower()
+    assert out is not None
+
+
+def test_maybe_compile_no_warn_on_eager(monkeypatch, capsys):
+    """COMPILE=1 + eager must not emit the blocked-compile regression warning."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    importlib.reload(tr)
+
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert "torch.compile warning" not in captured
+
+
+def test_compile_eager_autograd_smoke_zero_graph_breaks(monkeypatch):
+    """COMPILE path + eager + AUTOGRAD=1: train_step smoke and 0 Dynamo breaks.
+
+    Recommended CPU compile train path after #46 (COMPILE=1 only with eager).
+    Soft-skips if inductor unavailable. No throughput / GPU claims.
+    """
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+
+    cfg = _small_cfg(dropout=0.0)
+    m_explain = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+    try:
+        expl = torch._dynamo.explain(m_explain)(x, y)
+    except Exception as e:
+        pytest.skip(f"dynamo.explain unavailable: {type(e).__name__}: {e}")
+    assert expl.graph_break_count == 0, expl.break_reasons
+    assert expl.graph_count >= 1
+
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "0")
+    importlib.reload(tr)
+
+    torch.manual_seed(5)
+    m = bdh.BDH(cfg).train()
+    tr.USE_COMPILE = True
+    try:
+        m = tr.maybe_compile(m, example_x=x, example_y=y)
+    finally:
+        tr.USE_COMPILE = False
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    if getattr(m, "_orig_mod", None) is None:
+        pytest.skip("torch.compile unavailable or probe fell back to eager")
+
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    loss = tr.train_step(m, opt, x, y)
+    assert torch.isfinite(loss)

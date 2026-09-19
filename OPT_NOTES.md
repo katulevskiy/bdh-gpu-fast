@@ -2828,3 +2828,44 @@ vs #44 without GPU / larger vocab.
 - No redoing gen-host hoist / RoPE table
 - No default `BDH_ATTN_IMPL` change / no tril math change
 - No re-introducing `aten::cat`
+
+## opt/compile-guidance — warn COMPILE+blocked; document eager path (2026-09-19)
+
+**Branch:** `opt/compile-guidance` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `c7a7471` (main after #48 gen-sample; post #47 encoder-fuse / #46 compile-blocked).
+
+### Goal
+
+Harden the **recommended CPU train path** after #46 showed
+`COMPILE=1` + **eager** is the only compile win on this box (~5.25 ms vs
+~7.76 eager baseline; `COMPILE=1`+blocked ~70–100× slower). Document
+operator guidance; optionally warn in `maybe_compile` when `COMPILE=1`
+with tiled backends. **Do not change defaults.** GPU compile still open.
+
+### Code
+
+| Piece | Change |
+|-------|--------|
+| `train.maybe_compile` | If `BDH_ATTN_IMPL∈{blocked,online,triton}` and `BDH_COMPILE=1`, log a clear CPU-regression warning (advisory; still compiles) |
+| `tests/test_compile.py` | Warning coverage; COMPILE+eager+AUTOGRAD smoke + **0** Dynamo graph breaks |
+
+### Operator recommendation (CPU)
+
+```bash
+# Recommended compile train path on CPU:
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager python train.py
+# Optional analytic bwd (still 0 graph breaks after SelfAttnFn #46):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_ATTN_AUTOGRAD=1 python train.py
+```
+
+Do **not** pair `BDH_COMPILE=1` with `blocked` / `online` / `triton` on CPU
+for speed — inductor does not rescue the tiled Python loop. Keep those IMPLs
+for peak-score memory / parity experiments without compile, or for future
+**GPU** measurement.
+
+### Non-goals
+
+- No default flip of `BDH_COMPILE` / `BDH_ATTN_IMPL` / `BDH_ATTN_AUTOGRAD`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No PRs to `pathwaycom/*`
+- No GPU / CUDA-graph claims
