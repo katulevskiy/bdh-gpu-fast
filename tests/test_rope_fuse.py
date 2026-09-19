@@ -387,6 +387,29 @@ def test_fused_paired_t1_strided_out_preserves_parity():
     )
 
 
+def test_fused_paired_t1_backward_matches_eager():
+    """Paired T=1 CPU fallback preserves eager input gradients."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 7
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(282)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    ve = v.detach().requires_grad_(True)
+    vf = v.detach().requires_grad_(True)
+    eager = eager_rope_rotate(ve, cos, sin)
+    fused = fused_rope_rotate_paired(vf, paired[0], paired[1])
+    grad = torch.randn_like(eager)
+    eager.backward(grad)
+    fused.backward(grad)
+    assert torch.equal(vf.grad, ve.grad)
+
+
 def test_t1_paired_cache_refreshes_across_positions(monkeypatch):
     """Paired decode cis follows each absolute position on the CPU path."""
     cfg = _small_cfg()
