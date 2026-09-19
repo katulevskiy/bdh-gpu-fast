@@ -407,6 +407,7 @@ def test_default_amp_keeps_full_forward_under_context(monkeypatch):
     """Default AMP passes targets to the full model forward inside autocast."""
     events = []
     forward_targets = []
+    forward_losses = []
     active = False
 
     class _ProbeContext:
@@ -431,7 +432,9 @@ def test_default_amp_keeps_full_forward_under_context(monkeypatch):
             forward_targets.append(y)
             events.append(("forward", y is not None))
             logits = x @ self.weight
-            return logits, logits.square().mean()
+            model_loss = logits.square().mean()
+            forward_losses.append(model_loss)
+            return logits, model_loss
 
     monkeypatch.setattr(tr, "ctx", _ProbeContext())
     monkeypatch.setattr(tr, "_amp_forward_only", False)
@@ -447,6 +450,7 @@ def test_default_amp_keeps_full_forward_under_context(monkeypatch):
     assert loss.ndim == 0
     assert events == ["enter", ("forward", True), "exit"]
     assert forward_targets[0] is y
+    assert loss is forward_losses[0]
 
 
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
