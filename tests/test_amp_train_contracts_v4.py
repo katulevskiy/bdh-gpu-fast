@@ -453,6 +453,35 @@ def test_default_amp_keeps_full_forward_under_context(monkeypatch):
     assert loss is forward_losses[0]
 
 
+def test_unscaled_amp_train_step_updates_and_clears_grads(monkeypatch):
+    """The CPU-safe unscaled AMP path updates parameters then clears grads."""
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", False)
+    monkeypatch.setattr(tr, "scaler", None)
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, 1))
+
+        def forward(self, x, y=None):
+            logits = x @ self.weight
+            return logits, logits.square().mean()
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    initial_weight = model.weight.detach().clone()
+    x = torch.tensor([[2.0]])
+    y = torch.tensor([[0]])
+
+    loss = tr.train_step(model, optimizer, x, y)
+
+    assert loss.ndim == 0
+    assert not torch.equal(model.weight.detach(), initial_weight)
+    assert model.weight.grad is None
+
+
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
     """A live CUDA runtime is the only positive throughput claim surface."""
     with monkeypatch.context() as mp:
