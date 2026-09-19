@@ -457,7 +457,12 @@ class BatchPrefetcher:
     ) -> tuple[
         torch.Tensor, torch.Tensor, torch.cuda.Event, torch.Tensor, torch.Tensor
     ]:
-        """Queue one pinned host batch on the dedicated CUDA copy stream."""
+        """Queue one pinned host batch on the dedicated CUDA copy stream.
+
+        The returned tuple owns the pinned source tensors until its event has
+        been waited on; ``_device_next`` retains that tuple for the staged
+        lookahead, while ``_wait_staged`` consumes it for the caller.
+        """
         assert self._stream is not None
         with torch.cuda.stream(self._stream):
             xd = x.to(device, non_blocking=True)

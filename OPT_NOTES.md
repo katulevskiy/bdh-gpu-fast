@@ -6869,3 +6869,39 @@ OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/ -q
 - Added `triton_rope_skip_reason()` and `backend_info()["triton_skip_reason"]` so CPU/CUDA/Triton gate decisions are explicit instead of silent fallback.
 - Added CPU contracts for T=1 paired rotation into a non-contiguous cache-slot-like `out=` buffer and for the existing T>1 tile parity path.
 - Tests remain CPU-only on this box; no fused-GPU timing or speedup claim is made. Defaults and strict `tril(-1)` attention semantics are unchanged.
+## opt/prefetch-h2d-v3 — deepen CPU no-op and CUDA lifetime contract (2026-09-19)
+
+**Branch:** `opt/prefetch-h2d-v3` (private `katulevskiy/bdh-gpu-opt` only;
+no public PR).
+**Base tip:** `fb698fc` (after #165).
+
+### Audit / deepen
+
+The H2D opt-in remains unchanged and CPU-safe. `BatchPrefetcher` coverage now
+runs both async and sync host modes across unset, disabled, and enabled H2D
+settings. On the CPU path, the test forbids construction of CUDA stream/event
+objects, asserts that no device lookahead is retained, and checks that the
+caller transfer preserves tensor identity. The CUDA-side staging doc now makes
+the event/lifetime handoff explicit: the staged tuple retains pinned host
+sources until the recorded event is consumed.
+
+### CPU-safe validation
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/test_dataloader.py -q
+# 20 passed, 1 skipped in 2.34s
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest -q
+# 571 passed, 19 skipped, 3 warnings in 89.39s
+```
+
+This CPU-only box does not exercise CUDA H2D overlap or provide timing data;
+no GPU correctness, throughput, overlap, or speedup claim is made. Defaults
+remain unchanged (`BDH_PREFETCH_ASYNC=1`, `BDH_PREFETCH_H2D=1`).
+
+### Non-goals
+
+- No default prefetch or H2D flag changes.
+- No GPU timing or overlap claims.
+- No public PR.

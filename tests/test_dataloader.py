@@ -81,10 +81,21 @@ def test_to_train_device_cpu_passthrough(tr):
     assert torch.equal(x, xd) and torch.equal(y, yd)
 
 
+@pytest.mark.parametrize("async_host", [True, False])
 @pytest.mark.parametrize("cuda_staging", [None, False, True])
-def test_batch_prefetcher_cuda_staging_is_cpu_noop(tr, cuda_staging):
-    """Every H2D setting is a CPU identity path with no stream/lookahead."""
-    loader = tr.BatchPrefetcher("train", cuda_staging=cuda_staging)
+def test_batch_prefetcher_cuda_staging_is_cpu_noop(
+    tr, monkeypatch, async_host, cuda_staging
+):
+    """Every H2D setting is a CPU identity path with no CUDA objects/lookahead."""
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("CPU H2D path must not construct CUDA stream/event objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    loader = tr.BatchPrefetcher(
+        "train", async_host=async_host, cuda_staging=cuda_staging
+    )
     try:
         assert loader._cuda_staging is False
         assert loader._stream is None
@@ -105,7 +116,10 @@ def test_batch_prefetch_defaults_unchanged(tr):
     assert tr.USE_PREFETCH_H2D is True
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for H2D staging")
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA required: CPU-only runs cover the no-op contract, not H2D lookahead",
+)
 def test_batch_prefetcher_cuda_staging_device_lookahead(tr, monkeypatch):
     """CUDA staging returns device batches and keeps one staged lookahead."""
     monkeypatch.setattr(tr, "device", torch.device("cuda"))
