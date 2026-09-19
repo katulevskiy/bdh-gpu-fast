@@ -1,3 +1,4 @@
+
 # OPT backlog — ranked remaining work
 
 Private sandbox only (`katulevskiy/bdh-gpu-opt`). **Do not** PR to `pathwaycom/bdh`.
@@ -6,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `tril(diagonal=-1)` — **no softmax**, **no `1/√d`**, **no**
 `F.scaled_dot_product_attention`.
 
-Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), profile-v15 source tip `86315f0` / profile-v16 source tip `717c38e` / profile-v17 source tip `f34d908` / profile-v18 source tip `c25aa9f` / current code tip `81e0005` after profile-v20, #251 force-CPU GPU-harness coverage, #252 CPU prefetch-gate coverage, #253 docs refresh, #254 active-AMP-state coverage, #255 absent generate-impl environment cleanup, #256 batched blocked-tile gradient parity, #257 sparse density-only crossover coverage, #258 AUTO threshold fallback coverage, #259 distinct-Q/K score-V gradient coverage, #260 signed raw-score decode coverage, #262 sampler-layout overflow coverage, #263 mixed-dtype RoPE output coverage, #264 failed compile-probe cleanup, #265 CUDA_PATH missing-nvcc skip coverage, #266 strict-tril backward boundary coverage, #268 tiled packed per-head decode gradient coverage, #270 explicit prefetch H2D opt-out coverage, #271 run-level GPU skip status, #272 terminal sparse guardrail coverage, #273 blocked-tile raw-score coverage, #274 invalid gen-bench selection coverage, and #275 invalid AMP state coverage. Profile-v20 remains flat versus profile-v19/v18/v17/v16: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. These later landings add only CPU-safe contract or docs coverage; none adds a CUDA run or GPU result. Absolute ms are **profiler-inflated**; use **% self CPU** and call counts. Re-run on GPU before claiming kernel wins.
+Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), profile-v15 source tip `86315f0` / profile-v16 source tip `717c38e` / profile-v17 source tip `f34d908` / profile-v18 source tip `c25aa9f` / current code tip `b573e96` after profile-v20, #251 force-CPU GPU-harness coverage, #252 CPU prefetch-gate coverage, #253 docs refresh, #254 active-AMP-state coverage, #255 absent generate-impl environment cleanup, #256 batched blocked-tile gradient parity, #257 sparse density-only crossover coverage, #258 AUTO threshold fallback coverage, #259 distinct-Q/K score-V gradient coverage, #260 signed raw-score decode coverage, #262 sampler-layout overflow coverage, #263 mixed-dtype RoPE output coverage, #264 failed compile-probe cleanup, #265 CUDA_PATH missing-nvcc skip coverage, #266 strict-tril backward boundary coverage, #268 tiled packed per-head decode gradient coverage, #270 explicit prefetch H2D opt-out coverage, #271 run-level GPU skip status, #272 terminal sparse guardrail coverage, #273 blocked-tile raw-score coverage, #274 invalid gen-bench selection coverage, #275 invalid AMP state coverage, #277 docs refresh, #278 AUTO threshold override coverage, #279 aliased score-V gradient coverage, #280 multi-query online decode coverage, #281 strided sampler output coverage, and #282 mixed-dtype RoPE coverage. Profile-v20 remains flat versus profile-v19/v18/v17/v16: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. These later landings add only CPU-safe contract or docs coverage; none adds a CUDA run or GPU result. Absolute ms are **profiler-inflated**; use **% self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
 Post-#95 re-profile (`opt/profile-v9`, source `8e7a4d2`; current docs tip `1363794` after #96–#102): forward warmed harness `aten::copy_` is 48 over three active calls (16/call), while an isolated one-forward check reproduces #95's **18**; forward and generate remain `aten::cat=0` and `aten::contiguous=0`. Generate `aten::copy_` is 1,674 over three active calls (558/call), so generate remains copy_-heavy. CPU-only evidence; **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v9.
 
@@ -291,6 +292,18 @@ Post-#274 invalid gen-bench selection (`81e0005`): fail closed on unknown implem
 
 Post-#275 invalid AMP state (`915fe71`): preserve dtype, autocast context, scaler, and forward-only state when an invalid `float64` configuration is rejected. CPU-only failure-state coverage; no GPU timing or throughput claim was added.
 
+Post-#277 docs refresh (`aeec930`): refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #275. Docs-only; no code or GPU evidence.
+
+Post-#278 AUTO threshold override contract (`abef868`): verify an explicit cold threshold remains independent from later decode-threshold changes, then follows the later decode threshold when the override is removed. CPU-safe contract coverage only; no GPU timing or threshold/tile claim.
+
+Post-#279 aliased score-V gradients (`8d4ea64`): verify blocked and online score×V output plus Q/V gradients match eager when self-attention aliases Q and K. CPU-only gradient parity; no GPU timing or performance claim.
+
+Post-#280 multi-query online decode (`4de8f5a`): cover multiple query rows with signed raw QK scores and independent per-head past values across eager, blocked, online, Triton-fallback, and CUDA-reference dispatch. CPU-only decode contract; no GPU timing or performance claim.
+
+Post-#281 strided sampler output (`76e02e6`): cover default and top-k sampler writes into a non-contiguous one-column decode narrow and compare with the reference output. CPU-only layout contract; no GPU timing or performance claim.
+
+Post-#282 mixed-dtype RoPE (`b573e96`): cover fp16 RoPE writes into non-contiguous fp32 cache slots across CPU entrypoints at T=1 and T=7, preserving the untouched backing-lane sentinel. CPU-only mixed-dtype parity; no GPU timing or fused-RoPE claim.
+
 Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU, #93 is an opt-in cold path at T≥256, and #95 adds only CPU copy-call evidence (forward `copy_` 24→18; QR contig copies 8→0). No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
 
 Post-#64–#66 re-profile (`opt/profile-v6`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #58 layout-v2 still visible on generate (`mm`/`linear`); #64–#66 not exercised on short default window (CUDA decode / train log). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v6.
@@ -395,6 +408,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Docs matrix v6 refresh (`opt/docs-matrix-v6` #65) — docs-only through #64; documented tip `4558501`
 
 ## Ranked next work
+
+Current evidence boundary through `b573e96`: #277 is docs-only; #278–#282 add CPU-safe AUTO, score×V gradient, multi-query decode, strided-sampler, and mixed-dtype RoPE contract coverage only. No CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
@@ -594,7 +609,19 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | CUDA_PATH missing-nvcc skip #265 | **Landed** at `6d6aaab` — stale non-executable `CUDA_PATH` `nvcc` remains a CPU-safe no-op before CUDAExtension setup; no GPU build or timing claim
 | Strict-tril backward boundary queries #266 | **Landed** at `cbf0831` — CPU-only locality coverage spans first, interior, and final query rows across supported dispatches and V layouts; no GPU timing claim
 | Tiled packed per-head decode gradients #268 | **Landed** at `aebc449` — CPU-only autograd parity covers capacity-strided T=1 decode GEMMs across blocked, online, and Triton-fallback paths; no GPU timing claim
-| Current tip | **Landed** at `aebc449` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #266 and #268 add CPU contracts only, and the real-GPU P0 blocker remains open
+| Explicit prefetch H2D opt-out #270 | **Landed** at `dae2e07` — CPU-safe no-probe coverage for `BDH_PREFETCH_H2D=0`; no H2D timing or overlap claim
+| Run-level GPU skip status #271 | **Landed** at `75597c9` — unavailable-device summaries report schema-v4 `status: skip`; no GPU timing or speedup evidence
+| Sparse guardrail terminal contract #272 | **Landed** at `b9bf6c8` — enforced density failures stop before CPU crossover work; sparse remains opt-in/default-off
+| Blocked-tile raw-score contract #273 | **Landed** at `3b3c082` — deterministic CPU tile-boundary raw strict-tril score×V coverage; no GPU timing claim
+| Invalid generate selection #274 | **Landed** at `81e0005` — fail-closed CPU validation before model/device setup; no GPU performance claim
+| Invalid AMP state #275 | **Landed** at `915fe71` — CPU-only invalid-dtype failure-state preservation; no GPU throughput claim
+| Docs refresh #277 | **Landed** at `aeec930` — matrix/backlog docs through #275; docs-only
+| AUTO threshold override #278 | **Landed** at `abef868` — CPU-safe explicit-cold independence/fallback coverage; no GPU timing claim
+| Aliased score-V gradients #279 | **Landed** at `8d4ea64` — CPU blocked/online Q/V gradient parity when Q and K alias; no GPU timing claim
+| Multi-query online decode #280 | **Landed** at `4de8f5a` — CPU-only signed raw-score/per-head past-value contract; no GPU timing claim
+| Strided sampler output #281 | **Landed** at `76e02e6` — CPU-only default/top-k non-contiguous decode-narrow contract; no GPU timing claim
+| Mixed-dtype RoPE #282 | **Landed** at `b573e96` — CPU-only fp16-to-fp32 non-contiguous output parity; no GPU timing or fused-RoPE claim
+| Current tip | **Landed** at `b573e96` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #270–#282 add CPU-safe contracts/docs only, and the real-GPU P0 blocker remains open
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
