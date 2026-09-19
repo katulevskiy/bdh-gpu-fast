@@ -273,7 +273,7 @@ def test_attention_forward_t1_uses_paired_path():
 
 
 def test_rope_rotate_t1_out_none_no_stack_parity():
-    """out=None path (empty+pair store) still bit-identical to strided."""
+    """out=None path (stack→reshape store) still bit-identical to strided."""
     cfg = _small_cfg()
     attn = bdh.Attention(cfg)
     device = torch.device("cpu")

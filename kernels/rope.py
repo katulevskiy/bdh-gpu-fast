@@ -125,13 +125,25 @@ def _store_pairs(
     v: torch.Tensor,
     out: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Write interleaved pairs into ``out`` (or a fresh buffer) — no ``stack``.
+    """Write interleaved pairs into ``out`` (or a fresh buffer).
 
-    Pair-axis stores are contiguous when ``out``'s last dim is contiguous; avoids
-    the extra ``stack→reshape`` temporary that previously taxed fuse/T=1 alloc.
+    For fp32/fp64, pack via ``torch.complex`` + ``view_as_complex(out).copy_`` —
+    **one** ``aten::copy_`` instead of two pair-axis setitems, and **no**
+    ``aten::cat`` (unlike ``torch.stack``, which cats under the hood). Bit-
+    identical to the historical empty+pair store on CPU. Other dtypes keep
+    the dual setitem path (ComplexHalf is experimental).
     """
     if out is None:
         out = _alloc_rope_out(v)
+    if (
+        y0.dtype in (torch.float32, torch.float64)
+        and out.dtype == y0.dtype
+        and y1.dtype == y0.dtype
+    ):
+        torch.view_as_complex(out.reshape(*v.shape[:-1], -1, 2)).copy_(
+            torch.complex(y0, y1)
+        )
+        return out
     op = out.reshape(*v.shape[:-1], -1, 2)
     op[..., 0] = y0
     op[..., 1] = y1
