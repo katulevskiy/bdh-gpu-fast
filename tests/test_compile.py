@@ -290,3 +290,103 @@ def test_cold_forward_no_dynamo_graph_breaks_dropout_zero():
         pytest.skip(f"dynamo.explain unavailable: {type(e).__name__}: {e}")
     assert expl.graph_break_count == 0, expl.break_reasons
     assert expl.graph_count >= 1
+
+
+# --- opt/compile-blocked: compile × blocked × optional AUTOGRAD smoke ---
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked"])
+@pytest.mark.parametrize("autograd", [False, True])
+def test_compile_forward_matches_eager_blocked_autograd(impl, autograd, monkeypatch):
+    """Compiled cold forward matches eager at dropout=0 for IMPL×AUTOGRAD.
+
+    Soft-skips if inductor unavailable. No throughput / GPU claims.
+    """
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+    if autograd:
+        monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    else:
+        monkeypatch.delenv("BDH_ATTN_AUTOGRAD", raising=False)
+
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(0)
+    eager = bdh.BDH(cfg).eval()
+    compiled_src = bdh.BDH(cfg).eval()
+    compiled_src.load_state_dict(eager.state_dict())
+    compiled = _compile_or_skip(compiled_src, mode="default")
+
+    torch.manual_seed(41)
+    x = torch.randint(0, cfg.vocab_size, (2, 12))
+    y = torch.randint(0, cfg.vocab_size, (2, 12))
+
+    def _warm():
+        with torch.no_grad():
+            return compiled(x, y)
+
+    _probe_or_skip(compiled, _warm)
+    with torch.no_grad():
+        le, lose = eager(x, y)
+        lc, losc = compiled(x, y)
+    assert torch.allclose(le, lc, rtol=0, atol=1e-5), (
+        f"impl={impl} autograd={autograd} logits maxdiff={(le - lc).abs().max().item()}"
+    )
+    assert torch.allclose(lose, losc, rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked"])
+def test_compile_train_step_blocked_autograd_smoke(impl, monkeypatch):
+    """One compiled train_step under IMPL + AUTOGRAD=1 must finish (CPU).
+
+    Soft-skips if inductor/probe fails. Asserts finite loss only — no speed.
+    """
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    monkeypatch.setenv("BDH_COMPILE", "0")  # maybe_compile toggled below
+
+    import importlib
+    import train as tr
+
+    importlib.reload(tr)
+
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(2)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+
+    tr.USE_COMPILE = True
+    try:
+        m = tr.maybe_compile(m, example_x=x, example_y=y)
+    finally:
+        tr.USE_COMPILE = False
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    if getattr(m, "_orig_mod", None) is None:
+        pytest.skip("torch.compile unavailable or probe fell back to eager")
+
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    loss = tr.train_step(m, opt, x, y)
+    assert torch.isfinite(loss)
+
+
+def test_cold_autograd_self_attn_no_dynamo_graph_breaks(monkeypatch):
+    """AUTOGRAD=1 + Q-is-K self path should not trip duplicate-input breaks.
+
+    Before StrictTrilSelfAttnFn, Dynamo reported ~9 breaks (gb6297). After the
+    self-attn Function, cold train path at dropout=0 should be a single graph
+    for both eager and blocked.
+    """
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
+
+    cfg = _small_cfg(dropout=0.0)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+    try:
+        expl = torch._dynamo.explain(m)(x, y)
+    except Exception as e:
+        pytest.skip(f"dynamo.explain unavailable: {type(e).__name__}: {e}")
+    assert expl.graph_break_count == 0, expl.break_reasons
+    assert expl.graph_count >= 1

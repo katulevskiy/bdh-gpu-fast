@@ -8,6 +8,7 @@ from .rope_dispatch import (
 )
 from .attention_bwd import (
     StrictTrilAttnFn,
+    StrictTrilSelfAttnFn,
     analytic_tril_attn_backward,
     analytic_tril_attn_backward_blocked,
     strict_tril_attn,
@@ -33,6 +34,7 @@ __all__ = [
     "backend_info",
     "strict_tril_attn",
     "StrictTrilAttnFn",
+    "StrictTrilSelfAttnFn",
     "analytic_tril_attn_backward",
     "analytic_tril_attn_backward_blocked",
     "tril_score_v",

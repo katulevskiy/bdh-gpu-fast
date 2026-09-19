@@ -6,8 +6,9 @@ graph through the forward implementation.
 
 Opt-in via BDH_ATTN_AUTOGRAD=1 or strict_tril_attn(..., use_fn=True).
 Default remains OFF (eager train uses PyTorch autograd through GEMMs).
-When set, cold / multi-token paths go through StrictTrilAttnFn so blocked
-/ Triton / CUDA forwards can train without differentiating the kernel graph.
+When set, cold / multi-token paths go through StrictTrilAttnFn (or
+StrictTrilSelfAttnFn when Q is K — Dynamo-safe) so blocked / Triton / CUDA
+forwards can train without differentiating the kernel graph.
 T=1 CacheManager decode stays on the decode GEMM path (generate is no_grad).
 
 Backward memory:
@@ -220,6 +221,10 @@ class StrictTrilAttnFn(torch.autograd.Function):
     When ``impl`` is blocked/online/triton/cuda, backward uses the tiled
     analytic kernel (no full T×T). Eager keeps the dense M-recompute path
     (same asymptotic as the eager forward).
+
+    Prefer ``StrictTrilSelfAttnFn`` when ``Q is K`` (BDH cold path): Dynamo
+    graph-breaks on ``Function.apply`` with the same tensor twice
+    (``gb6297``). Distinct Q/K keep this three-tensor form.
     """
 
     @staticmethod
@@ -251,6 +256,41 @@ class StrictTrilAttnFn(torch.autograd.Function):
         return dQ, dK, dV, None
 
 
+class StrictTrilSelfAttnFn(torch.autograd.Function):
+    """Self-attn form (K is Q) — Dynamo-safe; sums dQ+dK into Q's grad.
+
+    BDH always passes ``bdh_attn(QR, QR, V)``. Calling
+    ``StrictTrilAttnFn.apply(Q, Q, V, impl)`` trips Dynamo
+    ``autograd.Function.apply: duplicate tensor input`` and forces ~1 graph
+    break per layer. This Function takes ``(Q, V, impl)`` only and returns
+    ``dQ + dK`` for Q (same accumulation PyTorch would do for duplicate
+    inputs).
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        Q: torch.Tensor,
+        V: torch.Tensor,
+        impl: str,
+    ) -> torch.Tensor:
+        ctx.impl = impl
+        ctx.save_for_backward(Q, V)
+        with torch.no_grad():
+            out = _forward_impl(Q, Q, V, impl)
+        return out
+
+    @staticmethod
+    def backward(ctx, dO: torch.Tensor):
+        Q, V = ctx.saved_tensors
+        if _use_blocked_analytic_bwd(ctx.impl):
+            dQ, dK, dV = analytic_tril_attn_backward_blocked(Q, Q, V, dO)
+        else:
+            dQ, dK, dV = analytic_tril_attn_backward(Q, Q, V, dO)
+        # K is Q → accumulate both score grads into Q
+        return dQ + dK, dV, None
+
+
 def strict_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -262,15 +302,20 @@ def strict_tril_attn(
     """Strict-tril score@V with optional autograd.Function.
 
     use_fn:
-      - True  → always StrictTrilAttnFn (analytic bwd)
+      - True  → always analytic Function (self-attn when ``Q is K``)
       - False → plain forward (PyTorch autograd if ops support it)
       - None  → True when BDH_ATTN_AUTOGRAD is truthy, else False
+
+    When ``Q is K``, routes through ``StrictTrilSelfAttnFn`` so
+    ``torch.compile`` does not graph-break on duplicate Function inputs.
     """
     if use_fn is None:
         use_fn = _env_autograd_enabled()
     name = impl if impl is not None else os.environ.get("BDH_ATTN_IMPL", "eager")
     name = _normalize_impl(name)
     if use_fn:
+        if Q is K:
+            return StrictTrilSelfAttnFn.apply(Q, V, name)
         return StrictTrilAttnFn.apply(Q, K, V, name)
     return _forward_impl(Q, K, V, name)
 

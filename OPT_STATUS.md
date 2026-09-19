@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `94fa3b1` (`opt/gen-host` #44 on `main`; includes #41 blocked-autograd, #42 prefetch-v2, and #43 docs refresh).
+Tip documented here: `f7c69bf` (`#45` docs through #44). This PR: `opt/compile-blocked` — compile×blocked×AUTOGRAD matrix + SelfAttnFn Dynamo fix.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**

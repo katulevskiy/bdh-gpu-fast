@@ -52,6 +52,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Profile-v3 docs refresh (`opt/profile-v3` #40) — documented tip `d3ff475`; profile source tip `b160469`; no code or GPU measurement
 - OPT status matrix refresh (`opt/docs-matrix-v2` #43) — docs-only through #40
 - Generate Python/host tax (`opt/gen-host` #44) — CPU ~1.31×, `arange` 33→1; remaining P1 is GPU decode GEMM
+- Compile × blocked × AUTOGRAD train matrix + SelfAttnFn Dynamo fix (`opt/compile-blocked`) — CPU; compile+blocked not a win
 
 ## Ranked next work
 
@@ -83,7 +84,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | OPT status docs refresh | **Landed** #43 `opt/docs-matrix-v2` — matrix through #40 |
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
-| `torch.compile` / inductor CPU harden | **Landed** #17+#22; CPU 0-vs-1 train bench `opt/compile-bench`; remaining = **GPU** measure (P1) |
+| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31; matrix `opt/compile-blocked` (compile×blocked slower on CPU); remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |

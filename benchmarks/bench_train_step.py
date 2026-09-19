@@ -1,6 +1,7 @@
 """Microbench: train-step variants (fused AdamW, set_to_none, compile path).
 
-Also used by opt/train-fuse / opt/compile-bench to document CPU honesty.
+Also used by opt/train-fuse / opt/compile-bench / opt/compile-blocked to
+document CPU honesty.
 
 CPU-honest: no CUDA on the default runner. Measures median step time for a
 tiny BDH config.
@@ -10,6 +11,11 @@ BDH_COMPILE=0 vs 1 (opt/compile-bench):
   inductor / CXX / probe failures soft-skip (print + return) instead of
   crashing. Same weights, same AdamW path, same fixed batch — honest A/B.
   Absolute ms are CPU-only; do not claim GPU / CUDA-graph wins here.
+
+COMPILE × ATTN_IMPL × AUTOGRAD matrix (opt/compile-blocked):
+  Set BDH_BENCH_COMPILE_BLOCKED=1 (default on when this section is wanted;
+  also runs if BDH_BENCH_COMPILE=1 and BDH_BENCH_COMPILE_BLOCKED unset → on).
+  Tiny cfg, soft-skip per cell on compile/probe failure. CPU medians only.
 """
 
 from __future__ import annotations
@@ -206,6 +212,130 @@ def bench_compile_vs_eager(cfg, device, fused_ok: bool) -> None:
         )
 
 
+def bench_compile_blocked_matrix(cfg, device, fused_ok: bool) -> None:
+    """Honest COMPILE × ATTN_IMPL × AUTOGRAD train-step matrix (CPU-first).
+
+    Cells: COMPILE in {0,1} × IMPL in {eager, blocked} × AUTOGRAD in {0,1}.
+    Soft-skips a cell (prints reason) if compile/probe unavailable or step
+    raises — never hard-fails the harness. Restores env after each cell.
+    Absolute ms are CPU-only; do not claim GPU wins.
+    """
+    print("--- COMPILE × ATTN_IMPL × AUTOGRAD train-step matrix ---")
+    print(
+        f"device={device} mode={os.environ.get('BDH_COMPILE_MODE', tr.COMPILE_MODE)} "
+        f"probe={os.environ.get('BDH_COMPILE_PROBE', tr.COMPILE_PROBE)} "
+        f"cuda={torch.cuda.is_available()} cfg=layers={cfg.n_layer} d={cfg.n_embd} "
+        f"B=4 T=64 dropout={cfg.dropout}"
+    )
+
+    impls = ("eager", "blocked")
+    compiles = (0, 1)
+    autograds = (0, 1)
+
+    saved = {
+        "BDH_COMPILE": os.environ.get("BDH_COMPILE"),
+        "BDH_ATTN_IMPL": os.environ.get("BDH_ATTN_IMPL"),
+        "BDH_ATTN_AUTOGRAD": os.environ.get("BDH_ATTN_AUTOGRAD"),
+    }
+    was_use = tr.USE_COMPILE
+    x, y = _batch(device)
+    rows = []
+
+    def _restore_env():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tr.USE_COMPILE = was_use
+
+    try:
+        for compile_on in compiles:
+            for impl in impls:
+                for autograd in autograds:
+                    tag = f"COMPILE={compile_on} IMPL={impl} AUTOGRAD={autograd}"
+                    os.environ["BDH_ATTN_IMPL"] = impl
+                    if autograd:
+                        os.environ["BDH_ATTN_AUTOGRAD"] = "1"
+                    else:
+                        os.environ.pop("BDH_ATTN_AUTOGRAD", None)
+
+                    torch.manual_seed(0)
+                    m = bdh.BDH(cfg).to(device)
+                    m.train()
+
+                    if compile_on:
+                        os.environ["BDH_COMPILE"] = "1"
+                        tr.USE_COMPILE = True
+                        try:
+                            m = tr.maybe_compile(m, example_x=x, example_y=y)
+                        except Exception as e:
+                            print(
+                                f"{tag}: soft-skip maybe_compile "
+                                f"{type(e).__name__}: {e}"
+                            )
+                            rows.append((tag, None, "soft-skip compile"))
+                            continue
+                        if not _is_dynamo_compiled(m):
+                            print(
+                                f"{tag}: soft-skip (fell back to eager — "
+                                "inductor/probe unavailable)"
+                            )
+                            rows.append((tag, None, "soft-skip eager-fallback"))
+                            continue
+                    else:
+                        os.environ["BDH_COMPILE"] = "0"
+                        tr.USE_COMPILE = False
+
+                    opt = torch.optim.AdamW(
+                        m.parameters(),
+                        lr=tr.LEARNING_RATE,
+                        weight_decay=tr.WEIGHT_DECAY,
+                        fused=fused_ok,
+                    )
+
+                    def step():
+                        return tr.train_step(m, opt, x, y)
+
+                    try:
+                        # Shorter reps for matrix (8 cells); warm inductor once.
+                        warm = 2 if compile_on else 2
+                        reps = 8 if compile_on else 10
+                        med = timed(step, warmup=warm, reps=reps)
+                    except Exception as e:
+                        print(
+                            f"{tag}: soft-skip train_step "
+                            f"{type(e).__name__}: {e}"
+                        )
+                        rows.append((tag, None, f"soft-skip step:{type(e).__name__}"))
+                        continue
+
+                    ms = med * 1000.0
+                    print(f"{tag}: median {ms:.2f} ms")
+                    rows.append((tag, ms, "ok"))
+    finally:
+        _restore_env()
+
+    # Compact table for OPT_NOTES copy-paste
+    print("--- matrix summary (median ms; soft-skip = —) ---")
+    print(f"{'COMPILE':>8} {'IMPL':>8} {'AUTOGRAD':>8} {'median_ms':>12} {'status':>18}")
+    for tag, ms, status in rows:
+        # tag = "COMPILE=X IMPL=Y AUTOGRAD=Z"
+        parts = dict(p.split("=", 1) for p in tag.split())
+        med_s = f"{ms:.2f}" if ms is not None else "—"
+        print(
+            f"{parts['COMPILE']:>8} {parts['IMPL']:>8} {parts['AUTOGRAD']:>8} "
+            f"{med_s:>12} {status:>18}"
+        )
+    if device.type != "cuda":
+        print(
+            "honest: CPU inductor medians only — no CUDA-graph / GPU claim. "
+            "tril(diagonal=-1) preserved; defaults still COMPILE=0 / IMPL=eager / "
+            "AUTOGRAD off."
+        )
+
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = _cfg()
@@ -270,6 +400,16 @@ def main():
         bench_compile_vs_eager(cfg, device, fused_ok)
     else:
         print("skip compile bench (set BDH_BENCH_COMPILE=1 to enable; default is on)")
+
+    # COMPILE × blocked × AUTOGRAD matrix (opt/compile-blocked). Default on;
+    # opt out with BDH_BENCH_COMPILE_BLOCKED=0.
+    if os.environ.get("BDH_BENCH_COMPILE_BLOCKED", "1") in ("1", "true", "True"):
+        bench_compile_blocked_matrix(cfg, device, fused_ok)
+    else:
+        print(
+            "skip compile×blocked matrix "
+            "(set BDH_BENCH_COMPILE_BLOCKED=1 to enable; default is on)"
+        )
 
     print(
         "Note: CUDA graphs / reduce-overhead need a GPU; see train_fast.py + OPT_BACKLOG."
