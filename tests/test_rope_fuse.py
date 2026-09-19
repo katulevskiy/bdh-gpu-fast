@@ -309,6 +309,20 @@ def test_fused_backward_matches_eager():
     assert torch.equal(ve.grad, vf.grad)
 
 
+def test_fused_backward_matches_eager_for_arbitrary_upstream_gradient():
+    """Fused T>1 backward preserves pair-specific upstream gradients."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=131)
+    ve = v.detach().requires_grad_(True)
+    vf = v.detach().requires_grad_(True)
+    ye = eager_rope_rotate(ve, cos, sin)
+    yf = fused_rope_rotate_pytorch(vf, cos, sin)
+    torch.manual_seed(132)
+    grad = torch.randn_like(ye)
+    ye.backward(grad)
+    yf.backward(grad)
+    assert torch.equal(ve.grad, vf.grad)
+
+
 def test_half_dtype_cast_path_matches():
     """fp32 cis + fp16 v: cast-then-add rounding matches eager."""
     cfg = _small_cfg()
