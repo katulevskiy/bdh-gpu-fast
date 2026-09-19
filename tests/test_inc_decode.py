@@ -390,6 +390,32 @@ def test_blocked_decode_no_expand_broadcast_v():
     assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_decode_gemm_raw_score_v_for_packed_v_layouts(impl, v_heads):
+    """Packed shared/per-head V keeps decode as raw score-times-V."""
+    B, H, S, N, D, capacity = 2, 3, 2, 2, 2, 5
+    Q = torch.tensor(
+        [
+            [[[1.0, 2.0]], [[2.0, -1.0]], [[-1.0, 1.0]]],
+            [[[3.0, 1.0]], [[-2.0, 2.0]], [[1.0, -3.0]]],
+        ]
+    )
+    k_buf = torch.arange(B * H * capacity * N, dtype=Q.dtype).reshape(
+        B, H, capacity, N
+    )
+    v_buf = torch.arange(B * v_heads * capacity * D, dtype=Q.dtype).reshape(
+        B, v_heads, capacity, D
+    )
+    K = k_buf.narrow(2, 0, S)
+    V = v_buf.narrow(2, 0, S)
+
+    expected = (Q @ K.transpose(-2, -1)) @ V
+    got = bdh_attn_decode(Q, K, V, impl=impl)
+
+    assert torch.equal(got, expected)
+
+
 @pytest.mark.parametrize("S", [1, 7, 64, 257])
 def test_long_past_tiled_decode_vs_eager_last_row(S):
     """Long packed past: blocked/triton decode ≡ eager tril(-1) last row."""
