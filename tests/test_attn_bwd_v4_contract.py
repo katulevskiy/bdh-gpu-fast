@@ -205,6 +205,40 @@ def test_half_dtypes_preserve_strict_tril_backward_contract(impl, dtype):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_noncontiguous_inputs_preserve_strict_tril_backward_contract(impl):
+    """Analytic backward must preserve the contract for strided input views."""
+    generator = torch.Generator().manual_seed(2032)
+
+    def _strided(shape):
+        padded = torch.randn(
+            *shape[:-1],
+            shape[-1] * 2,
+            generator=generator,
+            dtype=torch.float64,
+        )
+        return padded[..., ::2].detach().requires_grad_(True)
+
+    Q = _strided((2, 3, 4, 3))
+    K = _strided((2, 3, 4, 3))
+    V = _strided((2, 1, 4, 2))
+    dO = torch.randn(2, 3, 4, 2, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().contiguous().requires_grad_(True)
+    K_ref = K.detach().contiguous().requires_grad_(True)
+    V_ref = V.detach().contiguous().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert not Q.is_contiguous() and not K.is_contiguous() and not V.is_contiguous()
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(K.grad, K_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 def test_backward_preserves_strict_past_at_default_tile_boundary(impl):
     """A query at the first row after the 64-row tile still excludes self/future."""
     generator = torch.Generator().manual_seed(2031)
