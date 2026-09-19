@@ -418,6 +418,38 @@ def test_dataloader_cpu_h2d_workers_keep_pin_memory_off(tr, monkeypatch):
     assert torch.equal(x[:, 1:], y[:, :-1])
 
 
+def test_dataloader_cpu_h2d_workers_preserve_identity(tr, monkeypatch):
+    """CPU worker batches stay identity-only through the H2D helper."""
+    def fail_cuda_probe():
+        pytest.fail("CPU DataLoader workers must not query CUDA availability")
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("CPU DataLoader workers must not construct CUDA objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "is_available", fail_cuda_probe)
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    monkeypatch.setattr(tr, "NUM_WORKERS", 2)
+    original_to_device = tr._to_train_device
+    calls = {"count": 0}
+
+    def checked_to_device(x, y):
+        out = original_to_device(x, y)
+        calls["count"] += 1
+        assert out[0] is x and out[1] is y
+        return out
+
+    monkeypatch.setattr(tr, "_to_train_device", checked_to_device)
+    src = tr.DataLoaderBatchSource("train")
+    try:
+        x, y = src.next()
+        assert calls["count"] == 1
+        assert x.device.type == "cpu" and y.device.type == "cpu"
+        assert x.is_contiguous() and y.is_contiguous()
+    finally:
+        del src
+
+
 def test_dataloader_persistent_workers(tr, monkeypatch):
     monkeypatch.setattr(tr, "USE_DATALOADER", True)
     monkeypatch.setattr(tr, "NUM_WORKERS", 2)
