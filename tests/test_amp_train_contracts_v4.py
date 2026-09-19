@@ -184,6 +184,24 @@ def test_amp_forward_only_switch_is_explicit(monkeypatch, amp_name):
 
 
 @pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [(None, False), ("0", False), ("false", False), ("1", True), ("true", True), ("True", True)],
+)
+def test_amp_forward_only_env_gate_is_explicit(monkeypatch, env_value, expected):
+    """The env opt-in selects logits-only AMP without changing CPU safety."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        mp.setattr(tr, "cpu_bf16_available", lambda: True)
+        if env_value is None:
+            mp.delenv("BDH_AMP_FORWARD_ONLY", raising=False)
+        else:
+            mp.setenv("BDH_AMP_FORWARD_ONLY", env_value)
+        tr.configure_amp("bfloat16", forward_only=None)
+        assert tr.dtype == "bfloat16"
+        assert tr._amp_forward_only is expected
+
+
+@pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
         ("float32", "cpu", False, False),
