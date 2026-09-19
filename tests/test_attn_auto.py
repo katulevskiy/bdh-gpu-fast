@@ -198,6 +198,43 @@ def test_cold_path_auto_long_t(monkeypatch):
     assert torch.allclose(out, blocked_tril_attn(Q, Q, V), rtol=1e-5, atol=1e-5)
 
 
+def test_auto_enabled_independent_cold_gate_preserves_parity(monkeypatch):
+    """AUTO may switch cold earlier without moving the decode gate."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "512")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "8")
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump_caches()
+    g = torch.Generator().manual_seed(23)
+    q = torch.randn(1, 2, 9, 8, generator=g)
+    v = torch.randn(1, 1, 9, 12, generator=g)
+
+    got = bdh_attn(q, q, v)
+    from kernels.attention import eager_tril_attn
+
+    assert resolve_cold_impl(9) in ("blocked", "triton")
+    assert resolve_decode_impl(9) == "eager"
+    assert torch.allclose(got, eager_tril_attn(q, q, v), rtol=1e-5, atol=1e-5)
+
+
+def test_auto_off_cold_path_stays_eager(monkeypatch):
+    """AUTO off keeps the default cold implementation eager at long T."""
+    monkeypatch.delenv("BDH_ATTN_AUTO", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump_caches()
+    g = torch.Generator().manual_seed(24)
+    q = torch.randn(1, 2, 32, 8, generator=g)
+    v = torch.randn(1, 1, 32, 12, generator=g)
+
+    got = bdh_attn(q, q, v)
+    from kernels.attention import eager_tril_attn
+
+    assert resolve_cold_impl(32) == "eager"
+    assert torch.equal(got, eager_tril_attn(q, q, v))
+
+
 def test_attention_module_auto_decode(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)

@@ -5666,3 +5666,71 @@ runner, so no AMP speedup or Tensor Core claim is made. Defaults remain AMP off
 - No attention math, compile, or optimizer-default changes.
 - No GPU claims from CPU medians; CUDA validation remains open.
 - No PRs to `pathwaycom/*`; private repo only.
+## opt/auto-thr-v2 — strict cold/decode gates and A/B harness (2026-09-19)
+
+**Branch:** `opt/auto-thr-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `c6c8dfd` (`main`, #118 docs-v27). No `pathwaycom/*` and no public PR.
+
+### Audit / deepen
+
+The AUTO audit keeps the safety contract from #77 and makes the two length
+checks explicit in one helper:
+
+```text
+AUTO off:                         eager cold + eager T=1 decode
+AUTO on + IMPL=eager:
+  decode:                         past_len > BDH_ATTN_AUTO_THRESHOLD
+  cold/prefill:                   T > BDH_ATTN_AUTO_COLD_THRESHOLD
+  unset COLD_THRESHOLD:            mirrors AUTO_THRESHOLD
+  equality or shorter length:     eager
+IMPL != eager:                    explicit backend is never overridden
+```
+
+`BDH_ATTN_AUTO` remains opt-in and `BDH_ATTN_IMPL=eager` remains the default.
+The long-path preference is Triton only when CUDA+Triton is available, otherwise
+blocked; the strict gate itself is shared by both resolvers, while the cold
+threshold may be lowered independently for peak-score-memory experiments.
+Attention math is unchanged: raw scores × strict `tril(diagonal=-1)`.
+
+### Harness polish
+
+`benchmarks/bench_generate.py --mode auto-ab` now accepts
+`--auto-cold-threshold` (default: mirror `--auto-threshold`) and reports both
+effective gates at every prompt. It checks the cold and decode resolver results
+independently, retains AUTO0/AUTO1 token parity and `aten::cat == 0`, and marks
+a decode gate crossed during newly generated tokens. This avoids treating a
+cold-only override as if it also moved the decode crossover.
+
+Example short A/B smoke (CPU wall only):
+
+```bash
+OMP_NUM_THREADS=2 python benchmarks/bench_generate.py \
+  --mode auto-ab --prompts 16,40 --new 2 --layers 1 --d 32 \
+  --heads 2 --mlp-mult 4 --warmup 0 --iters 1 \
+  --auto-threshold 32 --auto-cold-threshold 8
+```
+
+The smoke completed on CPU with AUTO0/AUTO1 token parity and `aten::cat=0`
+for both prompts. At `S=16`, AUTO selected `cold=blocked, decode=eager`; at
+`S=40`, it selected `cold=blocked, decode=blocked`, confirming the independent
+gates. The printed medians are local CPU wall timings only.
+
+Do not infer GPU/kernel wins from CPU timings. Re-tune thresholds only with
+actual target-device measurements; no GPU was available for this work.
+
+### Tests
+
+```bash
+pytest -q tests/test_attn_auto.py tests/test_prefill_blocked.py tests/test_attention_mask.py
+```
+
+Coverage includes AUTO-enabled cold parity with an independent cold gate,
+AUTO-disabled eager cold parity, decode parity, strict threshold boundaries,
+explicit backend non-override, invalid env values, and the default eager
+contract. No GPU claims are made.
+
+### Non-goals
+
+- No default `BDH_ATTN_AUTO=1` and no change to the eager default.
+- No attention mask, score scaling, softmax, or cache layout changes.
+- No GPU claims, no public PR, and no PRs to `pathwaycom/*`.
