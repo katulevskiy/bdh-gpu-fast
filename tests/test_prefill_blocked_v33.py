@@ -49,3 +49,28 @@ def test_cpu_triton_cold_fallback_backward_matches_eager(value_heads):
     for got_grad, ref_grad in zip(got_grads, ref_grads):
         assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_triton_cold_fallback_preserves_padded_views(value_heads):
+    """CPU fallback keeps parity through non-contiguous Q/K/V feature views."""
+    B, H, T, N, D = 2, 2, 257, 3, 2
+    g = torch.Generator().manual_seed(421 + value_heads)
+    Q_storage = torch.randn(B, H, T, N + 1, dtype=torch.float64, generator=g)
+    K_storage = torch.randn(B, H, T, N + 1, dtype=torch.float64, generator=g)
+    V_storage = torch.randn(
+        B, value_heads, T, D + 1, dtype=torch.float64, generator=g
+    )
+    Q = Q_storage[..., :N]
+    K = K_storage[..., :N]
+    V = V_storage[..., :D]
+
+    assert not Q.is_contiguous()
+    assert not K.is_contiguous()
+    assert not V.is_contiguous()
+    expected = eager_tril_attn(Q, K, V)
+    got = triton_tril_attn(Q, K, V)
+
+    assert not Q.is_cuda
+    assert torch.allclose(got, expected, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
