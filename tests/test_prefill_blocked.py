@@ -157,6 +157,36 @@ def test_bdh_attn_long_prefill_keeps_exact_raw_score_contract(impl, value_heads)
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_bdh_attn_blocked_autograd_contract_matches_eager(impl, value_heads):
+    """Dispatcher-selected tiled backward matches raw-score eager gradients."""
+    B, H, T, N, D = 2, 2, 257, 3, 4
+    g = torch.Generator().manual_seed(307 + value_heads)
+    Q0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    K0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    V0 = torch.randn(B, value_heads, T, D, dtype=torch.float64, generator=g)
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q = Q0.clone().requires_grad_()
+        K = K0.clone().requires_grad_()
+        V = V0.clone().requires_grad_()
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad((out * weight).sum(), (Q, K, V))
+        return out, grads
+
+    ref, ref_grads = run(eager_tril_attn)
+    got, got_grads = run(
+        lambda Q, K, V: bdh_attn(Q, K, V, impl=impl, use_autograd_fn=True)
+    )
+
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 @pytest.mark.parametrize("T", [256, 512, 1024])
 def test_blocked_online_parity_long_t(T):
     Q, K, V = _qkv(T, seed=T)
