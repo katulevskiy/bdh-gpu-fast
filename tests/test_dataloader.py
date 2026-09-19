@@ -371,6 +371,8 @@ def test_batch_prefetcher_close_idempotent(tr):
     loader = tr.BatchPrefetcher("val", async_host=True)
     _ = loader.next()
     loader.close()
+    assert loader._stop.is_set()
+    assert loader._q is None
     loader.close()  # second close must not raise
 
 
