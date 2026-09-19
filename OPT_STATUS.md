@@ -219,6 +219,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **67** | `opt/docs-matrix-v7` | Refresh OPT matrix / backlog through #66; documented tip/profile metadata | Docs only | — |
 | **68** | `opt/profile-v6` | Re-profile tip after #64–#66; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #64–#66 off short default window | No GPU measurements; defaults unchanged |
 | **69** | `opt/rope-decode` | Deepen T=1 RoPE apply (`rope_rotate_t1`); table pair cache + last-pos cis reuse; keep `BDH_ROPE_IMPL` default eager | t1≡strided; CPU wall ~0.83× (no win claim) | GPU fused/Triton T=1 open |
+| **70** | `opt/dropout-compile` | Harden dropout=0 / eval identity for compile; FX/Dynamo tests; COMPILE=1 dropout A/B bench | Identity + 0 Dynamo breaks; CPU dropout A/B ~noise | GPU compile still P1 |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
