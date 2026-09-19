@@ -670,6 +670,67 @@ def test_forced_cpu_ext_registers_only_cpp_sources(tmp_path):
     assert "skipping CUDA extension build" not in output
 
 
+def test_forced_cpu_ext_has_no_cuda_compile_metadata(tmp_path):
+    """CPU-only mode must not pass CUDA metadata to the C++ extension."""
+    torch = tmp_path / "torch"
+    cpp_extension = torch / "utils" / "cpp_extension.py"
+    cpp_extension.parent.mkdir(parents=True)
+    (torch / "__init__.py").write_text(
+        "class _Cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available():\n"
+        "        return True\n"
+        "cuda = _Cuda()\n",
+        encoding="utf-8",
+    )
+    (torch / "utils" / "__init__.py").write_text("", encoding="utf-8")
+    cpp_extension.write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "from setuptools import Extension\n"
+        "class BuildExtension: ...\n"
+        "def CppExtension(*args, **kwargs):\n"
+        "    Path(os.environ['BDH_EXT_KWARGS']).write_text(\n"
+        "        repr(kwargs), encoding='utf-8'\n"
+        "    )\n"
+        "    return Extension(*args, **kwargs)\n"
+        "def CUDAExtension(*args, **kwargs):\n"
+        "    raise AssertionError('CUDAExtension should not be selected')\n",
+        encoding="utf-8",
+    )
+
+    nvcc = tmp_path / "cuda-home" / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    kwargs_trace = tmp_path / "kwargs.txt"
+    env = os.environ.copy()
+    pythonpath = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "BDH_FORCE_CPU_EXT": "1",
+            "BDH_EXT_KWARGS": str(kwargs_trace),
+            "CUDA_HOME": str(nvcc.parents[1]),
+            "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
+            "PATH": str(nvcc.parent),
+            "PYTHONPATH": pythonpath,
+        }
+    )
+
+    output = _setup_name(env)
+    kwargs = kwargs_trace.read_text(encoding="utf-8")
+
+    assert "extra_compile_args': {'cxx': ['-O3', '-std=c++20']}" in kwargs
+    assert "nvcc" not in kwargs
+    assert "WITH_CUDA" not in kwargs
+    assert "define_macros" not in kwargs
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "Building bdh_cuda_ext WITH CUDA" not in output
+    assert "skipping CUDA extension build" not in output
+
+
 def test_forced_cpu_ext_takes_precedence_over_cuda_flag():
     """The explicit CPU-only request wins when both native flags are set."""
     env = os.environ.copy()
