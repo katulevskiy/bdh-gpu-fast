@@ -232,3 +232,61 @@ def test_generate_disabled_under_compile():
     _probe_or_skip(compiled, _warm)
     out = compiled.generate(prompt, max_new_tokens=3, top_k=3)
     assert out.shape == (1, 7)
+
+
+def test_residual_ln_matches_module_ln_bitexact():
+    """Functional _residual_ln == ln(x + ln(y)) bit-exactly (affine-free)."""
+    cfg = _small_cfg(dropout=0.0)
+    m = bdh.BDH(cfg)
+    torch.manual_seed(7)
+    x = torch.randn(3, 11, cfg.n_embd)
+    y_mlp = torch.randn(3, 11, cfg.n_embd)
+    got = m._residual_ln(x, y_mlp)
+    ref = m.ln(x + m.ln(y_mlp))
+    assert torch.equal(got, ref)
+    # Single LN helper also matches module
+    assert torch.equal(m._ln(x), m.ln(x))
+
+
+def test_compile_residual_ln_path_matches_eager():
+    """Compiled forward (residual LN epilogue) matches eager at dropout=0.
+
+    Exercises BDH_COMPILE-style torch.compile on the LN(x+LN(yMLP)) path.
+    """
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(0)
+    eager = bdh.BDH(cfg).eval()
+    compiled_src = bdh.BDH(cfg).eval()
+    compiled_src.load_state_dict(eager.state_dict())
+    compiled = _compile_or_skip(compiled_src, mode="default", fullgraph=True)
+
+    torch.manual_seed(99)
+    x = torch.randint(0, cfg.vocab_size, (2, 14))
+    y = torch.randint(0, cfg.vocab_size, (2, 14))
+
+    def _run():
+        with torch.no_grad():
+            return compiled(x, y)
+
+    _probe_or_skip(compiled, _run)
+    with torch.no_grad():
+        le, lose = eager(x, y)
+        lc, losc = compiled(x, y)
+    assert torch.allclose(le, lc, rtol=0, atol=1e-5), (
+        f"logits maxdiff={(le - lc).abs().max().item()}"
+    )
+    assert torch.allclose(lose, losc, rtol=0, atol=1e-5)
+
+
+def test_cold_forward_no_dynamo_graph_breaks_dropout_zero():
+    """Cold train path (no cache) should be a single Dynamo graph at dropout=0."""
+    cfg = _small_cfg(dropout=0.0)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+    try:
+        expl = torch._dynamo.explain(m)(x, y)
+    except Exception as e:
+        pytest.skip(f"dynamo.explain unavailable: {type(e).__name__}: {e}")
+    assert expl.graph_break_count == 0, expl.break_reasons
+    assert expl.graph_count >= 1
