@@ -2336,3 +2336,57 @@ forward. GPU unmeasured — re-run `benchmarks/bench_attn_bwd.py` on A100/H100
 - No softmax / scale / SDPA
 - No PRs to `pathwaycom/*`
 - No fused CUDA/Triton backward kernel (analytic PyTorch M recompute)
+## opt/profile-v3 — re-profile after mlp-fuse #36 (2026-09-19)
+
+**Branch:** `opt/profile-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `b160469` (main after docs-matrix #34, gen-bench #35, mlp-fuse #36,
+cuda-ref-v2 #37, blocked-vec #38, attn-bwd-train #39). Profile windows also captured at `f50837d`
+(post-#36) and `c953c79` (post-#37); default **eager** path unchanged by #37/#38/#39 (autograd opt-in only).
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+Absolute ms are **profiler-inflated** (and noisy across short active windows).
+Rank by **% self CPU** and call counts. Chrome traces under `benchmarks/traces/`
+(gitignored). Compare to § opt/profile-v2 (tip `3d3ed2b`).
+
+### New % breakdown (self CPU)
+
+Representative midpoints across runs on this box (range when spread was large).
+Default `BDH_ATTN_IMPL=eager` throughout:
+
+| Mode | Top self-CPU ops | vs profile-v2 / post-#36 note |
+|------|------------------|-------------------------------|
+| Attention | `bmm` ~16–32%, `mul` ~23–31%, `copy_` ~14–27%, `sub`/`add` ~7–9%, `tril` ~1–9% | Still full T×T eager score×V. RoPE `mul`/`copy_` vs GEMM mix wobbles with short windows; no structural change since v2. |
+| Forward | `bmm` ~15–28%, `copy_` ~18–25%, `mm` ~10–18%, `mul` ~11–17%, `clamp_min_`/`relu_` ~1–8%, LN ~1–11%, `tril` ~0.4–3% | Same shape as v2 (GEMM + copies). **`aten::contiguous` = 0** (mlp-fuse #36 / weight-layout view path). CPU wall ~noise; not a % reshuffle. |
+| Generate | `bmm` ~14–44%, `copy_` ~6–11%, `mm` ~3–30%, LN ~2–12%, `einsum`/`mul`/`slice` smaller; Python `BDH.generate` often ~26% when attributed | **`aten::cat` = 0** still (cache-v2 #20). Decode GEMM + host `copy_` remain the tax; gen-bench #35 harness ready for GPU. |
+
+### Confirmed landed (profile-visible / structural)
+
+- **#36 mlp-fuse:** hot MLP path shows **no `aten::contiguous`**; `relu_` /
+  `clamp_min_` present; decoder merge stays view-based. Not a top-line % win on CPU.
+- **#38 blocked-vec:** vectorizes `blocked`/`online` tiles only — **default eager
+  profile unchanged** (still T×T `bmm`+`tril`). CPU blocked still < eager.
+- **#35 gen-bench / #34 docs-matrix / #37 cuda-ref-v2:** harness/docs/refs — no
+  eager-path profile delta.
+- **#20 cache-v2:** generate still **zero `aten::cat`**.
+- **#21 fuse-scorev:** default still `eager` → profile still shows `bmm`+`tril`.
+
+### Ranked follow-ups
+
+Unchanged priority vs backlog: **P0** = GPU measure fused score×V; **P1** = GPU
+compile train-step + generate/decode GEMM via `bench_generate.py` /
+`bench_gpu_attn.py --mode decode`. Strike mlp-fuse / gen-bench / docs-matrix /
+blocked-vec from “next” — already on main.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal / SDPA
+- No GPU speedup claims from these CPU % figures
+- No defaulting `BDH_ATTN_IMPL=blocked` on CPU

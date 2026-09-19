@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#34)
+# OPT status — landed work (#1–#39)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `62c226b` (`opt/blocked-vec` #38 on `main`; + `opt/attn-bwd-train`).
+Tip documented here: `b160469` (`opt/attn-bwd-train` #39 on `main`; re-profiled in `opt/profile-v3`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -98,7 +98,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 
 ---
 
-## Landed opts (#1–#34)
+## Landed opts (#1–#39)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -135,7 +135,12 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **31** | `opt/compile-bench` | Honest CPU `BDH_COMPILE=0` vs `1` train-step harness | Warm ~1.5× tiny cfg | GPU A/B = P1 |
 | **32** | `opt/sparse-probe` | Short-train ReLU density + CPU sparse crossover | Density↓ but sparse≪dense; **default OFF** | Sparse GPU speculative |
 | **33** | `opt/decode-gemm` | T=1 decode score×V polish (blocked/Triton/CUDA) | ≡ eager; ~parity wall | `--mode decode` GPU open |
-| **34** | `opt/attn-bwd-train` | Analytic `StrictTrilAttnFn` first-class train path (`BDH_ATTN_AUTOGRAD`); cold+multi-token wiring; `bench_attn_bwd.py`; hardened tests | Grad parity @ dropout=0; CPU tiny train_step ~1.4× (noise) | GPU train unmeasured |
+| **34** | `opt/docs-matrix` | `OPT_STATUS.md` (#1–#33) + README pointer | Docs only | Points GPU P0s |
+| **35** | `opt/gen-bench` | `benchmarks/bench_generate.py` CacheManager × attn impls | CPU ~noise; `aten::cat=0`; tokens≡eager | E2E GPU = P1 |
+| **36** | `opt/mlp-fuse` | Fused bias+ReLU + MLP merge without contiguous copies | Forward/generate **`aten::contiguous`=0**; wall ~noise | Epilogue hygiene for compile/GPU |
+| **37** | `opt/cuda-ref-v2` | Deepen CUDA attn CPU refs + build smoke | Soft-skip without ext | **P0** GPU measure still open |
+| **38** | `opt/blocked-vec` | Vectorized CPU blocked/online tril tiles | ~18–36× vs old blocked wall; still < eager | Default eager unchanged |
+| **39** | `opt/attn-bwd-train` | Analytic `StrictTrilAttnFn` first-class train path (`BDH_ATTN_AUTOGRAD`); cold+multi-token wiring; `bench_attn_bwd.py` | Grad parity @ dropout=0; CPU tiny train_step ~noise | GPU train unmeasured |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
