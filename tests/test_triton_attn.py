@@ -22,9 +22,16 @@ from kernels.attention import (  # noqa: E402
     blocked_tril_attn,
     eager_tril_attn,
     online_tril_attn,
+    pick_cold_block_size,
+    pick_triton_cold_tiles,
+    triton_decode_available,
     triton_tril_attn,
 )
-from kernels.attention_dispatch import bdh_attn, resolve_attn_impl  # noqa: E402
+from kernels.attention_dispatch import (  # noqa: E402
+    bdh_attn,
+    resolve_attn_impl,
+    resolve_cold_impl,
+)
 
 
 def _make_qkv(B=2, H=4, T=16, N=32, D=64, seed=0, device="cpu", dtype=torch.float32):
@@ -172,11 +179,11 @@ def test_as_contiguous_noop_when_already_contiguous():
 
 
 def test_triton_cold_fallback_matches_online_blocked():
-    """CPU triton_tril_attn must use online blocked (DEFAULT_BLOCK_COLD)."""
+    """CPU triton_tril_attn must use adaptive #75 online blocked."""
     Q, K, V = _make_qkv(T=37, N=32, D=64, seed=42)
     got = triton_tril_attn(Q, K, V)
     ref_eager = eager_tril_attn(Q, K, V)
-    ref_online = online_tril_attn(Q, K, V, block_size=DEFAULT_BLOCK_COLD)
+    ref_online = online_tril_attn(Q, K, V)  # adaptive pick_cold_block_size
     assert torch.allclose(got, ref_eager, rtol=1e-4, atol=1e-4)
     assert torch.equal(got, ref_online)
 
@@ -207,3 +214,74 @@ def test_triton_path_vs_eager_tril_minus_one(T):
 def test_default_remains_eager_after_triton_cold(monkeypatch):
     monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
     assert resolve_attn_impl() == "eager"
+
+
+# --- opt/triton-cold-v2: deepen long-T tiles (pair #75/#79) ---
+
+def test_pick_triton_cold_tiles_long_t_pairs_with_blocked():
+    """T≥256 grows to 128 like pick_cold_block_size (#75); short stays 64."""
+    assert pick_cold_block_size(128) == DEFAULT_BLOCK_COLD
+    assert pick_cold_block_size(256) == min(128, DEFAULT_BLOCK_COLD * 2)
+
+    bm, bn, bd, bk = pick_triton_cold_tiles(T=128, N=64, D=128)
+    assert bm == DEFAULT_BLOCK_COLD and bn == DEFAULT_BLOCK_COLD
+    assert (bm, bn, bd, bk) == _pick_triton_cold_tiles(128, 64, 128)
+
+    bm256, bn256, _, _ = pick_triton_cold_tiles(T=256, N=64, D=128)
+    assert bm256 == 128 and bn256 == 128
+
+    bm512, bn512, _, _ = pick_triton_cold_tiles(T=512, N=64, D=128)
+    assert bm512 == 128 and bn512 == 128
+
+    # Explicit overrides still power-of-2 capped
+    bm2, bn2, _, _ = pick_triton_cold_tiles(64, 32, 32, block_m=40, block_n=40)
+    assert bm2 == 64 and bn2 == 64
+
+
+@pytest.mark.parametrize("T", [256, 512])
+def test_triton_cold_long_t_fallback_equiv_blocked_eager(T):
+    """Long-T CPU triton→blocked adaptive ≡ eager tril(-1); no full T×T claim."""
+    Q, K, V = _make_qkv(B=1, H=2, T=T, N=16, D=32, seed=200 + T)
+    scores = (Q @ K.transpose(-2, -1)).tril(diagonal=-1)
+    expected = scores @ V
+    got = triton_tril_attn(Q, K, V)
+    blocked = blocked_tril_attn(Q, K, V)
+    assert torch.allclose(got, expected, rtol=1e-4, atol=1e-4)
+    assert torch.equal(got, blocked)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
+def test_triton_cold_auto_interaction_documented(monkeypatch):
+    """AUTO cold: long-T → triton if CUDA+Triton else blocked; short stays eager.
+
+    Documented in triton_tril_attn / OPT_NOTES; defaults unchanged (AUTO off).
+    """
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
+    assert resolve_cold_impl(1024) == "eager"  # AUTO off
+
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    # On this CPU box triton_decode_available() is False → blocked
+    assert not triton_decode_available() or torch.cuda.is_available()
+    want = "triton" if triton_decode_available() else "blocked"
+    assert resolve_cold_impl(1024) == want
+    assert resolve_cold_impl(128) == "eager"  # short stays eager
+
+    monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
+    assert resolve_cold_impl(1024) == "blocked"  # explicit never overridden
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not _HAS_TRITON,
+    reason="CUDA+Triton required (soft-skip; no GPU claims on CPU box)",
+)
+@pytest.mark.parametrize("T", [256, 512])
+def test_triton_cold_kernel_long_t_vs_eager_soft_skip(T):
+    """When CUDA+Triton available: fused cold long-T ≡ eager tril(-1)."""
+    Q, K, V = _make_qkv(B=1, H=2, T=T, N=32, D=64, seed=300 + T, device="cuda")
+    ref = eager_tril_attn(Q, K, V)
+    got = triton_tril_attn(Q, K, V)
+    assert torch.allclose(got, ref, rtol=1e-3, atol=1e-3)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0

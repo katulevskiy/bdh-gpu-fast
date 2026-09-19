@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#80)
+# OPT status — landed work (#1–#81+)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `b8067f5` (`#80` profile-v7 / `#79` cuda-cold-v2 / `#78` docs matrix through #77; `#77` auto-tune / `#76` docs / `#75` prefill-blocked / `#74` docs / `#73` attn-mem). Profile source: `ca5038f` (post-#75–#77; default eager unchanged by #69–#79 on short window; re-profiled in `opt/profile-v7`).
+Tip documented here: `3c4e663` (`#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged by #69–#79 on short window; re-profiled in `opt/profile-v7`). This PR deepens Triton cold tiles (`opt/triton-cold-v2`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -182,7 +182,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **22** | `opt/compile-harden` | Train probe, graph-break docs, CPU inductor parity | Compile↔eager @ dropout=0 | CUDA graphs unmeasured |
 | **23** | `opt/profile-v2` | Re-profile tip; refresh backlog post-#19–#22 | Docs only | Points GPU P0s |
 | **24** | `opt/bf16-train` | Opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA | CPU AMP smoke | Train bench open |
-| **25** | `opt/triton-cold` | Better cold Triton tiles + less staging | →blocked on CPU | **P0** GPU validate |
+| **25** | `opt/triton-cold` | Better cold Triton tiles + less staging; deepened by triton-cold-v2 | →blocked on CPU | **P0** GPU validate |
 | **26** | `opt/gpu-bench` | `benchmarks/bench_gpu_attn.py` + backlog runbook | Clean skip if no CUDA | Harness ready |
 | **27** | `opt/cuda-cold` | Tiled online cold CUDA tril score×V (no global `T×T`); deepened by cuda-cold-v2 | Ref path | **P0** GPU measure |
 | **28** | `opt/decode-copy` | `CacheManager.reserve` + in-place RoPE; fewer `copy_` | `copy_` calls cut ~2× | Remaining: decode GEMM |
@@ -238,6 +238,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **78** | `opt/docs-matrix-v11` | Refresh optimization matrix through #77 | Docs only | — |
 | **79** | `opt/cuda-cold-v2` | Deepen CUDA cold tiles (adaptive TILE_M/N long-T; pair #75); CPU refs ≡ blocked/eager | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
 | **80** | `opt/profile-v7` | Re-profile tip after #75–#77 (+ #79 on tip); refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #69–#79 off short default window | No GPU measurements; defaults unchanged |
+| **81** | docs align (#80 tip) | Align optimization docs with #80 tip | Docs only | — |
+| **82** | `opt/triton-cold-v2` | Deepen Triton cold tiles (adaptive BLOCK_M/N @T≥256; pair #75/#79); CPU→blocked adaptive; AUTO docs | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

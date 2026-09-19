@@ -68,11 +68,14 @@ def _pick_triton_cold_tiles(
     block_m: int | None = None,
     block_n: int | None = None,
 ) -> tuple[int, int, int, int]:
-    """Power-of-2 Triton tiles for cold strict-tril, aligned with online blocked.
+    """Power-of-2 Triton tiles for cold strict-tril, aligned with #75 blocked.
 
     Prefers ``DEFAULT_BLOCK_COLD``-sized query/key tiles (larger than the old
-    fixed 32×32) so each program covers more of the lower triangle. Caps keep
-    register pressure bounded; ``BLOCK_D``/``BLOCK_K`` track head dims.
+    fixed 32×32). For ``T >= 256`` grow to ``min(128, 2*DEFAULT_BLOCK_COLD)``
+    — same threshold as ``pick_cold_block_size`` / ``#75`` / ``#79`` CUDA cold
+    CPU refs — so long prefill needs fewer programs while peak scores stay
+    ≪ ``T×T``. Caps keep register pressure bounded; ``BLOCK_D``/``BLOCK_K``
+    track head dims.
     """
     def _p2_cap(x: int, lo: int, hi: int) -> int:
         x = max(lo, min(int(x), hi))
@@ -82,14 +85,14 @@ def _pick_triton_cold_tiles(
             p <<= 1
         return min(p, hi)
 
-    # Default query/key tile ~ online blocked BS (64), grow slightly for long T.
+    # Mirror pick_cold_block_size (#75): BS=64 short/mid; grow at T>=256.
     if block_m is None:
-        want_m = DEFAULT_BLOCK_COLD if T <= 256 else min(128, DEFAULT_BLOCK_COLD * 2)
+        want_m = pick_cold_block_size(T)
         block_m = _p2_cap(min(T, want_m) if T > 0 else want_m, 16, 128)
     else:
         block_m = _p2_cap(block_m, 16, 128)
     if block_n is None:
-        want_n = DEFAULT_BLOCK_COLD if T <= 256 else min(128, DEFAULT_BLOCK_COLD * 2)
+        want_n = pick_cold_block_size(T)
         block_n = _p2_cap(min(max(T, 1), want_n), 16, 128)
     else:
         block_n = _p2_cap(block_n, 16, 128)
@@ -97,6 +100,24 @@ def _pick_triton_cold_tiles(
     block_d = _p2_cap(D if D > 0 else 1, 16, 64)
     block_k = _p2_cap(N if N > 0 else 1, 16, 64)
     return block_m, block_n, block_d, block_k
+
+
+def pick_triton_cold_tiles(
+    T: int,
+    N: int = 64,
+    D: int = 128,
+    *,
+    block_m: int | None = None,
+    block_n: int | None = None,
+) -> tuple[int, int, int, int]:
+    """Public cold Triton tile picker (pair ``#75`` / ``#79``).
+
+    Returns ``(BLOCK_M, BLOCK_N, BLOCK_D, BLOCK_K)``. Same adaptive long-T
+    policy as ``_pick_triton_cold_tiles`` / ``pick_cold_block_size``.
+    """
+    return _pick_triton_cold_tiles(
+        T, N, D, block_m=block_m, block_n=block_n
+    )
 
 
 def _pick_tile_size(
@@ -497,8 +518,9 @@ if _HAS_TRITON:
 
         Grid: (cdiv(T, BLOCK_M), B * H)
 
-        Host pairs this with larger power-of-2 tiles and optional V broadcast
-        (``V_BROADCAST``: values indexed by ``bh // H``, staging ``B×T×D`` only).
+        Host pairs this with adaptive long-T power-of-2 tiles (``#75`` /
+        ``pick_triton_cold_tiles``) and optional V broadcast (``V_BROADCAST``:
+        values indexed by ``bh // H``, staging ``B×T×D`` only).
         """
         pid_m = tl.program_id(0)
         bh = tl.program_id(1)
@@ -579,15 +601,22 @@ def triton_tril_attn(
 ) -> torch.Tensor:
     """Triton fused strict-tril attention (cold / full T). Requires CUDA.
 
-    Falls back to ``blocked_tril_attn`` (online fused, ``DEFAULT_BLOCK_COLD``)
-    when Triton cannot run — same helpers as ``BDH_ATTN_IMPL=blocked``.
+    Falls back to ``blocked_tril_attn`` (adaptive ``#75`` cold BS via
+    ``pick_cold_block_size``) when Triton cannot run — same helpers as
+    ``BDH_ATTN_IMPL=blocked``. On CPU-only boxes this is the exercised path.
 
     Host staging: Q/K contiguous only if needed; V head-broadcast stages
     ``(B,T,D)`` rather than materializing ``(B,H,T,D)``. Tiles from
-    ``_pick_triton_cold_tiles`` (aligned with online blocked BS=64).
+    ``pick_triton_cold_tiles`` (aligned with ``#75`` / ``#79`` long-T deepen).
+
+    ``BDH_ATTN_AUTO`` interaction (unchanged by this deepen): with AUTO on and
+    base eager, ``resolve_cold_impl(T)`` switches long-T cold to **triton** when
+    ``triton_decode_available()`` else **blocked**; short T stays eager;
+    explicit ``IMPL`` never overridden. Default AUTO off / IMPL eager.
     """
     if not _can_use_triton(Q):
-        return blocked_tril_attn(Q, K, V, block_size=DEFAULT_BLOCK_COLD)
+        # Adaptive #75 cold BS (None → pick_cold_block_size); never full T×T.
+        return blocked_tril_attn(Q, K, V)
 
     B, H, T, N = Q.shape
     D = V.shape[-1]

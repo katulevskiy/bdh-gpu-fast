@@ -4404,3 +4404,77 @@ on main — strike from “next.”
 - No softmax / diagonal / SDPA
 - No GPU speedup claims from these CPU % figures
 - No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1` on CPU
+
+## opt/triton-cold-v2 — deepen Triton cold tiles (2026-09-19)
+
+**Branch:** `opt/triton-cold-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `3c4e663` (`#81` docs align with #80 tip; after `#80` profile-v7 / `#79` cuda-cold-v2 / `#75` prefill-blocked).
+
+### Goal
+
+Pair with `#75` blocked cold/prefill and `#79` CUDA cold-v2: deepen **Triton**
+cold/prefill tiles for long T — adaptive `BLOCK_M`/`BLOCK_N` via
+`pick_triton_cold_tiles` (64→128 at `T≥256`, same gate as
+`pick_cold_block_size`), CPU→blocked adaptive fallback (no fixed BS=64),
+parity docs + AUTO interaction. **No GPU on this box** — scaffolds +
+CPU→blocked fallback + soft-skip CUDA kernel tests. Hard constraints:
+`tril(diagonal=-1)`, `aten::cat=0`, **default eager** / AUTO off unchanged.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `pick_triton_cold_tiles` public; `_pick_triton_cold_tiles` uses `pick_cold_block_size` (grow @`T≥256`); `triton_tril_attn` CPU → `blocked_tril_attn()` adaptive; AUTO interaction documented on cold path |
+| `kernels/__init__.py` / README | Export picker; note pair #75/#79 |
+| `tests/test_triton_attn.py` | Long-T picker ≡ #75 BS; T∈{256,512} fallback ≡ blocked/eager; AUTO cold docs; soft-skip CUDA long-T kernel |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — unchanged
+export BDH_ATTN_IMPL=triton    # cold adaptive tiles on CUDA; CPU→blocked #75
+export BDH_ATTN_AUTO=1         # long-T cold → triton (CUDA+Triton) else blocked
+```
+
+### BDH_ATTN_AUTO interaction (documented)
+
+```text
+cold / prefill (resolve_cold_impl):
+  AUTO off or T ≤ cold_thr → BDH_ATTN_IMPL (default eager)
+  AUTO on, IMPL=eager, T > cold_thr:
+    triton  if triton_decode_available()   # CUDA + Triton
+    blocked otherwise                      # #75 adaptive cold
+  explicit non-eager IMPL never overridden
+
+Decode AUTO unchanged (same thr / prefer triton|blocked).
+```
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K.T).tril(diagonal=-1) @ V   # no softmax, no 1/√d, diagonal excluded
+# peak scores ≪ T×T (tile / oneshot budget); aten::cat generate = 0
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_triton_attn.py tests/test_prefill_blocked.py \
+  tests/test_attn_auto.py tests/test_fuse_scorev.py -q
+# picker/long-T CPU→blocked ≡ eager; AUTO docs; CUDA soft-skip; default eager
+```
+
+### Honest limits (no GPU claims)
+
+- **No GPU on this box** — cold Triton launch path is in-tree (adaptive
+  BLOCK_M/N) but **unexecuted** here; CPU exercises adaptive blocked fallback
+  matching `#75` / eager.
+- Do **not** claim GPU wall wins from CPU medians. Measure later:
+  `bench_gpu_attn.py --mode cold` / `bench_triton_attn.py` with
+  `BDH_ATTN_IMPL=triton` on A100/H100.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager` or AUTO-off behavior
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / scale / SDPA
+- No fake GPU speedups from CPU medians
