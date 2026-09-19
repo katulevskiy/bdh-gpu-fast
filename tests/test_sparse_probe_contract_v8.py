@@ -310,3 +310,20 @@ def test_enforced_guardrail_honors_explicit_skip_crossover(monkeypatch, capsys):
     assert "density_guardrail=pass" in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=0 reason=probe_complete" in captured.out
+
+def test_explicit_skips_complete_without_probe_work(monkeypatch, capsys):
+    """Opted-in all-skip mode must remain a CPU-safe successful no-op."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+
+    def unexpected_work(*_, **__):
+        raise AssertionError("explicit skips must not run probe work")
+
+    monkeypatch.setattr(probe, "short_train_density", unexpected_work)
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_work)
+    assert probe.main(["--skip-train", "--skip-crossover"]) == probe.EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "short train density" not in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "density_guardrail" not in captured.out
+    assert "exit_code=0 reason=probe_complete" in captured.out
