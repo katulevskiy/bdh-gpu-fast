@@ -7300,3 +7300,31 @@ attention `copy_`=2/call, forward `copy_`=12/call, and generate
 - Attention remains raw scores × strict `tril(diagonal=-1)`.
 - No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
   claimed; real GPU measurement remains open.
+
+
+## opt/cache-bench-v4 — cover partial final-page accounting (2026-09-19)
+
+**Branch:** `opt/cache-bench-v4` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `fecfba4` (`main`, #210).
+
+### Goal
+
+Deepen the CPU-only cache-page bench contract after #181 without changing
+`CacheManager`, page-growth policy, or `generate` defaults.
+
+### What changed
+
+- `tests/test_cache_pack.py`: exercise the linear A/B policy with a
+  non-page-aligned `max_seq` and require the benchmark's closed-form grow and
+  copy-byte accounting to match the actual tokenwise run. This covers the
+  partial final page that the divisible-size test matrix did not exercise.
+- No model, attention, cache, or default behavior changed.
+
+### CPU evidence
+
+```bash
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_cache_pack.py -q
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python benchmarks/bench_cache_page.py --smoke
+```
+
+The accounting is CPU-only; no GPU timing, memory, or speedup claim is made.

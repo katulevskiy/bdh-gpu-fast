@@ -295,6 +295,24 @@ def test_paged_capacity_matches_packed_footprint():
     assert cm.bytes_allocated == cm.capacity * elem_stride
 
 
+def test_linear_growth_analytic_matches_partial_final_page():
+    """The bench accounting covers a final page shorter than ``page_size``."""
+    from benchmarks.bench_cache_page import (
+        _analytic_linear_bytes,
+        _linear_next_capacity,
+        _run_policy,
+    )
+
+    cfg = _small_cfg()
+    page, max_seq = 8, 37  # five pages, with a partial final page
+    row = _run_policy(
+        cfg, max_seq, page, torch.device("cpu"), next_cap=_linear_next_capacity
+    )
+    predicted = _analytic_linear_bytes(int(row["elem_stride"]), page, max_seq)
+    assert (row["n_grows"], row["bytes_copied"]) == predicted
+    assert row["final_capacity"] == max_seq
+
+
 def test_stage_returns_contiguous_past_plus_new():
     cfg = _small_cfg()
     cm = CacheManager.from_config(cfg, 1, max_seq=32, device="cpu")
