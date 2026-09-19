@@ -2755,3 +2755,76 @@ biases are registered; unmeasured here.
 - No default `BDH_ATTN_IMPL` change
 - No softmax / diagonal inclusion / scale
 - No fake GPU speedups from CPU medians
+
+## opt/gen-sample — fuse lm_head+sample for T=1 decode (2026-09-19)
+
+**Branch:** `opt/gen-sample` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `6c36760` (main after #44 gen-host + #46 compile-blocked + #47 encoder-fuse).
+
+### Overlap with #44 `opt/gen-host`
+
+`opt/gen-host` already landed the Python/host tax cuts (RoPE table,
+`resolve_*` hoist, `inference_mode`, sampling constant hoist). This branch
+**does not** redo that work. Pivot: **fuse vocab proj + sample** on the T=1
+decode step only.
+
+### What changed
+
+1. **`BDH._lm_head_last_into(x, out)`** — last-token `mm`/`addmm` into a
+   preallocated fp32 `(B, V)` buffer (bit-identical to
+   `_vocab_logits(x)[:, -1, :].float()`).
+2. **`forward(..., logits_out=)`** — when `T==1`, writes via
+   `_lm_head_last_into` and returns the owned `(B, V)` buffer (no per-step
+   `(B, 1, V)` `F.linear` alloc; no unused `unsqueeze`).
+3. **`BDH._sample_from_logits`** — reused `probs_buf` (`softmax(..., out=)`);
+   optional **fused top-k**: `topk` → softmax/multinomial over **k** →
+   `gather` (distribution-equivalent; RNG differs vs mask/-inf when
+   `top_k` set). Default `top_k=None` keeps full-vocab multinomial →
+   **tokens-match** tip / baseline.
+4. **`generate`** — preallocates `logits_buf`/`probs_buf`; first sample may
+   use a view when fp32 + no scale/top-k (no extra `copy_`); decode steps
+   pass `logits_out=logits_buf`. Preserves `aten::cat=0`,
+   `tril(diagonal=-1)`, defaults unchanged.
+
+### Measured (this box, Europe/Podgorica, CPU-honest, `cuda=False`)
+
+Isolated subprocess tip `origin/main` `bdh.py` vs this branch — same weights,
+tokens match on default path:
+
+```text
+cfg layers=4 d=128 nh=4 prompt=16 new=32 temp=1.0 top_k=None  (default V=256)
+  TIP_MAIN median≈57.8 ms
+  FUSED    median≈59.9 ms
+  DELTA    ~noise / slight CPU regression on tiny V (allocator reuse)
+
+cfg layers=2 d=64 V=8192 prompt=16 new=24
+  top_k=None: TIP≈13.8 ms  FUSED≈14.2 ms  (~noise)
+  top_k=64:   TIP≈16.9 ms  FUSED≈11.0 ms  (~1.53×)  ← fused top-k win
+
+Harness: benchmarks/bench_generate.py --warmup 2 --iters 5 --impls eager
+  eager median≈60 ms  match_eager=yes  aten::cat=0
+```
+
+Profiler (default V=256, +32 decode steps): `aten::linear` **165→133** (−32
+decode vocab linears); `aten::cat=0` unchanged.
+
+**Claim carefully:** structural fuse is real (no per-step vocab `linear`
+alloc on decode; fused top-k helps large-V + `top_k`). Default small-V wall
+clock on this CPU box is **noise** — do not claim a big e2e generate speedup
+vs #44 without GPU / larger vocab.
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 311 passed, 9 skipped
+# tests/test_gen_sample.py — lm_head parity, logits_out, tokens vs tip-style,
+#   twin baseline, cat=0, top_k smoke
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No redoing gen-host hoist / RoPE table
+- No default `BDH_ATTN_IMPL` change / no tril math change
+- No re-introducing `aten::cat`
