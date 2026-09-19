@@ -287,6 +287,7 @@ def test_successful_backward_probe_returns_clean_wrapper(
     assert compile_kwargs == {"mode": "default"}
     assert out is wrapper
     assert wrapper.calls == 1
+    assert out.training is caller_training
     assert model.training is caller_training
     assert all(param.grad is None for param in model.parameters())
     assert "torch.compile enabled (mode=default, probe=train_bwd" in captured
