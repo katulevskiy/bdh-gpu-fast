@@ -109,6 +109,35 @@ def _pick_tile_size(S: int, Tq: int, block_size: int) -> int:
     return min(S, BS)
 
 
+def _two_gemm_decode(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+) -> torch.Tensor:
+    """``(Q @ K.mT) @ V`` — shared eager / small-tile decode GEMM.
+
+    Keeps broadcast ``V=(B,1,S,D)`` (no expand). For the hot ``Tq=1`` path with
+    head-matched ``V=(B,H,S,D)``, flattens to ``bmm`` over ``B*H`` so BLAS sees
+    dense ``(1,N)×(N,S)`` and ``(1,S)×(S,D)`` without a 4D batch broadcast.
+    """
+    B, H, Tq, N = Q.shape
+    S = K.size(2)
+    D = V.size(-1)
+    if S == 0:
+        return Q.new_zeros(B, H, Tq, D)
+
+    # Hot Tq=1 + per-head V: BH-flattened bmm (same math as 4D @).
+    if Tq == 1 and V.size(1) == H:
+        Qf = Q.reshape(B * H, 1, N)
+        Kf = K.reshape(B * H, S, N)
+        Vf = V.reshape(B * H, S, D)
+        scores = torch.bmm(Qf, Kf.transpose(1, 2))
+        return torch.bmm(scores, Vf).view(B, H, 1, D)
+
+    # Broadcast V or Tq>1: 4D matmul (broadcasts heads; no expand copy).
+    return (Q @ K.transpose(-2, -1)) @ V
+
+
 def _tiled_score_v(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -123,6 +152,7 @@ def _tiled_score_v(
 
     ``Vh`` may be ``(B, H, S, D)`` or broadcast ``(B, 1, S, D)`` — matmul
     broadcasts heads, so decode can skip an expand copy into ``(B, H, S, D)``.
+    Tile loop accumulates with ``out.add_`` (no ``out + x`` temporary).
     """
     B, H, Tq, _N = Q.shape
     S = K.size(2)
@@ -134,7 +164,7 @@ def _tiled_score_v(
     # Modest past / small score: single two-GEMM (same as eager decode).
     # Ephemeral ``(Tq × S)`` only — never ``(S+Tq)×(S+Tq)``.
     if S <= BS or Tq * S <= _SCORE_ELEMS_BUDGET:
-        return (Q @ K.transpose(-2, -1)) @ Vh
+        return _two_gemm_decode(Q, K, Vh)
 
     out = Q.new_zeros(B, H, Tq, D)
     for j0 in range(0, S, BS):
@@ -142,7 +172,7 @@ def _tiled_score_v(
         Kj = K[:, :, j0:j1, :]
         Vj = Vh[:, :, j0:j1, :]
         # Score tile discarded after ×V — peak ~ Tq×BS, not Tq×S.
-        out = out + (Q @ Kj.transpose(-2, -1)) @ Vj
+        out.add_(_two_gemm_decode(Q, Kj, Vj))
     return out
 
 
@@ -678,7 +708,7 @@ def _pick_triton_decode_tiles(
     *,
     block_n: int | None = None,
 ) -> tuple[int, int, int]:
-    """Power-of-2 past/Dk/Dv tiles for fused T=1 decode (aligned with cold caps)."""
+    """Power-of-2 past/Dk/Dv tiles for fused T=1 decode (decode-mm: up to 256)."""
     def _p2_cap(x: int, lo: int, hi: int) -> int:
         x = max(lo, min(int(x), hi))
         p = 1
@@ -687,11 +717,17 @@ def _pick_triton_decode_tiles(
         return min(p, hi)
 
     if block_n is None:
-        # Prefer ~64–128 past keys per inner trip for long packed caches.
-        want = 64 if S <= 256 else min(128, DEFAULT_BLOCK_DECODE)
-        block_n = _p2_cap(min(max(S, 1), want), 16, 128)
+        # Prefer larger past tiles on long packed caches (decode has no causal
+        # diagonal — every key is valid). Cap 256 for register pressure.
+        if S <= 128:
+            want = 64
+        elif S <= 512:
+            want = 128
+        else:
+            want = min(256, DEFAULT_BLOCK_DECODE)
+        block_n = _p2_cap(min(max(S, 1), want), 16, 256)
     else:
-        block_n = _p2_cap(block_n, 16, 128)
+        block_n = _p2_cap(block_n, 16, 256)
     block_d = _p2_cap(D if D > 0 else 1, 16, 64)
     block_k = _p2_cap(N if N > 0 else 1, 16, 64)
     return block_n, block_d, block_k
@@ -781,11 +817,9 @@ def eager_decode_attn(
     K: torch.Tensor,
     V: torch.Tensor,
 ) -> torch.Tensor:
-    """Reference decode: ``(Q @ K.mT) @ V`` (past-only; no self-attention)."""
-    B, H, Tq, _ = Q.shape
-    S = K.size(2)
-    D = V.size(-1)
-    if S == 0:
-        return Q.new_zeros(B, H, Tq, D)
-    # Broadcast V heads via matmul (no expand copy). Same math as expand view.
-    return (Q @ K.transpose(-2, -1)) @ V
+    """Reference decode: ``(Q @ K.mT) @ V`` (past-only; no self-attention).
+
+    Delegates to ``_two_gemm_decode`` (Tq=1 BH-bmm when V is per-head; else
+    4D matmul with broadcast-V — no expand).
+    """
+    return _two_gemm_decode(Q, K, V)

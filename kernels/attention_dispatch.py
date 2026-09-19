@@ -141,10 +141,10 @@ def bdh_attn_decode(
     Preserves tril(diagonal=-1): past slices exclude the new token, so the
     query never attends to itself.
 
-    - eager:   single ``(Q @ K.mT) @ V`` (reference)
-    - blocked: tiled over past (broadcast-V; shared ``_tiled_score_v``; larger default tile)
+    - eager:   ``_two_gemm_decode`` (Tq=1 BH-bmm when V per-head; else 4D @)
+    - blocked: tiled over past (broadcast-V; ``out.add_`` tiles; larger default tile)
     - triton:  fused decode + V_BROADCAST on CUDA; blocked fallback on CPU
-    - cuda:    ``kernels.cuda_attn.tril_decode`` (tiled CUDA ext if built, else ref)
+    - cuda:    ``tril_decode`` (Tq=1 + DECODE_TILE_N CUDA ext if built, else ref)
     """
     name = resolve_attn_impl(impl)
     if name == "eager":

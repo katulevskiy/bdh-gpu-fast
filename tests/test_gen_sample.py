@@ -45,6 +45,28 @@ def test_lm_head_last_into_matches_vocab_logits():
         assert torch.equal(ref, buf), f"T={T} maxdiff={(ref - buf).abs().max()}"
 
 
+
+
+def test_lm_head_last_into_b1_mv_matches_mm():
+    """B=1 uses mv/addmv; must match B>1 mm path / vocab logits."""
+    cfg = _small_cfg()
+    m = _model(cfg, seed=5)
+    x = torch.randn(1, 1, cfg.n_embd)
+    ref = m._vocab_logits(x)[:, -1, :].float()
+    buf = torch.empty(1, cfg.vocab_size, dtype=torch.float32)
+    m._lm_head_last_into(x, buf)
+    assert torch.allclose(ref, buf, rtol=1e-5, atol=1e-5)
+    # Tied path
+    cfg2 = _small_cfg()
+    cfg2.tie_weights = True
+    m2 = _model(cfg2, seed=6)
+    x2 = torch.randn(1, 3, cfg2.n_embd)
+    ref2 = m2._vocab_logits(x2)[:, -1, :].float()
+    buf2 = torch.empty(1, cfg2.vocab_size, dtype=torch.float32)
+    m2._lm_head_last_into(x2, buf2)
+    assert torch.allclose(ref2, buf2, rtol=1e-5, atol=1e-5)
+
+
 def test_forward_logits_out_t1_view():
     cfg = _small_cfg()
     m = _model(cfg)

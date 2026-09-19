@@ -279,13 +279,10 @@ class Attention(torch.nn.Module):
 
         if T == 1:
             # Hot decode: attend only to past (j < i). New token does not attend
-            # to itself. blocked/triton/cuda use decode vs packed KR/V slices
-            # (no full TxT); eager keeps the simple two-GEMM form.
-            if impl == "eager":
-                scores = QR @ past_kr.mT  # (B, nh, 1, S)
-                out = scores @ past_v
-            else:
-                out = bdh_attn_decode(QR, past_kr, past_v, impl=impl)
+            # to itself. All impls go through bdh_attn_decode (eager =
+            # _two_gemm_decode; blocked/triton/cuda = tiled / fused vs packed
+            # KR/V). Never materializes a full TxT score matrix.
+            out = bdh_attn_decode(QR, past_kr, past_v, impl=impl)
             return out, QR, V
 
         # Multi-token chunk with past (prefill continuation / speculative).
@@ -456,8 +453,9 @@ class BDH(nn.Module):
     def _lm_head_last_into(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
         """Write last-token logits into preallocated ``out`` ``(B, V)`` (fp32).
 
-        Hot path for T=1 decode: ``torch.mm`` / ``addmm`` with ``out=`` avoids a
-        fresh ``(B, 1, V)`` alloc from ``_vocab_logits`` each step. Math matches
+        Hot path for T=1 decode: ``torch.mm`` / ``addmm`` (``B>1``) or ``mv`` /
+        ``addmv`` (``B==1``) with ``out=`` avoids a fresh ``(B, 1, V)`` alloc
+        from ``_vocab_logits`` each step. Math matches
         ``_vocab_logits(x)[:, -1, :].float()``.
         """
         if x.dim() == 4:
@@ -471,28 +469,53 @@ class BDH(nn.Module):
         bias = self.lm_head_bias
         # out= GEMMs disallow requires_grad args; decode is inference_mode but
         # detach so the helper is safe if called outside that context.
+        h = h.detach()
+        B = h.size(0)
         if self.lm_head is None:
             # F.linear(h, embed.weight) = h @ weight.T + bias; weight (V, D).
             w = self.embed.weight.detach()
             if w.dtype != out.dtype:
                 w = w.to(dtype=out.dtype)
-            wt = w.transpose(0, 1)  # (D, V) view
-            h = h.detach()
-            if bias is not None:
-                torch.addmm(bias.detach().to(dtype=out.dtype), h, wt, out=out)
+            # B=1: mv/addmv into out[0] (same math as mm; fewer BLAS dims).
+            if B == 1:
+                if bias is not None:
+                    torch.addmv(
+                        bias.detach().to(dtype=out.dtype),
+                        w,
+                        h.squeeze(0),
+                        out=out.squeeze(0),
+                    )
+                else:
+                    torch.mv(w, h.squeeze(0), out=out.squeeze(0))
             else:
-                torch.mm(h, wt, out=out)
+                wt = w.transpose(0, 1)  # (D, V) view
+                if bias is not None:
+                    torch.addmm(bias.detach().to(dtype=out.dtype), h, wt, out=out)
+                else:
+                    torch.mm(h, wt, out=out)
         else:
             w = self.lm_head.detach()
             if not w.is_contiguous():
                 w = w.contiguous()
             if w.dtype != out.dtype:
                 w = w.to(dtype=out.dtype)
-            h = h.detach()
-            if bias is not None:
-                torch.addmm(bias.detach().to(dtype=out.dtype), h, w, out=out)
+            if B == 1:
+                # stored (D, V); logits = h @ w ≡ w.T @ h  (mv wants (V, D)).
+                wt = w.transpose(0, 1)  # (V, D) view
+                if bias is not None:
+                    torch.addmv(
+                        bias.detach().to(dtype=out.dtype),
+                        wt,
+                        h.squeeze(0),
+                        out=out.squeeze(0),
+                    )
+                else:
+                    torch.mv(wt, h.squeeze(0), out=out.squeeze(0))
             else:
-                torch.mm(h, w, out=out)
+                if bias is not None:
+                    torch.addmm(bias.detach().to(dtype=out.dtype), h, w, out=out)
+                else:
+                    torch.mm(h, w, out=out)
         return out
 
     @staticmethod

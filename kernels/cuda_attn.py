@@ -31,9 +31,10 @@ Optional native build (``csrc/``)::
 
 Cold CUDA kernel (``tril_score_v_cuda``) uses **tiled online** accumulation
 (shared-mem Q/K/V tiles; no global T×T scores). Decode is a separate
-packed-past tiled scaffold. Without the extension, training and tests still
-work via pure-PyTorch refs. Import of this module **never** raises if the
-native ext is missing — ``has_cuda_ext()`` is False and dispatch falls back.
+packed-past tiled scaffold with **larger past tiles** (``DECODE_TILE_N``)
+and a dedicated ``Tq=1`` kernel. Without the extension, training and tests
+still work via pure-PyTorch refs. Import of this module **never** raises if
+the native ext is missing — ``has_cuda_ext()`` is False and dispatch falls back.
 
 Wire-up: ``BDH_ATTN_IMPL=cuda`` → cold ``bdh_attn`` / decode ``bdh_attn_decode``.
 Default remains ``eager``.
@@ -48,9 +49,11 @@ from typing import Optional
 import torch
 
 # Match csrc/tril_attn_cuda.cu — CPU tiled refs mirror these for drop-in parity.
-CUDA_TILE_M = 16  # query rows per tile
-CUDA_TILE_N = 16  # key cols per online tile
+CUDA_TILE_M = 16  # query rows per tile (cold)
+CUDA_TILE_N = 16  # key cols per online tile (cold)
 CUDA_TILE_D = 32  # Dv columns (CUDA blockDim.x; CPU uses full Dv via matmul)
+# Decode past tiles can be larger (no causal diagonal — all keys valid).
+CUDA_DECODE_TILE_N = 32
 
 # Soft budget: below this, cold/decode refs prefer a single vectorized two-GEMM
 # (bit-identical to eager). Above it, use tiled online to avoid a full T×T /
@@ -245,9 +248,11 @@ def tril_decode_ref(
     if S == 0:
         return q.new_zeros(B, H, Tq, Dv)
 
-    # Modest past: one fused two-GEMM (same as eager_decode_attn).
+    # Modest past: one fused two-GEMM (same as eager_decode_attn / _two_gemm_decode).
     if Tq * S <= _SCORE_ELEMS_EAGER_OK:
-        return (q @ k_past.transpose(-2, -1)) @ v_past
+        from .attention import _two_gemm_decode
+
+        return _two_gemm_decode(q, k_past, v_past)
 
     return tril_decode_tiled_ref(q, k_past, v_past)
 
@@ -257,14 +262,18 @@ def tril_decode_tiled_ref(
     k_past: torch.Tensor,
     v_past: torch.Tensor,
     *,
-    tile_n: int = CUDA_TILE_N,
+    tile_n: int = CUDA_DECODE_TILE_N,
 ) -> torch.Tensor:
     """CPU mirror of the CUDA **tiled online** decode kernel (no Tq×S retained).
 
-    Tiles the past axis in chunks of ``tile_n`` (default 16 = CUDA TILE_N),
-    accumulating ``(Q @ K_tile.mT) @ V_tile`` — same structure as
-    ``tril_decode_tiled_kernel`` in ``csrc/tril_attn_cuda.cu``.
+    Tiles the past axis in chunks of ``tile_n`` (default
+    ``CUDA_DECODE_TILE_N`` = 32 — larger than cold ``TILE_N`` because decode
+    has no causal diagonal). Accumulates with ``out.add_`` via
+    ``_two_gemm_decode`` — same structure as ``tril_decode_tiled_kernel`` /
+    ``tril_decode_tq1_kernel`` in ``csrc/tril_attn_cuda.cu``.
     """
+    from .attention import _two_gemm_decode
+
     B, H, Tq, S, Dv = _check_decode_shapes(q, k_past, v_past)
     if S == 0:
         return q.new_zeros(B, H, Tq, Dv)
@@ -281,9 +290,7 @@ def tril_decode_tiled_ref(
 
     for j0 in range(0, S, TN):
         j1 = min(j0 + TN, S)
-        Kj = Kf[:, :, j0:j1, :]
-        Vj = Vf[:, :, j0:j1, :]
-        out = out + (Qf @ Kj.transpose(-2, -1)) @ Vj
+        out.add_(_two_gemm_decode(Qf, Kf[:, :, j0:j1, :], Vf[:, :, j0:j1, :]))
 
     return out.to(dtype=q.dtype)
 

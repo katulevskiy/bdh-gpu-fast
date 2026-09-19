@@ -32,17 +32,18 @@ export BDH_ATTN_IMPL=blocked
 ```
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
-T=1 decode against packed past KR/V uses `bdh_attn_decode` when
-`BDH_ATTN_IMPL` is `blocked` / `triton` / `cuda` (`cuda` → `tril_decode`).
-Blocked/triton decode share `_tiled_score_v` (broadcast-V, no expand);
-Triton decode uses `V_BROADCAST` staging on CUDA (blocked fallback on CPU);
-CUDA decode is tiled online vs packed KR/V. Default remains **eager**.
+T=1 decode against packed past KR/V uses `bdh_attn_decode` for **all**
+impls including eager (`_two_gemm_decode`). Blocked/triton share
+`_tiled_score_v` (broadcast-V, `out.add_` tiles); Triton decode uses
+`V_BROADCAST` on CUDA (blocked fallback on CPU); CUDA decode uses
+`DECODE_TILE_N` + a dedicated **Tq=1** kernel when the ext is built.
+Default remains **eager**.
 
 ## Modules
 
 | Path | Role |
 |------|------|
-| `attention.py` | cold tril + decode: `blocked_*` / `online_*`, `triton_*`, shared `_tiled_score_v` |
+| `attention.py` | cold tril + decode: `_two_gemm_decode`, `blocked_*` / `online_*`, `triton_*`, `_tiled_score_v` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`); dense M-recompute for eager, **tiled** analytic for blocked/online/triton/cuda (no full T×T) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |
