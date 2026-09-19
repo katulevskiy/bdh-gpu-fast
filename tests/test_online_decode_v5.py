@@ -507,3 +507,24 @@ def test_online_decode_empty_past_returns_typed_zeros_for_shared_and_per_head_v(
             assert torch.equal(got, expected), (
                 f"v_heads={V_past.size(1)} block_size={block_size} returned {got}"
             )
+
+
+def test_online_decode_preserves_strided_query_views():
+    """Tiled online decode accepts offset query views without mutating them."""
+    B, H, S, Tq, N, D = 2, 3, 257, 2, 4, 2
+    g = torch.Generator().manual_seed(2526)
+    Q_storage = torch.randn(B, H, Tq + 5, N, generator=g)
+    Q = Q_storage.narrow(2, 3, Tq)
+    K = torch.randn(B, H, S, N, generator=g)
+    V = torch.randn(B, 1, S, D, generator=g)
+    Q_before = Q.clone()
+
+    assert Q.stride() == (H * (Tq + 5) * N, (Tq + 5) * N, N, 1)
+    ref = eager_decode_attn(Q, K, V)
+    for block_size in (1, 64, 128):
+        got = online_decode_attn(Q, K, V, block_size=block_size)
+        assert got.shape == (B, H, Tq, D)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+            f"block_size={block_size} maxdiff={(got - ref).abs().max().item()}"
+        )
+        assert torch.equal(Q, Q_before)
