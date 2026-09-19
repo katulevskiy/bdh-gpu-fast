@@ -121,6 +121,30 @@ def test_cpu_amp_failure_preserves_full_previous_state(monkeypatch):
     assert tr._amp_forward_only is previous["forward_only"]
 
 
+def test_cpu_amp_failure_preserves_active_amp_state(monkeypatch):
+    """A failed CPU switch cannot discard an already active AMP context."""
+    if tr.device.type != "cpu":
+        pytest.skip("CPU-only backend failure contract")
+    _configure_or_cpu_skip("bfloat16")
+    previous = {
+        "dtype": tr.dtype,
+        "ptdtype": tr.ptdtype,
+        "ctx": tr.ctx,
+        "scaler": tr.scaler,
+        "use_scaler": tr._use_scaler,
+        "forward_only": tr._amp_forward_only,
+    }
+    monkeypatch.setattr(tr, "cpu_fp16_available", lambda: False)
+    with pytest.raises(RuntimeError, match="autocast is unavailable"):
+        tr.configure_amp("float16", forward_only=False)
+    assert tr.dtype == previous["dtype"]
+    assert tr.ptdtype is previous["ptdtype"]
+    assert tr.ctx is previous["ctx"]
+    assert tr.scaler is previous["scaler"]
+    assert tr._use_scaler is previous["use_scaler"]
+    assert tr._amp_forward_only is previous["forward_only"]
+
+
 @pytest.mark.parametrize(
     ("amp_name", "device_type", "cuda_available", "expected"),
     [
