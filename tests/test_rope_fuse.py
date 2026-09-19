@@ -713,6 +713,38 @@ def test_fused_paired_t1_strided_out_preserves_parity():
     )
 
 
+def test_fused_paired_t1_strided_pair_input_and_out_preserve_parity():
+    """Paired decode preserves parity with strided input and cache slots."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 5
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(292)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    sentinel = torch.tensor(-321.0)
+
+    input_backing = torch.full((*v.shape[:-1], N * 2), sentinel.item())
+    v_strided = input_backing[..., ::2]
+    v_strided.copy_(v)
+    assert not v_strided.is_contiguous()
+    ref = eager_rope_rotate(v_strided, cos, sin)
+
+    out_backing = torch.full((*v.shape[:-1], N * 2), sentinel.item())
+    out = out_backing[..., ::2]
+    got = fused_rope_rotate_paired(v_strided, paired[0], paired[1], out=out)
+
+    assert got is out and not got.is_contiguous()
+    assert torch.equal(got, ref)
+    assert torch.equal(
+        out_backing[..., 1::2], torch.full_like(out_backing[..., 1::2], sentinel)
+    )
+
+
 def test_fused_paired_t1_backward_matches_eager():
     """Paired T=1 CPU fallback preserves eager input gradients."""
     cfg = _small_cfg()
