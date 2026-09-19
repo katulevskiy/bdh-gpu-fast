@@ -245,6 +245,29 @@ def test_t1_cis_pairs_reuse_same_object():
     assert p1[0] is p2[0] and p1[1] is p2[1]
 
 
+def test_t1_cis_pairs_switch_keeps_flat_cache_in_sync():
+    """A pairs-only position switch must not poison the flat T=1 cache."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    attn.ensure_rope_table(24, device)
+
+    cos5, sin5 = attn.rope_cos_sin(1, 5, device)
+    pairs6 = attn.t1_cis_pairs(6, device)
+    assert pairs6 is not None
+    cos6, sin6 = attn.rope_cos_sin(1, 6, device)
+    fresh6 = attn.phases_cos_sin(attn._rope_phases(1, 6, device))
+    assert cos6 is not cos5 and torch.equal(cos6, fresh6[0])
+    assert torch.equal(sin6, fresh6[1])
+    assert torch.equal(pairs6[0].reshape(cos6.shape), cos6)
+    assert torch.equal(pairs6[1].reshape(sin6.shape), sin6)
+
+    torch.manual_seed(30)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    assert torch.equal(rope_rotate_paired(v, *pairs6), rope_rotate_t1(v, cos6, sin6))
+
+
 def test_attention_forward_t1_uses_paired_path():
     """Attention.forward T=1 with warmed table writes via paired cis into out_kr."""
     cfg = _small_cfg(n_layer=1)

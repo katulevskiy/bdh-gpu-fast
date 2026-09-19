@@ -333,13 +333,15 @@ class Attention(torch.nn.Module):
         )
         self._rope_t1_cis_key = t1_key
         self._rope_t1_cis_pairs = cis_p
-        # Keep flat narrow cache in sync when missing (pairs-only warm path).
-        if self._rope_t1_cis is None:
-            cos, sin = table
-            self._rope_t1_cis = (
-                cos.narrow(-2, rope_start, 1),
-                sin.narrow(-2, rope_start, 1),
-            )
+        # Keep the flat narrow cache in sync whenever the paired key changes.
+        # A pairs-only caller may switch positions without first calling
+        # rope_cos_sin(), so checking only for None can leave a stale flat view
+        # under the new shared key.
+        cos, sin = table
+        self._rope_t1_cis = (
+            cos.narrow(-2, rope_start, 1),
+            sin.narrow(-2, rope_start, 1),
+        )
         return cis_p
 
 
