@@ -54,3 +54,29 @@ def test_enforced_guardrail_without_samples_returns_distinct_exit(monkeypatch, c
     assert "density_guardrail=unavailable" in captured.err
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=3 reason=guardrail_no_samples" in captured.err
+
+
+def test_enforced_guardrail_failure_returns_distinct_exit(monkeypatch, capsys):
+    """A failing sample must stop before CPU crossover work."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.19, "y": 0.25, "xy": 0.07}],
+    )
+
+    def unexpected_crossover(**_):
+        raise AssertionError("failed guardrail must not run crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(["--enforce-density-guardrail"])
+        == probe.EXIT_DENSITY_GUARDRAIL
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=fail" in captured.out
+    assert "final_x=0.1900 final_xy=0.0700" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "density re-smoke guardrail failed" in captured.err
+    assert "exit_code=2 reason=guardrail_failed" in captured.err
