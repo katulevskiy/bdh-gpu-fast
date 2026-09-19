@@ -2,7 +2,7 @@
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #389–#402. This branch is based on current main tip `9ae8df5` (#402); the documented landing tip is `9ae8df5` (#402).
+Documentation coverage: #389–#402. This branch is rebased onto current main tip `3e2f9c5` (#404); #403–#404 remain outside this requested refresh range. The documented landing tip is `9ae8df5` (#402).
 
 ## Evidence boundary
 

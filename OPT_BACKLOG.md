@@ -2,7 +2,7 @@
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #389–#402, with documented landing tip `9ae8df5` (#402).
+Documentation coverage: #389–#402, with documented landing tip `9ae8df5` (#402). This branch is rebased onto current main tip `3e2f9c5` (#404); #403–#404 remain outside this requested refresh range.
 
 ## Hard constraints
 
