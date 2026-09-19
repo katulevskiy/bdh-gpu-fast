@@ -158,3 +158,14 @@ def test_requested_backend_bypasses_invalid_auto_threshold(
     monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "-1")
 
     assert resolver(99, requested=requested) == expected
+
+
+def test_disabled_auto_ignores_invalid_threshold_configuration(monkeypatch):
+    """AUTO-off keeps eager dispatch without parsing dormant thresholds."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "0")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "not-an-int")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "-1")
+
+    assert resolve_cold_impl(99) == "eager"
+    assert resolve_decode_impl(99) == "eager"
