@@ -184,8 +184,8 @@ def test_b1_shared_v_autograd_fallback_is_graph_safe():
     assert torch.isfinite(V.grad).all()
 
 
-def test_b1_shared_v_nonflat_key_view_keeps_4d_strides(monkeypatch):
-    """B=1 non-flattenable K views retain the 4-D score path without staging."""
+def test_b1_shared_v_nonflat_key_view_keeps_tiled_parity(monkeypatch):
+    """B=1 non-flattenable K views retain tiled score parity without full staging."""
     B, H, S, N, D = 1, 4, _DECODE_ONESHOT_ELEMS * 2 + 129, 8, 16
     cm = CacheManager(
         n_layer=1,
@@ -210,14 +210,16 @@ def test_b1_shared_v_nonflat_key_view_keeps_4d_strides(monkeypatch):
     bmm_calls = []
     original = torch.bmm
 
-    def spy(input, batch1, batch2):
+    def spy(batch1, batch2):
         bmm_calls.append((batch1.shape, batch2.shape))
-        return original(input, batch1, batch2)
+        return original(batch1, batch2)
 
     monkeypatch.setattr(torch, "bmm", spy)
     with torch.inference_mode():
         got = blocked_decode_attn(Q, K, V, block_size=64)
         ref = eager_decode_attn(Q, K, V)
 
-    assert not bmm_calls
+    assert bmm_calls
+    assert all(shape[0] == H and shape[1] == 1 and shape[2] == N for shape, _ in bmm_calls)
+    assert all(shape[0] == H and shape[1] == N for _, shape in bmm_calls)
     assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
