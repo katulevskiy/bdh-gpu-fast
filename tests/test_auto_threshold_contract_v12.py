@@ -42,3 +42,23 @@ def test_invalid_cold_threshold_does_not_poison_decode_gate(
     assert resolve_cold_impl(8) == "eager"
     assert resolve_cold_impl(9) != "eager"
     assert resolve_decode_impl(7) != "eager"
+
+
+def test_invalid_cold_threshold_recovers_to_shared_fallback(monkeypatch):
+    """Removing an invalid cold override restores the live shared threshold."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "not-an-int")
+
+    with pytest.raises(ValueError, match="must be an int"):
+        resolve_cold_impl(5)
+
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
+    assert resolve_cold_impl(4) == "eager"
+    assert resolve_cold_impl(5) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "7")
+    assert resolve_cold_impl(7) == "eager"
+    assert resolve_cold_impl(8) != "eager"
+    assert resolve_decode_impl(7) == "eager"
