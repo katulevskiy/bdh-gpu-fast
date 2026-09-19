@@ -710,8 +710,10 @@ def maybe_compile(
 
     if example_x is None:
         print(
-            f"torch.compile enabled (mode={COMPILE_MODE}, fullgraph={COMPILE_FULLGRAPH}, "
-            f"device={device_tag}, probe={probe}, unprobed)"
+            f"torch.compile enabled without a first probe (mode={COMPILE_MODE}, "
+            f"fullgraph={COMPILE_FULLGRAPH}, device={device_tag}, probe={probe}); "
+            "the first real call may still fail. Pass example_x and, for "
+            "train_bwd, example_y to maybe_compile for soft-fallback coverage."
         )
         return compiled
 
@@ -720,8 +722,9 @@ def maybe_compile(
         # selected probe cannot exercise backward. Returning the original
         # module is a soft fallback and avoids a first-step surprise.
         print(
-            "torch.compile probe skipped: BDH_COMPILE_PROBE=train_bwd requires "
-            f"example_y; soft-fallback to original eager module "
+            "torch.compile probe skipped: probe=train_bwd requires example_y; "
+            "pass example_y to maybe_compile or set BDH_COMPILE_PROBE=train "
+            "for a forward-only probe; soft-fallback to original eager module "
             f"[device={device_tag} mode={COMPILE_MODE} probe={probe} "
             f"fullgraph={COMPILE_FULLGRAPH}]"
         )
@@ -759,8 +762,9 @@ def maybe_compile(
         )
     except Exception as e:
         print(
-            f"torch.compile probe failed ({type(e).__name__}: {e}); "
-            "soft-fallback to original eager module "
+            f"torch.compile first probe failed ({type(e).__name__}: {e}); "
+            "soft-fallback to original eager module; check the probe inputs "
+            "and backend before retrying "
             f"[probe={probe} device={device_tag} mode={COMPILE_MODE} "
             f"fullgraph={COMPILE_FULLGRAPH}]"
             + (
