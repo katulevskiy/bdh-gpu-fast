@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 4
+    assert summary["schema_version"] == 5
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -46,6 +46,9 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     ]
     assert summary["timing_scope"] == "none"
     assert summary["cuda_available"] is False
+    assert isinstance(summary["cuda_built"], bool)
+    assert isinstance(summary["cuda_device_count"], int)
+    assert summary["cuda_device_count"] >= 0
     assert summary["commands"]["cold"]
     assert summary["commands"]["decode"]
     assert summary["commands"]["dtype"] == [
@@ -87,7 +90,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 4
+    assert summary["schema_version"] == 5
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
@@ -457,10 +460,15 @@ def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
     assert summary["timing_scope"] == "none"
     assert summary["cuda_available"] is False
     assert summary["gpu_name"] is None
+    assert isinstance(summary["cuda_built"], bool)
+    assert isinstance(summary["cuda_device_count"], int)
+    assert summary["cuda_device_count"] >= 0
     assert summary["torch_version"]
     assert summary["cuda_version"] is None or isinstance(summary["cuda_version"], str)
     assert summary["backend_info"]
     assert "torch=" in result.stdout
     assert "cuda_available=false" in result.stdout
+    assert f"cuda_built={summary['cuda_built']}" in result.stdout
+    assert f"cuda_device_count={summary['cuda_device_count']}" in result.stdout
     assert "backend_info=" in result.stdout
     assert "median ms" not in result.stdout
