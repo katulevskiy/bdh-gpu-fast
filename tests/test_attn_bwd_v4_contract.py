@@ -739,3 +739,53 @@ def test_zero_stride_self_attn_q_and_v_views_reduce_base_gradients(impl):
         V_base.grad, V_ref.grad.sum(dim=(0, 1), keepdim=True), rtol=1e-12, atol=1e-12
     )
 
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_sequence_strided_inputs_preserve_backward_contract(impl):
+    """Analytic backward must scatter gradients through sequence-strided views."""
+    generator = torch.Generator().manual_seed(2046)
+    Q_base = torch.randn(
+        2, 3, 8, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K_base = torch.randn(
+        2, 3, 8, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V_base = torch.randn(
+        2, 1, 8, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    Q = Q_base[:, :, ::2, :]
+    K = K_base[:, :, ::2, :]
+    V = V_base[:, :, ::2, :]
+    dO = torch.randn(2, 3, 4, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert Q.stride(2) == 2 * Q_base.stride(2)
+    assert K.stride(2) == 2 * K_base.stride(2)
+    assert V.stride(2) == 2 * V_base.stride(2)
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+
+    assert torch.allclose(
+        Q_base.grad[:, :, ::2, :], Q_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(
+        K_base.grad[:, :, ::2, :], K_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(
+        V_base.grad[:, :, ::2, :], V_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.equal(
+        Q_base.grad[:, :, 1::2, :], torch.zeros_like(Q_base.grad[:, :, 1::2, :])
+    )
+    assert torch.equal(
+        K_base.grad[:, :, 1::2, :], torch.zeros_like(K_base.grad[:, :, 1::2, :])
+    )
+    assert torch.equal(
+        V_base.grad[:, :, 1::2, :], torch.zeros_like(V_base.grad[:, :, 1::2, :])
+    )
