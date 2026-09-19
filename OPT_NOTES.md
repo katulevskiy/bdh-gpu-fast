@@ -7240,3 +7240,18 @@ Validation is CPU-only; no CUDA-graph, GPU timing, or GPU inductor win is
 claimed. Raw scores × strict `tril(diagonal=-1)` attention semantics remain
 unchanged. Defaults remain `BDH_COMPILE=0`, `BDH_COMPILE_PROBE=train_bwd`,
 and eager attention.
+
+## opt/cuda-build-v3 — clarify missing-nvcc setup skip (2026-09-19)
+
+**Branch:** `opt/cuda-build-v3` from `4ae8ab2` (`main`, private
+`katulevskiy/bdh-gpu-opt` only; no public PR and no PRs to `pathwaycom/*`).
+
+The optional CUDA setup probe now checks both `CUDA_HOME` and `CUDA_PATH`, then
+`PATH`, before constructing `CUDAExtension`. When `nvcc` is unavailable it
+reports the searched locations and returns a clean no-op, leaving the CPU refs
+available; the CPU-only extension smoke continues to prove the no-CUDA branch
+does not enter the CUDA setup. Defaults and raw score × strict
+`tril(diagonal=-1)` attention semantics are unchanged.
+
+Validation is CPU-only; no CUDA compiler, hardware execution, compile timing, or
+speedup is claimed.

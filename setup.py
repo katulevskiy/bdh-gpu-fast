@@ -72,15 +72,19 @@ def _extensions():
         # installed.  Detect nvcc before constructing CUDAExtension so a
         # runtime-only CI/CPU box gets a useful no-op instead of a long ninja
         # traceback.  Explicit BDH_FORCE_CPU_EXT=1 still provides the C++ path.
-        cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
         nvcc_candidates = []
-        if cuda_home:
-            nvcc_candidates.append(Path(cuda_home) / "bin" / "nvcc")
-        nvcc_candidates.append(Path(shutil.which("nvcc")) if shutil.which("nvcc") else None)
-        if not any(path is not None and path.is_file() for path in nvcc_candidates):
+        for env_name in ("CUDA_HOME", "CUDA_PATH"):
+            cuda_home = os.environ.get(env_name)
+            if cuda_home:
+                nvcc_candidates.append(Path(cuda_home) / "bin" / "nvcc")
+        nvcc = shutil.which("nvcc")
+        if nvcc:
+            nvcc_candidates.append(Path(nvcc))
+        if not any(path.is_file() for path in nvcc_candidates):
             print(
-                "bdh-gpu-opt: skipping CUDA extension build — nvcc not found; "
-                "CPU refs remain available (use BDH_FORCE_CPU_EXT=1 for C++ only)"
+                "bdh-gpu-opt: skipping CUDA extension build — nvcc not found in "
+                "CUDA_HOME/CUDA_PATH or PATH; CPU refs remain available "
+                "(use BDH_FORCE_CPU_EXT=1 for C++ only)"
             )
             return [], {}
         sources.append(str(csrc / "tril_attn_cuda.cu"))
