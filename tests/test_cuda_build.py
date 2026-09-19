@@ -213,3 +213,22 @@ def test_forced_cpu_ext_takes_precedence_over_cuda_flag():
     assert "Building bdh_cuda_ext CPU-only" in output
     assert "skipping CUDA extension build" not in output
     assert "pure-Python install" not in output
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes"])
+def test_non_one_extension_flag_remains_pure_python_noop(value):
+    """Only the exact opt-in value may enter native extension setup."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": value,
+            "BDH_BUILD_CUDA": "1",
+            "BDH_FORCE_CPU_EXT": "1",
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "pure-Python install" in output
+    assert "Building bdh_cuda_ext" not in output
+    assert any(line.strip() == "bdh-gpu-opt" for line in output.splitlines())
