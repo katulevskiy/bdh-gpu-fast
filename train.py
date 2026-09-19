@@ -479,8 +479,23 @@ def make_batch_source(split: str = "train"):
     return BatchPrefetcher(split)
 
 
+def clear_grads(module_or_optimizer) -> None:
+    """Single chokepoint: ``zero_grad(set_to_none=True)``.
+
+    Frees grad storage instead of filling zeros — friendlier to the allocator
+    and to CUDA-graph capture. Train path must not call ``zero_grad()`` with
+    the default ``set_to_none=False``. Accepts ``nn.Module`` or ``Optimizer``.
+    """
+    module_or_optimizer.zero_grad(set_to_none=True)
+
+
 def make_optimizer(model: torch.nn.Module) -> torch.optim.Optimizer:
-    """AdamW with fused kernel when available (CUDA and recent CPU builds)."""
+    """AdamW with fused kernel when available (CUDA and recent CPU builds).
+
+    Default ``BDH_FUSED_ADAMW=1`` tries ``fused=True`` then falls back.
+    Pair with ``clear_grads`` / ``train_step`` (``set_to_none``) for the
+    allocator-friendly train path. Defaults unchanged when env is unset.
+    """
     kwargs = dict(lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     if USE_FUSED_ADAMW:
         try:
@@ -591,7 +606,7 @@ def maybe_compile(
                     )
                 loss.backward()
                 # Drop probe grads so the first real step starts clean.
-                compiled.zero_grad(set_to_none=True)
+                clear_grads(compiled)
         print(
             f"torch.compile enabled (mode={COMPILE_MODE}, probe={probe}, "
             f"fullgraph={COMPILE_FULLGRAPH}, device={device_tag})"
@@ -754,6 +769,11 @@ def eval(model):
 def train_step(model, optimizer, x, y):
     """Single optimize step — kept as a function for benches / future fullgraph.
 
+    Always ends with ``clear_grads(optimizer)`` → ``zero_grad(set_to_none=True)``
+    so the next step does not pay fill-zero allocator traffic (and plays nicer
+    with CUDA-graph capture). Grads are ``None`` after return — inspect before
+    the clear if needed. Pair with ``make_optimizer`` (fused AdamW when available).
+
     AMP: module ``ctx`` wraps the hot forward. With ``_amp_forward_only``
     (BDH_AMP_FORWARD_ONLY=1), only logits are under autocast; CE is fp32.
     Default keeps ``model(x, y)`` (logits + CE) under the same ctx.
@@ -777,7 +797,7 @@ def train_step(model, optimizer, x, y):
     else:
         loss.backward()
         optimizer.step()
-    optimizer.zero_grad(set_to_none=True)
+    clear_grads(optimizer)
     return loss
 
 

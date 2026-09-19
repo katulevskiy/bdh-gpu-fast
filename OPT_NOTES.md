@@ -4651,3 +4651,51 @@ python benchmarks/bench_cache_page.py --smoke
 - No PRs to `pathwaycom/*`; no public PR
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No fake GPU speedups from CPU grow/byte ratios
+
+## opt/zerograd — harden set_to_none train path (2026-09-19)
+
+**Branch:** `opt/zerograd` (private `katulevskiy/bdh-gpu-opt` only). Tip rebase: `origin/main`.
+
+### Goal
+
+Audit / harden `zero_grad(set_to_none=True)` + fused AdamW on the train path.
+**Defaults unchanged** (`BDH_FUSED_ADAMW=1`, `BDH_COMPILE=0`).
+
+### What landed
+
+1. **`clear_grads(module_or_optimizer)`** — single chokepoint calling
+   `zero_grad(set_to_none=True)`. Used by `train_step` and the
+   `BDH_COMPILE_PROBE=train_bwd` compile probe.
+2. **`train_step` docs** — states grads are `None` after return; pairs with
+   `make_optimizer` (fused AdamW when available).
+3. **`tests/test_zerograd.py`** — smoke: grads `None` after `clear_grads` /
+   `train_step`; source guards; fused default on; `BDH_FUSED_ADAMW=0` fallback.
+4. **Microbench** — existing `benchmarks/bench_train_step.py` already covers
+   legacy fill vs fused+set_to_none and fill vs `set_to_none` alone; re-smoke
+   on this box (CPU). No new bench file.
+
+### Re-smoke (CPU, tip of this branch)
+
+```text
+BDH_COMPILE=0 .venv/bin/python benchmarks/bench_train_step.py
+# device=cpu layers=2 d=64 B=4 T=64
+# train_step legacy (zero_grad fill, no fused) median: 9.42 ms
+# train_step fused+set_to_none median:                     9.16 ms  (1.03×)
+# zero_grad fill → set_to_none:                            8.80 → 8.36 ms  (1.05×)
+```
+
+CPU deltas are small / noisy; keep the harden for allocator + CUDA-graph hygiene.
+No GPU claim from this box (`cuda=False`).
+
+### How to run
+
+```bash
+.venv/bin/python -m pytest tests/test_zerograd.py -q
+BDH_COMPILE=0 .venv/bin/python benchmarks/bench_train_step.py
+```
+
+### Non-goals
+
+- No change to default env knobs
+- No PRs to `pathwaycom/*`; no public PR
+- No softmax / scale / SDPA
