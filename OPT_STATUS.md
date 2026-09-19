@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#102)
+# OPT status — landed work (#1–#104)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `1363794` (`#102` gen-copy-tax-v1 / `#101` docs-matrix-v20 / `#100` scorev-fuse-v2 / `#99` docs-matrix-v19 / `#98` profile-v9 / `#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v9 source is `8e7a4d2` (`#95`); its rebased docs tip was `06e25d2`, and the current docs tip is `1363794`. Default eager remains unchanged; #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, #95/profile-v9 report CPU-only copy-call evidence (isolated forward `copy_`=18; warmed harness 16/call; generate remains copy_-heavy), #100 deepens blocked/online CPU score×V epilogues plus T=1 decode tiling, and #102 uses a complex-view copy for RoPE pairs plus sampled `idx_out` into preallocated `out.narrow`, cutting generate `copy_` ~558→~398 while `cat` stays 0. No GPU speedup is measured; GPU validation remains open.
+Tip documented here: `6f91417` (`#104` profile-v10 / `#103` docs-matrix-v21 / `#102` gen-copy-tax-v1 / `#101` docs-matrix-v20 / `#100` scorev-fuse-v2 / `#99` docs-matrix-v19 / `#98` profile-v9 / `#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v9 source is `8e7a4d2` (`#95`); profile-v10 source is `1363794` (`#102`), and the current docs tip is `6f91417`. Default eager remains unchanged; #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, #95/profile-v9 report CPU-only copy-call evidence (isolated forward `copy_`=18; warmed harness 16/call; generate remains copy_-heavy), #100 deepens blocked/online CPU score×V epilogues plus T=1 decode tiling, and #102 introduced and #104 re-profiled the complex-view copy for RoPE pairs plus sampled `idx_out` into preallocated `out.narrow`, with generate `copy_` ~558→~398 and `cat` still 0. No GPU speedup is measured; GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#102)
+## Landed opts (#1–#104)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -278,6 +278,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **100** | `opt/scorev-fuse-v2` | Direct `baddbmm(..., out=target)` score×V epilogues for CPU inference/no-grad blocked/online tiles; reuse the flattened T=1 output and tighten the decode oneshot budget to 1024; default eager unchanged | Correctness pass (490 passed, 18 skipped); CPU cold/decode behavior remains shape-dependent, with lower score peak and fewer inference epilogue buffers | No GPU timing or speedup; Triton/CUDA validation remains open |
 | **101** | `opt/docs-matrix-v20` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #100 | Docs only | — |
 | **102** | `opt/gen-copy-tax-v1` | Use a complex-view copy for fp32 RoPE pair stores; sample into preallocated `out.narrow` via `idx_out`; keep defaults unchanged and generate cat-free | CPU generate `aten::copy_` ~558→~398; `aten::cat`=0; parity tests pass | No GPU timing; copy/layout impact unmeasured; GPU validation remains open |
+| **103** | `opt/docs-matrix-v21` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #102 | Docs only | — |
+| **104** | `opt/profile-v10` | Re-profile the #102 gen-copy-tax-v1 tip; record warmed and isolated CPU operator counts without overclaiming GPU impact | Generate `aten::copy_`=398/call (1,194/3); isolated forward `copy_`=18; `aten::cat`=0 and `aten::contiguous`=0 | No GPU timing or speedup; GPU validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
