@@ -1755,3 +1755,63 @@ matter on GPU by writing each pair once without strided `0::2`/`1::2` stores.
 - No change to default `BDH_ROPE_IMPL=eager`
 - No fake GPU speedups from CPU medians
 - No removal of `rope_cos_sin` cache
+
+## opt/compile-bench — CPU BDH_COMPILE=0 vs 1 train-step (2026-09-19)
+
+**Branch:** `opt/compile-bench` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `410656f` (main after rope-fuse).
+
+### Goal
+
+Land an **honest** CPU train-step microbench comparing `BDH_COMPILE=0` (eager)
+vs `BDH_COMPILE=1` (`torch.compile` via `train.maybe_compile`). Soft-skip when
+inductor / CXX / probe is unavailable — never hard-fail the harness. Document
+**GPU** as the real next measurement step in `OPT_BACKLOG.md`.
+
+### Harness (`benchmarks/bench_train_step.py`)
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `BDH_BENCH_COMPILE` | `1` | Run 0-vs-1 section (`0` = fused/zero_grad-only) |
+| `BDH_COMPILE_MODE` | `default` | Passed through `maybe_compile` |
+| `BDH_COMPILE_PROBE` | `train` | Matches train loop graph |
+
+Procedure:
+
+1. Build identical tiny BDH (`layers=2 d=64 nh=2 B=4 T=64`, `dropout=0`).
+2. **Eager arm:** `USE_COMPILE=False` → `maybe_compile` no-op; median `train_step`.
+3. **Compile arm:** `USE_COMPILE=True` → `maybe_compile` + train probe; require
+   `OptimizedModule._orig_mod` or soft-skip with printed reason.
+4. Same AdamW (`fused` when available), same fixed batch, CUDA sync when present.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica)
+
+Cold inductor (first process, no disk cache) can inflate compile medians into
+hundreds of ms — **not** used as the steady-state claim. Warm re-run:
+
+```text
+BDH_BENCH_COMPILE=1 .venv/bin/python benchmarks/bench_train_step.py
+# device=cpu layers=2 d=64 B=4 T=64  (torch 2.14.0+cu130, cuda=False)
+# train_step legacy:              8.47 ms
+# train_step fused+set_to_none:   8.62 ms
+# zero_grad fill → set_to_none:   8.24 → 8.37 ms (~noise)
+# BDH_COMPILE=0 (eager) median:     9.97 ms
+# BDH_COMPILE=1 (compiled) median:  6.72 ms  (ratio eager/compiled 1.48×)
+# honest: CPU-only; no GPU / CUDA-graph claim
+```
+
+Small CPU win after warm inductor cache; still **not** a GPU result. Harness
+soft-skips if compile/probe falls back. GPU A/B (`reduce-overhead`) = backlog P1.
+
+### Honest limits
+
+- This box is CPU-only (`cuda=False`) — absolute ms are **not** GPU claims.
+- Soft-skip if compile/probe falls back to eager (missing g++/Python.h/inductor).
+- `reduce-overhead` / CUDA graphs remain a **GPU** follow-up (backlog P1).
+- No softmax / scale / SDPA; no PRs to `pathwaycom/*`.
+
+### Non-goals
+
+- No default `BDH_COMPILE=1` on `train.py`
+- No attention math changes
+- No fake speedups from CPU inductor noise under multi-agent load
