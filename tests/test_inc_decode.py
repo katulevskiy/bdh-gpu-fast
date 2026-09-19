@@ -372,10 +372,15 @@ def test_tiled_score_v_add_inplace_matches_eager():
 
 
 def test_cuda_decode_tiled_ref_uses_decode_tile_n():
-    """CUDA decode tiled ref (DECODE_TILE_N) ≡ eager last row."""
-    from kernels.cuda_attn import CUDA_DECODE_TILE_N, tril_decode_tiled_ref
+    """CUDA decode tiled ref (DECODE_TILE_N / adaptive) ≡ eager last row."""
+    from kernels.cuda_attn import (
+        CUDA_DECODE_TILE_N,
+        pick_cuda_decode_tile_n,
+        tril_decode_tiled_ref,
+    )
 
     assert CUDA_DECODE_TILE_N >= 32
+    assert pick_cuda_decode_tile_n(100) >= 32
     B, H, S, N, D = 1, 2, 100, 8, 16
     g = torch.Generator().manual_seed(88)
     q = torch.randn(B, H, 1, N, generator=g)
@@ -559,4 +564,31 @@ def test_triton_decode_vs_full_tril_minus_one():
     V_all2 = torch.cat([past_v, torch.randn_like(V_new) * 9], dim=2)
     last2 = eager_tril_attn(K_all, K_all, V_all2)[:, :, -1:, :]
     assert torch.allclose(last, last2, atol=0)
+
+
+def test_pick_cuda_decode_tile_n_pairs_long_s():
+    """cuda-decode-v3 tile picker mirrors #62 long-S preference (CPU path)."""
+    from kernels.cuda_attn import (
+        CUDA_DECODE_TILE_N_MAX,
+        pick_cuda_decode_tile_n,
+    )
+
+    assert pick_cuda_decode_tile_n(64) == 32
+    assert pick_cuda_decode_tile_n(256) >= 64
+    assert pick_cuda_decode_tile_n(2048) >= 128
+    assert pick_cuda_decode_tile_n(4096) == 512
+    assert pick_cuda_decode_tile_n(4096, for_smem=True) <= CUDA_DECODE_TILE_N_MAX
+
+
+def test_cuda_tiled_ref_blocked_parity_inc():
+    """Inc-decode: CUDA tiled ref ≡ blocked on broadcast-V long S."""
+    from kernels.cuda_attn import tril_decode_tiled_ref
+
+    Q, K, V = _make_decode_qkv(B=2, H=4, S=1024, N=16, D=32, Tq=1, seed=91)
+    assert torch.allclose(
+        tril_decode_tiled_ref(Q, K, V),
+        blocked_decode_attn(Q, K, V),
+        rtol=1e-4,
+        atol=1e-4,
+    )
 

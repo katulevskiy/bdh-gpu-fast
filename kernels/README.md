@@ -46,7 +46,8 @@ Cold/prefill is unchanged. Blocked/online/triton share
 `_tiled_score_v` (broadcast-V tight `_DECODE_ONESHOT_ELEMS`, `out.add_`
 tiles, peak ~Tq×tile on long S); Triton decode-v3 uses `V_BROADCAST` +
 long-S tiles (up to 512) + optional Q-hoist on CUDA (CPU → #55 blocked
-fallback); CUDA decode uses `DECODE_TILE_N` + a dedicated **Tq=1** kernel
+fallback); CUDA decode-v3 uses **adaptive** `DECODE_TILE_N` (32/64/128 on
+GPU smem; CPU refs up to 512, pair #55/#62) + dedicated **Tq=1** kernel
 when the ext is built. Default remains **eager**.
 
 ## Modules
@@ -68,7 +69,8 @@ when the ext is built. Default remains **eager**.
 | `tril_score_v_tiled_ref(...)` | CPU mirror of CUDA tiled online cold (TILE_M/N=16; no full T×T) |
 | `tril_score_v(q,k,v)` | Native ext if built; else tiled (large T) / eager (small T) |
 | `tril_decode_ref(q,k_past,v)` | Decode ref — vectorized small S; tiles large past |
-| `tril_decode_tiled_ref(...)` | CPU mirror of CUDA tiled online decode |
+| `tril_decode_tiled_ref(...)` | CPU mirror of CUDA tiled online decode (adaptive tile) |
+| `pick_cuda_decode_tile_n(S, Dk)` | Long-S past tile picker (pair #55/#62) |
 | `tril_decode(q,k_past,v)` | Native decode ext if built, else decode ref |
 | `has_cuda_ext()` / `has_cuda_kernel()` | Capability probes (soft — import never raises) |
 | `ext_status()` | Human-readable build / load smoke string |
@@ -100,10 +102,12 @@ kernels.cuda_attn` never raises, tests skip CUDA paths, and CPU refs still run.
 
 - Cold: **tiled online** — grid `(ceil(T/16), B·H, ceil(Dv/32))`, block `(32, 16)`;
   shared Q/K/V tiles; register `score×V`; smem>48 KiB → fused naive (still no T×T)
-- Decode: **tiled online** packed-past score×V; same tile constants; naive fallback
+- Decode: **tiled online** packed-past score×V; **adaptive** past tiles
+  (32/64/128 via `pick_decode_tile_n`); Tq=1 thin grid + Q hoist; naive fallback
 
 CPU tiled refs in `cuda_attn.py` / `tril_attn_cpu.cpp` use the same TILE_M/N=16
-so a GPU drop-in build can reuse the tested online structure.
+cold tiles and adaptive decode tiles (up to 512 on CPU) so a GPU drop-in build
+can reuse the tested online structure. Numerically ≡ blocked (#55) / eager.
 
 ## RoPE rotate (`BDH_ROPE_IMPL`)
 

@@ -3621,3 +3621,68 @@ BDH_BENCH_COMPILE_MODE=1 python benchmarks/bench_train_step.py
 - No PRs to `pathwaycom/*`
 - No CUDA-graph / GPU speedup claims from these CPU medians
 
+## opt/cuda-decode-v3 — deepen CUDA T=1 decode tiles (2026-09-19)
+
+**Branch:** `opt/cuda-decode-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `16a15fb` (main after `#63` compile-reduce / `#62` triton-decode-v3).
+
+### Goal
+
+Pair with `#55` blocked long-S wins and `#62` Triton decode deepen: deepen the
+**CUDA** T=1 decode tiles vs packed KR/V — adaptive past `DECODE_TILE_N`
+(32/64/128 on GPU smem; CPU refs up to 512), Q-hoist on TQ1/tiled online, and
+CPU tiled refs that **match blocked parity**. **No GPU on this box** — improve
+`csrc/kernels` + CPU refs + soft-skip CUDA tests. Hard constraints:
+`tril(diagonal=-1)`, `aten::cat=0`, **default eager** unchanged.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/cuda_attn.py` | `pick_cuda_decode_tile_n(S, Dk)`; `CUDA_DECODE_TILE_N_MAX=128`; CPU refs up to 512; `tril_decode_tiled_ref` adaptive |
+| `csrc/tril_attn_cuda.cu` | Templated TQ1/tiled kernels on TILE_N∈{32,64,128}; host `pick_decode_tile_n`; Q hoist; fix naive template |
+| `csrc/tril_attn_cpu.cpp` | Adaptive `pick_decode_tile_n_cpu` (up to 512) for tiled decode |
+| `csrc/tril_attn.h` / README / `__init__.py` | Document adaptive tiles; export picker |
+| `tests/test_cuda_decode.py` | Tile picker; long-S adaptive ≡ eager; ≡ blocked; tril(-1) last-row; soft-skip CUDA TQ1 |
+| `tests/test_inc_decode.py` | Picker long-S; CUDA tiled ≡ blocked parity |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — unchanged
+export BDH_ATTN_IMPL=cuda      # Tq=1 CUDA adaptive tiles / CPU tiled ref
+export BDH_ATTN_IMPL=blocked   # #55 tight oneshot (parity target for CUDA refs)
+```
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+# CacheManager: aten::cat = 0; pos0 / S=0 → zeros
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_cuda_decode.py tests/test_inc_decode.py \
+  tests/test_cuda_attn.py tests/test_attn_auto.py -q
+# 103 passed, 11 skipped — CUDA tiled ref ≡ eager / blocked; picker S=4096 → 512
+# (CPU) / ≤128 (smem); native CUDA TQ1 soft-skip without GPU/ext; default eager
+```
+
+### Honest limits (no GPU claims)
+
+- **No GPU on this box** — `tril_decode_tq1_kernel` / tiled CUDA launch paths are
+  in-tree (adaptive TILE_N + Q hoist) but **unexecuted** here; Python/C++ CPU
+  refs exercise the same tile structure and match `#55` `blocked_decode_attn`.
+- Do **not** claim GPU wall wins from CPU medians. Measure later:
+  `bench_gpu_attn.py --mode decode` / `bench_generate.py` with
+  `BDH_ATTN_IMPL=cuda` on A100/H100.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager` or AUTO-off behavior
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / scale / SDPA
+- No fake GPU speedups from CPU medians
+
