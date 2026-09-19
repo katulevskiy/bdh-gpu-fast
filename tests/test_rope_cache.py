@@ -109,11 +109,18 @@ def test_rope_table_t_gt1_narrow_hit_invalidates_on_rebuild():
     device = torch.device("cpu")
     attn.ensure_rope_table(16, device)
     old_cos, old_sin = attn.rope_cos_sin(4, 3, device)
+    old_pairs = attn.t1_cis_pairs(3, device)
+    assert old_pairs is not None
 
     attn.ensure_rope_table(20, device)
     new_cos, new_sin = attn.rope_cos_sin(4, 3, device)
+    new_pairs = attn.t1_cis_pairs(3, device)
+    assert new_pairs is not None
     assert new_cos is not old_cos and new_sin is not old_sin
+    assert new_pairs is not old_pairs
     assert torch.equal(new_cos, old_cos) and torch.equal(new_sin, old_sin)
+    assert torch.equal(new_pairs[0], old_pairs[0])
+    assert torch.equal(new_pairs[1], old_pairs[1])
 
 
 def test_rope_cache_model_forward_parity_across_batches():

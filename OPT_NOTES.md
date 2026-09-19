@@ -7186,3 +7186,24 @@ remains the default, raw scores × strict `tril(diagonal=-1)` is unchanged, and
 the autograd fallback remains available.
 
 Validation is CPU-only; no GPU decode timing or win claim is recorded.
+
+## opt/rope-fuse-v4 — keep paired/flat T=1 narrows aligned (2026-09-19)
+
+**Branch:** `opt/rope-fuse-v4` from `da79013` (`main`, private
+`katulevskiy/bdh-gpu-opt` only).
+
+A pairs-only T=1 cache lookup could switch positions while leaving the
+flat narrow under the new shared key, so a later `rope_cos_sin()` hit stale
+cos/sin. The paired narrow now refreshes the flat narrow together; CPU tests
+also cover T>1 narrow and paired-cache invalidation after table rebuild.
+Default eager RoPE and attention semantics (raw scores × strict
+`tril(diagonal=-1)`) are unchanged.
+
+### CPU validation
+
+```text
+python -m pytest tests/test_rope_cache.py tests/test_rope_fuse.py tests/test_rope_decode.py -q
+```
+
+No GPU is available here; no GPU timing, kernel-on-hardware result, or GPU
+RoPE win is claimed.
