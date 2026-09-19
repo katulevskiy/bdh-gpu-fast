@@ -214,6 +214,11 @@ def run_impls(args, device: torch.device) -> int:
         if name not in IMPLS:
             print(f"ERROR: unknown impl {name!r}; choose from {IMPLS}")
             return 2
+    if "eager" not in requested:
+        print("ERROR: --impls must include eager as the token reference")
+        return 2
+    # Keep the reference first even when callers pass a custom order.
+    requested = list(dict.fromkeys(("eager", *requested)))
 
     cfg = _cfg(args)
     torch.manual_seed(0)
@@ -233,6 +238,7 @@ def run_impls(args, device: torch.device) -> int:
     print("--- BDH.generate + CacheManager across BDH_ATTN_IMPL ---")
 
     results: dict[str, dict] = {}
+    status = 0
     ref_tokens: torch.Tensor | None = None
 
     for impl in requested:
@@ -276,17 +282,21 @@ def run_impls(args, device: torch.device) -> int:
             "median_ms": med,
             "tokens_match_eager": match,
             "aten_cat": cats,
+            "clean": match and cats == 0,
             "effective": info["effective"],
             "reason": reason,
             "tok_s": tok_s,
         }
         match_s = "yes" if match else "NO"
+        row_status = "PASS" if results[impl]["clean"] else "FAIL"
+        if row_status == "FAIL":
+            status = 1
         print(
             f"  {impl:7s} median={med:8.2f} ms  "
             f"~{tok_s:7.1f} tok/s  "
             f"match_eager={match_s:3s}  "
             f"aten::cat={cats}  "
-            f"effective={info['effective']}  ({reason})"
+            f"effective={info['effective']}  status={row_status}  ({reason})"
         )
 
     if "eager" in results and len(results) > 1:
@@ -311,7 +321,9 @@ def run_impls(args, device: torch.device) -> int:
             "NOTE: cuda=False on this box — triton → blocked fallback; "
             "cuda → pure-PyTorch ref. Use --device cuda on a GPU box."
         )
-    return 0
+    if status:
+        print("ERROR: impl sweep failed token-parity or aten::cat=0 checks")
+    return status
 
 
 def _parse_threshold_sweep(raw: str | None) -> list[int]:
@@ -514,13 +526,23 @@ def run_auto_ab(args, device: torch.device) -> int:
                 print(
                     f"  S={S:<5d} {label}  median={med:8.2f} ms  "
                     f"~{tok_s:7.1f} tok/s  match_AUTO0={match_s:3s}  "
-                    f"aten::cat={cats}  {fire_note}"
+                    f"aten::cat={cats}  "
+                    f"status={'PASS' if match and cats == 0 else 'FAIL'}  {fire_note}"
                 )
 
             a0 = cell["auto0"]["median_ms"]
             a1 = cell["auto1"]["median_ms"]
             spd = (a0 / a1) if a1 > 0 else float("inf")
             cell["speedup"] = spd
+            cell["clean"] = (
+                cell["auto1"]["match"]
+                and cell["auto0"]["aten_cat"] == 0
+                and cell["auto1"]["aten_cat"] == 0
+                and cell["auto0"]["decode_ok"]
+                and cell["auto0"].get("cold_ok", True)
+                and cell["auto1"].get("cold_ok", True)
+                and cell["auto1"]["decode_ok"]
+            )
             rows.append(cell)
             print(
                 f"  S={S:<5d} AUTO1/AUTO0 = {spd:.2f}×  "
@@ -530,14 +552,15 @@ def run_auto_ab(args, device: torch.device) -> int:
     print("--- summary table ---")
     print(
         f"{'prompt':>6}  {'new':>4}  {'AUTO=0 ms':>10}  {'AUTO=1 ms':>10}  "
-        f"{'spd':>6}  {'match':>5}  {'cats':>4}  {'cold@S':>8}  "
-        f"{'decode@S':>9}  note"
+        f"{'spd':>6}  {'match':>5}  {'cat0':>4}  {'cat1':>4}  "
+        f"{'cold@S':>8}  {'decode@S':>9}  {'status':>6}  note"
     )
     for r in rows:
         a0 = r["auto0"]
         a1 = r["auto1"]
         match = "yes" if a1["match"] else "NO"
-        cats = a1["aten_cat"]
+        cats0 = a0["aten_cat"]
+        cats1 = a1["aten_cat"]
         note = []
         if r["fires_cold_at_start"]:
             note.append(f"cold fires (S>{cold_thr})")
@@ -550,8 +573,9 @@ def run_auto_ab(args, device: torch.device) -> int:
         print(
             f"{r['prompt']:6d}  {args.new:4d}  {a0['median_ms']:10.2f}  "
             f"{a1['median_ms']:10.2f}  {r['speedup']:5.2f}×  {match:>5}  "
-            f"{cats:4d}  {a1['cold_at_S']:>8}  "
-            f"{a1['decode_at_S']:>9}  {'; '.join(note)}"
+            f"{cats0:4d}  {cats1:4d}  {a1['cold_at_S']:>8}  "
+            f"{a1['decode_at_S']:>9}  "
+            f"{'PASS' if r['clean'] else 'FAIL':>6}  {'; '.join(note)}"
         )
 
     print(
@@ -567,17 +591,7 @@ def run_auto_ab(args, device: torch.device) -> int:
             "Re-tune threshold on A100/H100 before claiming GPU wins."
         )
     # Fail the process if any parity / cat / decode-resolve check broke.
-    bad = [
-        r
-        for r in rows
-        if (not r["auto1"]["match"])
-        or r["auto0"]["aten_cat"] != 0
-        or r["auto1"]["aten_cat"] != 0
-        or (not r["auto0"]["decode_ok"])
-        or (not r["auto0"].get("cold_ok", True))
-        or (not r["auto1"].get("cold_ok", True))
-        or (not r["auto1"]["decode_ok"])
-    ]
+    bad = [r for r in rows if not r["clean"]]
     if bad:
         print(f"ERROR: {len(bad)} prompt(s) failed match/cat/decode checks")
         return 1

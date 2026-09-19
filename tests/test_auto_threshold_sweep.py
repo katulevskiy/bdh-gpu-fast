@@ -16,6 +16,20 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC is not None and _SPEC.loader is not None
 bench_generate = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bench_generate)
+from kernels.attention_dispatch import resolve_cold_impl, resolve_decode_impl  # noqa: E402
+
+
+def test_auto_gate_smoke_is_strict_at_threshold(monkeypatch):
+    """AUTO keeps equality eager and switches only above each threshold."""
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "4")
+
+    assert resolve_decode_impl(4) == "eager"
+    assert resolve_cold_impl(4) == "eager"
+    assert resolve_decode_impl(5) in ("blocked", "triton")
+    assert resolve_cold_impl(5) in ("blocked", "triton")
 
 
 def test_threshold_sweep_smoke_dedupes_and_preserves_cold_gate(monkeypatch, capsys):
