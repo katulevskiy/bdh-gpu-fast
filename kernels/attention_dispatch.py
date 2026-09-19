@@ -13,8 +13,11 @@ Backends: eager, blocked, triton, or cuda.
 Wire-up in ``bdh.Attention.forward``:
 
 - Cold path (``past_kr is None``): ``bdh_attn`` respects ``BDH_ATTN_IMPL``.
+  With ``BDH_ATTN_AUTOGRAD=1``, wraps in ``StrictTrilAttnFn`` (analytic train).
+- Multi-token + past under AUTOGRAD: also ``bdh_attn`` → ``strict_tril_attn``.
 - T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM;
   blocked/triton/cuda use their decode paths (cuda → ``kernels.cuda_attn.tril_decode``).
+  Decode stays outside StrictTrilAttnFn (generate is no_grad / CacheManager-safe).
 """
 
 from __future__ import annotations

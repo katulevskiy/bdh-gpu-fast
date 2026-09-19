@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#33)
+# OPT status — landed work (#1–#34)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `f005b3f` (`opt/sparse-probe` on `main`).
+Tip documented here: `62c226b` (`opt/blocked-vec` #38 on `main`; + `opt/attn-bwd-train`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -41,7 +41,7 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 | `triton` | Triton fused on CUDA; else blocked | Triton decode + `V_BROADCAST`; else blocked | Needs CUDA + Triton to run kernel |
 | `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` tiled / ref | Scaffold; GPU measure open |
 
-Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7).
+Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7, first-class train path #34). Default **off**. Use when training with `BDH_ATTN_IMPL=blocked|triton|cuda`. T=1 CacheManager decode / `generate` stay on the decode path.
 
 ```bash
 export BDH_ATTN_IMPL=eager     # default
@@ -98,7 +98,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 
 ---
 
-## Landed opts (#1–#33)
+## Landed opts (#1–#34)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -135,6 +135,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **31** | `opt/compile-bench` | Honest CPU `BDH_COMPILE=0` vs `1` train-step harness | Warm ~1.5× tiny cfg | GPU A/B = P1 |
 | **32** | `opt/sparse-probe` | Short-train ReLU density + CPU sparse crossover | Density↓ but sparse≪dense; **default OFF** | Sparse GPU speculative |
 | **33** | `opt/decode-gemm` | T=1 decode score×V polish (blocked/Triton/CUDA) | ≡ eager; ~parity wall | `--mode decode` GPU open |
+| **34** | `opt/attn-bwd-train` | Analytic `StrictTrilAttnFn` first-class train path (`BDH_ATTN_AUTOGRAD`); cold+multi-token wiring; `bench_attn_bwd.py`; hardened tests | Grad parity @ dropout=0; CPU tiny train_step ~1.4× (noise) | GPU train unmeasured |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
@@ -148,6 +149,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | Knob | Production-safe default | When to flip |
 |------|-------------------------|--------------|
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
+| `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn forwards (#34) |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` | `0` | `1` after probe succeeds; prefer GPU for real win |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on CUDA train boxes |

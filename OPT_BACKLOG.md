@@ -16,6 +16,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 ## Already landed (main)
 
+- Analytic attn train path (`BDH_ATTN_AUTOGRAD` / `StrictTrilAttnFn`) — **landed** `opt/attn-bwd-train` (#34): cold+multi-token wiring, `bench_attn_bwd.py`, grad parity @ dropout=0; GPU train A/B still open
+
 - RoPE without `stack→view`; skip redundant dtype casts
 - RoPE cos/sin table cache by (T, head_dim, device, dtype) (`opt/rope-cache` #18)
 - KV-style cache + incremental `generate`
@@ -65,6 +67,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
+
+| **P2** | **Analytic attn train on GPU** | CPU `bench_attn_bwd.py` AUTOGRAD 0 vs 1 landed (#34). **GPU** train-step with `IMPL=blocked|triton|cuda` + AUTOGRAD=1 unmeasured. | A100/H100 `bench_attn_bwd.py` | Low |
 
 ## Explicit non-goals
 
