@@ -1755,3 +1755,59 @@ matter on GPU by writing each pair once without strided `0::2`/`1::2` stores.
 - No change to default `BDH_ROPE_IMPL=eager`
 - No fake GPU speedups from CPU medians
 - No removal of `rope_cos_sin` cache
+## opt/ln-compile — compile-friendly LayerNorm + residual (2026-09-19)
+
+**Branch:** `opt/ln-compile` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `d64157a` (`opt/cuda-cold` on main).
+
+### Goal
+
+Make the block epilogue **LayerNorm + residual** friendlier to `torch.compile` /
+`BDH_COMPILE`: prefer `F.layer_norm`, avoid Python control flow / in-place
+aliasing on the residual sum, keep **bit-identical** numerics vs
+`nn.LayerNorm` (affine-free). No attention math changes.
+
+### What changed (`bdh.py`)
+
+1. **`_ln` / `_residual_ln` — `F.layer_norm` only** — explicit
+   `weight=None, bias=None, eps=...`. Never call `self.ln(...)` on the hot path
+   (`nn.Module.__call__` / hooks stay out of the Dynamo graph). `self.ln` remains
+   registered for baseline API parity (affine-free → empty state_dict).
+2. **`_residual_ln` is pure functional** — `LN(x + LN(y_mlp))` with out-of-place
+   `x + y` instead of in-place `y.add_(x)`. Same numerics as ln-fuse (#12);
+   cleaner for AOTAutograd functionalization / compile.
+3. **Drop `torch.is_grad_enabled()` sparse-product branch** — always
+   `x_bthn * y_bthn` (out-of-place). Removes a Python branch that specialized
+   train vs `no_grad` into **two** Dynamo graphs next to the residual LN
+   epilogue. (`grad_enabled` is still read for packed-cache in-place RoPE
+   safety from `opt/decode-copy` — not for the residual product.)
+4. **`_ln_eps`** sourced once from `float(self.ln.eps)` at init.
+
+Preserved: `tril(diagonal=-1)`, `CacheManager`, `BDH_ATTN_IMPL`, dropout
+identity at `p=0`, encoder `(B,T,nh,N)` / decoder `F.linear`, embed-tie.
+
+### `BDH_COMPILE` / tests
+
+| Check | Expectation |
+|-------|-------------|
+| `_residual_ln` vs `ln(x+ln(y))` | **bit-identical** (`torch.equal`) |
+| `torch.compile(..., fullgraph=True)` cold forward @ dropout=0 | matches eager @ atol 1e-5 |
+| `torch._dynamo.explain` cold train @ dropout=0 | **0** graph breaks |
+
+```text
+.venv/bin/python -m pytest tests/test_compile.py tests/test_vs_baseline.py -q
+```
+
+### Honest limits
+
+- No GPU on this box — no CUDA-graph / GPU inductor speedup claims. Win is
+  graph cleanliness (fewer breaks / one less train↔no_grad specialization).
+- Functional residual may allocate one extra add buffer vs ln-fuse in-place
+  reuse; trade accepted for compile friendliness.
+- Still no softmax / no scale / no SDPA / no PRs to `pathwaycom/*`.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- No change to CE loss / tril(-1) / Parameter layouts
+- No default `BDH_COMPILE=1` on `train.py`
