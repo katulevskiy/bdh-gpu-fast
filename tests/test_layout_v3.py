@@ -110,10 +110,11 @@ def test_cpu_probe_covers_scaled_and_topk_sampler_signatures():
     model = bdh.BDH(cfg).eval()
     idx = torch.randint(0, cfg.vocab_size, (2, 8))
 
-    # Non-default sampler options own the first-step logits buffer.  Probe both
-    # the narrow top-k path and the k==V fallback, not just default multinomial.
+    # Non-default sampler options own the first-step logits buffer.  Probe the
+    # top-k boundary, narrow path, and k==V fallback, not just scaled sampling.
     cases = (
         ("scaled", dict(temperature=0.7)),
+        ("topk-one", dict(temperature=0.7, top_k=1)),
         ("topk-narrow", dict(temperature=0.7, top_k=8)),
         ("topk-full", dict(temperature=0.7, top_k=cfg.vocab_size)),
     )
