@@ -189,6 +189,40 @@ def test_bdh_attn_blocked_autograd_contract_matches_eager(impl, value_heads):
 
 @pytest.mark.parametrize("impl", ["blocked", "online"])
 @pytest.mark.parametrize("value_heads", [1, 2])
+def test_bdh_attn_blocked_autograd_self_alias_prefill_contract(impl, value_heads):
+    """Long prefill keeps analytic backward parity when Q and K are aliased."""
+    B, H, T, N, D = 2, 2, 257, 3, 4
+    g = torch.Generator().manual_seed(307 + value_heads)
+    Q_storage0 = torch.randn(
+        B, H, T + 1, N, dtype=torch.float64, generator=g
+    )
+    V0 = torch.randn(B, value_heads, T, D, dtype=torch.float64, generator=g)
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q_storage = Q_storage0.clone().requires_grad_()
+        Q = Q_storage[:, :, :T, :]
+        V = V0.clone().requires_grad_()
+        assert not Q.is_contiguous()
+        assert Q.stride(-2) == N
+        out = fn(Q, V)
+        grads = torch.autograd.grad((out * weight).sum(), (Q_storage, V))
+        return out, grads
+
+    ref, ref_grads = run(lambda Q, V: eager_tril_attn(Q, Q, V))
+    got, got_grads = run(
+        lambda Q, V: bdh_attn(Q, Q, V, impl=impl, use_autograd_fn=True)
+    )
+
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+    assert torch.count_nonzero(got_grads[0][:, :, T, :]) == 0
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("value_heads", [1, 2])
 def test_bdh_attn_blocked_autograd_preserves_padded_v_storage(impl, value_heads):
     """Dispatcher-selected long prefill preserves padded V-view gradients."""
     B, H, T, N, D = 2, 2, 257, 3, 4
