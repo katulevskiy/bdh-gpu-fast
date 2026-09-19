@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#142)
+# OPT status — landed work (#1–#147)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `7cbfdfc` (`#143` docs refresh through #142; code tip `68f949a` `#142` amp-train-v3 / `#141` blocked-tile-v3). The landed matrix below is aligned through #142; #141 adds wide-head CPU cold parity coverage for shared and head-matched V layouts while preserving bounded shared-V tile behavior, eager defaults, and no GPU claims, and #142 adds explicit float32/bf16/fp16 AMP configuration coverage with CPU-safe skips while preserving fp32 defaults and CUDA-only GradScaler gating. Profile-v14 records CPU-only evidence after #141/#142. CPU validation preserves strict raw-tril semantics, eager defaults, autograd fallback, and cat-free generate; no GPU timing or speedup evidence was added, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `4e01e38` (`#146` cuda-cold-v4 CPU-safe skip clarification after `#147` online-decode; `#145` sparse probe exit codes; `#144` profile-v14; `#143` docs refresh through #142). The landed matrix below is aligned through #147 plus #146; #146 clarifies CPU-safe CUDA skip behavior and #147 deepens the opt-in blocked/online T=1 shared-V path while preserving default eager dispatch and raw strict-tril math. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. Sparse stays OFF; #146/#147 add no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#139)
+## Landed opts (#1–#147)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -321,6 +321,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **140** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #139 | Docs only | — |
 | **141** | `opt/blocked-tile-v3` | Add wide-head CPU cold parity coverage with shared and head-matched V layouts; document bounded shared-V tile behavior without changing eager defaults | CPU parity coverage; no GPU timing or kernel claim | **P0** GPU measure / cold CUDA-Triton validation |
 | **142** | `opt/amp-train-v3` | Add explicit float32/bf16/fp16 AMP configuration coverage with CPU-safe backend skips; preserve fp32 defaults and CUDA-only GradScaler gating | CPU-safe configuration/parity coverage; no throughput claim | GPU AMP train measurement remains open |
+| **143** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #142 | Docs only | — |
+| **144** | `opt/profile-v14` | Re-profile the #141/#142 tip and record CPU-only evidence without changing semantics | Flat versus profile-v13: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; no GPU claim | **P0** GPU measure / cold CUDA-Triton validation |
+| **145** | `opt/sparse-v3` | Make sparse-probe success and guardrail-failure outcomes scriptable with stable exit codes, coverage, and notes; keep the CPU-only probe default-off | Sparse remains **OFF**; no production-path change or GPU sparse claim | GPU sparse validation remains open; **P0** GPU measure still outstanding |
+| **146** | `opt/cuda-cold-v4` | Clarify CPU-safe CUDA skip behavior for the cold-attention tests without changing the CUDA implementation or defaults | CPU configuration/skip coverage; no GPU build or timing claim | **P0** GPU measure / cold CUDA validation remains open |
+| **147** | `opt/online-decode-v3` | Deepen opt-in blocked/online T=1 shared-V decode by reusing shared cache views and vectorizing the B>1 epilogue; preserve strict raw `tril(-1)`, autograd fallback, cat-free generate, and default eager | CPU parity/coverage; no GPU timing or speedup claim | **P0** GPU/CUDA-Triton validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
