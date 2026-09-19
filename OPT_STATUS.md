@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#117)
+# OPT status — landed work (#1–#123)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `f34adc0` (`#120` opt/auto-thr-v2 / `#119` opt/amp-train-v2 / `#118` docs-v27 / `#117` opt/compile-train-v2 / `#116` opt/online-decode-t1-v2 / `#115` docs-matrix-v26 / `#114` opt/cuda-cold-v3 / `#113` docs-matrix-v25 / `#112` profile-v11 / `#111` docs-matrix-v24 / `#110` gen-vcopy-v1). The landed matrix below remains through #117; `OPT_NOTES.md` § `opt/profile-v12` records the CPU re-profile of this current tip. Profile-v11 source is `4963b0f` (`#110`), profile-v10 source is `1363794` (`#102`), and the current code tip is `f34adc0`. Default eager remains unchanged; #116 keeps the opt-in blocked/online shared-V T=1 inference epilogue cat-free, #117 keeps compile backward probing opt-in, #118–#120 are docs/AMP/AUTO follow-ups, and profile-v12 records forward `copy_`=12/call warmed / 14 isolated plus generate `copy_`=394/call with `cat`/`contiguous`=0. No GPU speedup evidence was added, so GPU measurement and cold CUDA/Triton validation remain open.
+Tip pointer: `aea2501` (`#123` opt/sparse-v2 / `#121` profile-v12 / `#120` opt/auto-thr-v2 / `#119` opt/amp-train-v2 / `#118` docs-v27). The landed matrix below is aligned through #123; the prior closed #122 docs-only refresh is carried forward by this v29 refresh. `OPT_NOTES.md` § `opt/profile-v12` records the CPU re-profile of the pre-#123 tip, while #123 adds the gated sparse probe and dense-default guardrails. Profile-v11 source is `4963b0f` (`#110`), profile-v12 source is `f34adc0` (`#120`), and the current code tip is `aea2501`. Default eager remains unchanged; #116 keeps the opt-in blocked/online shared-V T=1 inference epilogue cat-free, #117 keeps compile backward probing opt-in, #118–#122 are docs/AMP/AUTO/profile follow-ups, and #123 keeps sparse probing explicitly gated with density x~27% / xy~11% and sparse OFF. No GPU speedup evidence was added, so GPU measurement and cold CUDA/Triton validation remain open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -48,11 +48,11 @@ Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-
 When set (`1|true|yes|on`) and `BDH_ATTN_IMPL` is `eager`:
 - **T=1 decode** → **triton** (CUDA+Triton) else **blocked** once
   `past_len > BDH_ATTN_AUTO_THRESHOLD` (default **512**, retained after
-  `#55`/`#72`/`#73`/`#75`/`#77` — CPU wall crossover ~≥512).
+  `#55`/`#72`/`#73`/`#75`/`#77`/`#120` — CPU wall crossover ~≥512).
 - **Cold / prefill** → same prefer rule once
   `T > BDH_ATTN_AUTO_COLD_THRESHOLD` (unset → mirrors `AUTO_THRESHOLD`).
   Lower cold thr (e.g. 256) only when mid-T **peak-score** budget matters more
-  than wall (`#73`/`#77`: T∈{128,256} peak↓ wall↑).
+  than wall (`#73`/`#77`/`#120`: T∈{128,256} peak↓ wall↑).
 
 Explicit `IMPL∈{blocked,online,triton,cuda}` is never overridden. Default
 (AUTO unset) = eager cold and decode at every length.
@@ -63,7 +63,7 @@ export BDH_ATTN_IMPL=blocked
 export BDH_ATTN_IMPL=triton
 export BDH_ATTN_IMPL=cuda
 
-# opt-in long-T cold + long-S decode → blocked|triton (#75/#77/#82)
+# opt-in long-T cold + long-S decode → blocked|triton (#75/#77/#82/#120)
 export BDH_ATTN_AUTO=1
 export BDH_ATTN_AUTO_THRESHOLD=512
 # optional independent cold gate (unset → same as THRESHOLD):
@@ -153,12 +153,12 @@ BDH_PREFETCH_H2D=0 python train.py  # caller-stream H2D
 |-------|----------|------------|
 | `float32` / `fp32` / `off` / unset | Off | Off |
 | `bfloat16` / `bf16` | Yes | **Never** |
-| `float16` / `fp16` / `half` | Yes | Only if **CUDA** |
+| `float16` / `fp16` / `half` | Yes | Only if **live CUDA** |
 
-Optional `BDH_AMP_FORWARD_ONLY=1` (#54): autocast **logits only**; CE in fp32 outside.
+Optional `BDH_AMP_FORWARD_ONLY=1` (#54/#119): autocast **logits only**; CE in fp32 outside.
 Default `0` keeps `model(x,y)` under the same autocast ctx.
 
-CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here).
+CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here). #119 makes capability checks transactional, soft-skips unsupported matrix arms, and reports full vs forward-only scope plus scaler state.
 **AMP helps on GPU** (Tensor Cores / HBM); never cite CPU medians as speedups.
 Decode path AMP (older #5) is separate from this train knob (#24+#54).
 
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#117)
+## Landed opts (#1–#123)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -293,6 +293,12 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **115** | `opt/docs-matrix-v26` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #114 | Docs only | — |
 | **116** | `opt/online-decode-t1-v2` | Deepen opt-in blocked/online T=1 shared-V decode: flatten score tiles over `B*H` and write inference/no-grad score×V directly with `baddbmm(..., out=target)`; preserve autograd fallback, strict `tril(-1)`, `S=0` zeros, cat-free generate, and default eager | CPU 507 passed, 18 skipped, 3 warnings; parity and cat-free generate coverage | No GPU timing or speedup; GPU validation remains open |
 | **117** | `opt/compile-train-v2` | Make `BDH_COMPILE_PROBE=train_bwd` the opt-in default; probe forward+backward, soft-fallback without targets, document the optimizer boundary and CPU bench matrix | CPU 506 passed, 18 skipped; CPU A/B 19.08 ms uncompiled vs 31.23 ms compile with `train_bwd` (not a speedup claim) | No GPU timing or speedup; GPU compile/CUDA graphs remain open |
+| **118** | `opt/docs-matrix-v27` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #117 | Docs only | — |
+| **119** | `opt/amp-train-v2` | Harden opt-in AMP capability/transactional gating, expand full vs forward-only train coverage, and require an enabled CUDA float16 GradScaler; fp32/AMP-off defaults unchanged | CPU parity/soft-skip matrix only; no throughput claim | GPU AMP train bench open |
+| **120** | `opt/auto-thr-v2` | Centralize strict independent AUTO cold/decode gates; add independent-threshold generate A/B and parity/default-eager coverage | CPU parity + `aten::cat=0`; no kernel claim | **P0** GPU threshold/tile validation open |
+| **121** | `opt/profile-v12` | Re-profile the #116–#120 tip and carry CPU operator evidence into status/backlog | Forward warmed `copy_`=12/call, isolated=14; generate=394/call; `cat`/`contiguous`=0 | No GPU timing or speedup; GPU validation remains open |
+| **122** | `docs/opt-status-backlog-v28` | Prior docs-only refresh through #120; superseded/carried forward by this v29 refresh | Docs only | — |
+| **123** | `opt/sparse-v2` | Gate `BDH_SPARSE_PROBE`, add conservative density guardrails, and test that production BDH stays dense/default-off | CPU density re-smoke x=26.63% / xy=11.37% at step 150; sparse did not beat dense; keep OFF | No GPU timing or sparse-kernel claim; GPU validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -308,14 +314,14 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 |------|-------------------------|--------------|
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
-| `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75/#77); `THRESHOLD` default 512; optional `COLD_THRESHOLD` (#auto-tune) |
+| `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75/#77/#120); strict decode/cold gates, `THRESHOLD` default 512, optional `COLD_THRESHOLD` |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` / `MODE` / `FULLGRAPH` | `0` / `default` / `0` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); optional `FULLGRAPH=1` (#84; soft-fallback); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
 | `BDH_PREFETCH_H2D` | `1` on CUDA | `0` to keep H2D on the caller stream; CPU no-op; GPU overlap still needs measurement |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on **CUDA** train boxes (CPU = smoke only) |
 | `BDH_AMP_FORWARD_ONLY` | `0` | `1` for logits-only autocast + fp32 CE |
-| Sparse ReLU | OFF | Only if density + GPU sparse kernel win |
+| Sparse ReLU | OFF | Only with `BDH_SPARSE_PROBE=1` for an explicit probe; enable production path only after density + GPU sparse-kernel win |
 
 ---
 
@@ -347,3 +353,4 @@ python benchmarks/bench_gpu_attn.py --mode decode --T 512
 - Recommending `BDH_COMPILE_MODE=reduce-overhead` on CPU (no CUDA graphs; #63)
 - Re-introducing `aten::cat` in packed `generate`
 - Wiring sparse ReLU into default `BDH.forward` without a measured win
+- Treating CPU density or sparse crossover as a GPU sparse-kernel result; `BDH_SPARSE_PROBE` remains explicit opt-in
