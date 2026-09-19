@@ -14,6 +14,7 @@ from bdh_cache import CacheManager
 
 # Eager import so Attention.forward has no lazy-import graph break under Dynamo.
 from kernels.attention_dispatch import bdh_attn, bdh_attn_decode
+from kernels.attention_bwd import _env_autograd_enabled
 
 
 @dataclasses.dataclass
@@ -191,6 +192,10 @@ class Attention(torch.nn.Module):
         ``blocked`` / ``triton`` / ``cuda`` use ``bdh_attn_decode`` against
         packed past KR/V (``cuda`` → ``kernels.cuda_attn.tril_decode``).
         Default remains ``eager``.
+
+        Train path: ``BDH_ATTN_AUTOGRAD=1`` routes cold (+ multi-token-with-past)
+        through ``StrictTrilAttnFn`` / analytic Q/K/V backward. T=1 decode is
+        unchanged so ``CacheManager`` / ``generate`` keep working with the flag.
         """
         assert K is Q
         B, nh, T, _ = Q.size()
@@ -201,7 +206,8 @@ class Attention(torch.nn.Module):
         if past_kr is None:
             # Training / cold prefill: unified backend dispatch.
             # Semantics: tril(QR @ QR.T, diagonal=-1) @ V — no softmax, no scale.
-            # BDH_ATTN_AUTOGRAD=1 remains supported by the dispatcher.
+            # BDH_ATTN_AUTOGRAD=1 → StrictTrilAttnFn + analytic Q/K/V bwd
+            # (first-class train path; default OFF keeps eager PyTorch autograd).
             out = bdh_attn(QR, QR, V)
             return out, QR, V
 
@@ -232,8 +238,12 @@ class Attention(torch.nn.Module):
         # Multi-token chunk with past (prefill continuation / speculative).
         # Prefer a zero-copy past||new view when QR/V already sit in the packed
         # buffer adjacent to past (CacheManager.reserve). Else empty+copy_
-        # (still cat-free). Eager keeps the split form + tril(diagonal=-1).
-        if impl != "eager":
+        # (still cat-free). Eager keeps the split form + tril(diagonal=-1)
+        # unless BDH_ATTN_AUTOGRAD=1, in which case we go through bdh_attn →
+        # StrictTrilAttnFn so analytic train covers this path too. T=1 decode
+        # above is unchanged (generate is @torch.no_grad; CacheManager safe).
+        use_analytic = _env_autograd_enabled()
+        if impl != "eager" or use_analytic:
             KR_all = _try_extend_seq(past_kr, QR)
             V_all = _try_extend_seq(past_v, V)
             if KR_all is None or V_all is None:

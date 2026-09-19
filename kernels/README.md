@@ -38,7 +38,7 @@ CUDA decode is tiled online vs packed KR/V. Default remains **eager**.
 |------|------|
 | `attention.py` | cold tril + decode: `blocked_*` / `online_*`, `triton_*`, shared `_tiled_score_v` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
-| `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
+| `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`; first-class train path) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |
 | `rope.py` | RoPE rotate: eager / fused PyTorch / optional Triton |
 | `rope_dispatch.py` | `BDH_ROPE_IMPL` → `bdh_rope_rotate()` |

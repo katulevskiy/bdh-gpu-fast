@@ -5,7 +5,10 @@ kernels (blocked / Triton / CUDA) can train without relying on PyTorch's
 graph through the forward implementation.
 
 Opt-in via BDH_ATTN_AUTOGRAD=1 or strict_tril_attn(..., use_fn=True).
-Default eager path in bdh.py is unchanged when the env var is unset.
+Default remains OFF (eager train uses PyTorch autograd through GEMMs).
+When set, cold / multi-token paths go through StrictTrilAttnFn so blocked
+/ Triton / CUDA forwards can train without differentiating the kernel graph.
+T=1 CacheManager decode stays on the decode GEMM path (generate is no_grad).
 """
 
 from __future__ import annotations
@@ -62,6 +65,8 @@ def _forward_impl(
     impl: str,
 ) -> torch.Tensor:
     name = (impl or "eager").strip().lower()
+    if name == "online":
+        name = "blocked"  # alias used in some docs / fuse-scorev notes
     if name == "eager":
         return eager_tril_attn(Q, K, V)
     if name == "blocked":
@@ -70,11 +75,15 @@ def _forward_impl(
         if _can_use_triton(Q):
             return triton_tril_attn(Q, K, V)
         return blocked_tril_attn(Q, K, V)
+    if name == "cuda":
+        from .cuda_attn import tril_score_v
+
+        return tril_score_v(Q, K, V)
     raise ValueError(f"unknown attn impl={impl!r}")
 
 
 class StrictTrilAttnFn(torch.autograd.Function):
-    """Forward via eager/blocked/triton; analytic backward for Q, K, V."""
+    """Forward via eager/blocked/triton/cuda; analytic backward for Q, K, V."""
 
     @staticmethod
     def forward(

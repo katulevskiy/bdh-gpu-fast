@@ -2265,3 +2265,74 @@ OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_blocked_vec.py
 - No PRs to `pathwaycom/*`
 - No change to default `BDH_ATTN_IMPL=eager`
 - No fake “beats eager” claims on CPU
+
+## opt/attn-bwd-train — analytic StrictTrilAttnFn as first-class train path (2026-09-19)
+
+**Branch:** `opt/attn-bwd-train` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `62c226b` (main after blocked-vec #38).
+
+### Goal
+
+Make `BDH_ATTN_AUTOGRAD=1` a clean, documented train path: cold (+ multi-token
+with past) routes through `StrictTrilAttnFn` / `analytic_tril_attn_backward`,
+CacheManager T=1 decode / `generate` stay intact, default remains OFF.
+
+### What changed
+
+| Path | Role |
+|------|------|
+| `kernels/attention_bwd.py` | `_forward_impl` supports `cuda` (+ `online`→blocked); docs |
+| `kernels/attention_dispatch.py` | Document cold / multi-token AUTOGRAD vs T=1 decode |
+| `bdh.py` `Attention.forward` | AUTOGRAD=1: cold + multi-token-with-past → `bdh_attn` → StrictTrilAttnFn; T=1 decode unchanged |
+| `benchmarks/bench_attn_bwd.py` | Tiny-cfg train_step A/B: AUTOGRAD 0 vs 1 |
+| `tests/test_attn_bwd.py` | Full-model grad parity @ dropout=0; pos0==0; generate+flag; cuda+AUTOGRAD |
+
+### When to use the flag
+
+```bash
+# default — PyTorch autograd through eager GEMMs (unchanged)
+unset BDH_ATTN_AUTOGRAD
+
+# opt-in analytic train path (needed when BDH_ATTN_IMPL=blocked|triton|cuda
+# forwards are not safely differentiable via autograd-through-eager)
+export BDH_ATTN_AUTOGRAD=1
+export BDH_ATTN_IMPL=blocked   # example
+```
+
+Use AUTOGRAD=1 when training with a non-eager attention forward. With
+`IMPL=eager`, analytic bwd is still correct (parity @ dropout=0) but the
+profile may still be dominated by the eager T×T forward + M recompute.
+
+### Correctness (this box, CPU-only)
+
+```text
+.venv/bin/python -m pytest tests/test_attn_bwd.py -q
+# 15 passed
+#   analytic == eager autograd; StrictTrilAttnFn grads; gradcheck
+#   full BDH grad parity AUTOGRAD 0 vs 1 @ dropout=0
+#   pos0 == 0; generate works with flag; cuda+AUTOGRAD forwards
+
+.venv/bin/python -m pytest tests/ -q
+# (see commit / PR body for full count)
+```
+
+### Train-step microbench (CPU, Europe/Podgorica)
+
+Tiny cfg `layers=2 d=64 nh=2 B=4 T=64 dropout=0`, `IMPL=eager`, AdamW:
+
+```text
+BDH_ATTN_AUTOGRAD=0  median ~7548 ms
+BDH_ATTN_AUTOGRAD=1  median ~5533 ms  (~1.36× vs off on this run)
+```
+
+**Honest:** CPU-only; absolute ms are box-noise / load-sensitive. Do **not**
+claim GPU speedups. With `IMPL=eager`, AUTOGRAD=1 still materializes T×T in
+forward. GPU unmeasured — re-run `benchmarks/bench_attn_bwd.py` on A100/H100
+(and try `IMPL=blocked|triton|cuda`) before claiming train wins.
+
+### Non-goals
+
+- Default stays AUTOGRAD **off**
+- No softmax / scale / SDPA
+- No PRs to `pathwaycom/*`
+- No fused CUDA/Triton backward kernel (analytic PyTorch M recompute)

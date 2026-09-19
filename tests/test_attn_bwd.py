@@ -202,3 +202,90 @@ def test_use_fn_false_blocked_still_forward():
     Q, K, V = Q.float(), K.float(), V.float()
     out = strict_tril_attn(Q, K, V, impl="blocked", use_fn=False)
     assert torch.allclose(out, blocked_tril_attn(Q, K, V), rtol=1e-5, atol=1e-5)
+
+
+def _tiny_cfg(**kwargs) -> bdh.BDHConfig:
+    defaults = dict(
+        n_layer=1,
+        n_embd=32,
+        n_head=2,
+        mlp_internal_dim_multiplier=4,
+        dropout=0.0,
+        vocab_size=256,
+    )
+    defaults.update(kwargs)
+    return bdh.BDHConfig(**defaults)
+
+
+def test_pos0_zero_strict_tril_fn():
+    """tril(diagonal=-1) ⇒ attention output at position 0 is all zeros."""
+    Q, K, V = _qkv(B=1, H=2, T=5, N=4, D=6, seed=2)
+    Q, K, V = Q.float(), K.float(), V.float()
+    out = strict_tril_attn(Q, K, V, impl="eager", use_fn=True)
+    assert torch.allclose(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
+    out_b = strict_tril_attn(Q, K, V, impl="blocked", use_fn=True)
+    assert torch.allclose(out_b[:, :, 0, :], torch.zeros_like(out_b[:, :, 0, :]))
+
+
+def test_full_model_grad_parity_dropout0(monkeypatch):
+    """Full BDH train grads: AUTOGRAD=1 matches eager autograd at dropout=0."""
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    cfg = _tiny_cfg()
+    torch.manual_seed(0)
+    m0 = bdh.BDH(cfg)
+    torch.manual_seed(0)
+    m1 = bdh.BDH(cfg)
+    m1.load_state_dict(m0.state_dict())
+
+    torch.manual_seed(1)
+    x = torch.randint(0, 256, (2, 16))
+    y = torch.randint(0, 256, (2, 16))
+
+    monkeypatch.delenv("BDH_ATTN_AUTOGRAD", raising=False)
+    m0.zero_grad(set_to_none=True)
+    _, loss0 = m0(x, y)
+    loss0.backward()
+
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    m1.zero_grad(set_to_none=True)
+    _, loss1 = m1(x, y)
+    loss1.backward()
+
+    assert torch.allclose(loss0, loss1, rtol=1e-6, atol=1e-6)
+    max_diff = 0.0
+    for (n0, p0), (n1, p1) in zip(m0.named_parameters(), m1.named_parameters()):
+        assert p0.grad is not None and p1.grad is not None, n0
+        d = (p0.grad - p1.grad).abs().max().item()
+        max_diff = max(max_diff, d)
+        assert torch.allclose(p0.grad, p1.grad, rtol=1e-4, atol=1e-5), (
+            f"{n0} grad mismatch max={d}"
+        )
+    assert max_diff < 1e-4
+
+
+def test_generate_works_with_autograd_flag(monkeypatch):
+    """CacheManager incremental decode must keep working with AUTOGRAD=1."""
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    cfg = _tiny_cfg(n_layer=2)
+    torch.manual_seed(3)
+    m = bdh.BDH(cfg).eval()
+    prompt = torch.randint(0, 256, (1, 8))
+    out = m.generate(prompt.clone(), max_new_tokens=4, temperature=1.0)
+    assert out.shape == (1, 12)
+    # tokens after prompt should be written
+    assert not torch.equal(out[:, 8:], prompt.new_zeros(1, 4))
+
+
+def test_cuda_impl_with_autograd_fn(monkeypatch):
+    """BDH_ATTN_IMPL=cuda + AUTOGRAD=1 must not raise (ref forward + analytic)."""
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "cuda")
+    Q, K, V = _qkv(B=1, H=2, T=4, N=3, D=3, seed=4)
+    Q = Q.float().requires_grad_(True)
+    K = K.float().requires_grad_(True)
+    V = V.float().requires_grad_(True)
+    out = bdh_attn(Q, K, V)
+    assert out[:, :, 0, :].abs().max().item() == 0.0
+    out.sum().backward()
+    assert Q.grad is not None and K.grad is not None and V.grad is not None
