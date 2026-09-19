@@ -176,6 +176,10 @@ NUM_WORKERS = int(os.environ.get("BDH_NUM_WORKERS", "2" if USE_DATALOADER else "
 # Async host-thread double-buffer for BatchPrefetcher (overlap gather with train_step).
 # Set BDH_PREFETCH_ASYNC=0 to force synchronous preload (debug / A/B).
 USE_PREFETCH_ASYNC = os.environ.get("BDH_PREFETCH_ASYNC", "1") not in ("0", "false", "False")
+# CUDA side-stream H2D staging is opt-out. It is always disabled on CPU, so the
+# flag is harmless in CPU-only jobs and keeps the historical CPU path unchanged.
+# Set BDH_PREFETCH_H2D=0 to keep host prefetch but issue H2D on the caller stream.
+USE_PREFETCH_H2D = os.environ.get("BDH_PREFETCH_H2D", "1") not in ("0", "false", "False")
 
 input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
 
@@ -325,22 +329,49 @@ class BatchPrefetcher:
     runs, the producer refills the slot. ``next()`` only blocks if the step
     finished before the gather (rare when step ≫ gather).
 
-    CUDA: producer does gather + ``pin_memory``; caller enqueues H2D on a
-    side stream and waits on the recorded event before returning tensors.
+    CUDA: producer does gather + ``pin_memory``; with ``BDH_PREFETCH_H2D=1``
+    the async path keeps one device batch staged ahead on a side stream and
+    waits on a recorded event only when that batch is consumed. Set the flag to
+    ``0`` to retain host prefetch but use the caller stream for H2D.
     CPU: producer does gather; caller ``.to(device)`` (no-op copy elision).
 
     Sync mode (``BDH_PREFETCH_ASYNC=0`` or ``async_host=False``): same one-slot
     API but preload runs on the caller thread (A/B / debug).
     """
 
-    def __init__(self, split: str = "train", *, async_host: bool | None = None):
+    def __init__(
+        self,
+        split: str = "train",
+        *,
+        async_host: bool | None = None,
+        cuda_staging: bool | None = None,
+    ):
+        """Create a host prefetcher with optional CUDA H2D lookahead.
+
+        ``cuda_staging`` overrides ``BDH_PREFETCH_H2D`` for tests/A-B runs.
+        It is ignored on non-CUDA devices.
+        """
         self.split = split
         self._async = USE_PREFETCH_ASYNC if async_host is None else bool(async_host)
-        self._stream = torch.cuda.Stream() if device.type == "cuda" else None
+        requested_cuda_staging = (
+            USE_PREFETCH_H2D if cuda_staging is None else bool(cuda_staging)
+        )
+        # Never create a CUDA stream merely because the opt-in flag is set: CPU
+        # tests and CPU-only deployments must remain a clean no-op.
+        self._cuda_staging = bool(requested_cuda_staging and device.type == "cuda")
+        self._stream = (
+            torch.cuda.Stream(device=device) if self._cuda_staging else None
+        )
         self._q: queue.Queue | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._host_next: tuple[torch.Tensor, torch.Tensor] | None = None
+        # A staged tuple retains its pinned source tensors until its H2D event
+        # completes. record_stream below additionally hands lifetime tracking to
+        # CUDA's allocator for the asynchronous copy.
+        self._device_next: tuple[
+            torch.Tensor, torch.Tensor, torch.cuda.Event, torch.Tensor, torch.Tensor
+        ] | None = None
         self._error: BaseException | None = None
         if self._async:
             self._q = queue.Queue(maxsize=1)
@@ -385,18 +416,65 @@ class BatchPrefetcher:
                 except queue.Full:
                     continue
 
+    def _stage_to_device(
+        self, x: torch.Tensor, y: torch.Tensor
+    ) -> tuple[
+        torch.Tensor, torch.Tensor, torch.cuda.Event, torch.Tensor, torch.Tensor
+    ]:
+        """Queue one pinned host batch on the dedicated CUDA copy stream."""
+        assert self._stream is not None
+        with torch.cuda.stream(self._stream):
+            xd = x.to(device, non_blocking=True)
+            yd = y.to(device, non_blocking=True)
+            # Keep the host storage alive until the copy stream is done. This
+            # matters because the producer queue can hand off its Python refs
+            # immediately after staging.
+            x.record_stream(self._stream)
+            y.record_stream(self._stream)
+            ev = self._stream.record_event()
+        return xd, yd, ev, x, y
+
+    @staticmethod
+    def _wait_staged(
+        staged: tuple[
+            torch.Tensor, torch.Tensor, torch.cuda.Event, torch.Tensor, torch.Tensor
+        ],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Make a staged batch visible to the caller's current CUDA stream."""
+        xd, yd, ev, _x, _y = staged
+        torch.cuda.current_stream(device=device).wait_event(ev)
+        return xd, yd
+
     def _to_device(
         self, x: torch.Tensor, y: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Caller-thread device transfer (CUDA side-stream when available)."""
-        if self._stream is not None:
-            with torch.cuda.stream(self._stream):
-                xd = x.to(device, non_blocking=True)
-                yd = y.to(device, non_blocking=True)
-                ev = self._stream.record_event()
-            torch.cuda.current_stream().wait_event(ev)
-            return xd, yd
+        """Caller-thread transfer; CUDA staging is enabled only when requested."""
+        if self._cuda_staging:
+            return self._wait_staged(self._stage_to_device(x, y))
         return _to_train_device(x, y)
+
+    def _next_cuda_staged(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return one device batch while staging the following batch.
+
+        The first call primes two H2D copies. On later calls, the copy stream
+        can issue batch N+1 while the caller's current stream computes on batch
+        N, then the current stream waits only for the already-queued event.
+        """
+        ready = self._device_next
+        if ready is None:
+            ready = self._stage_to_device(*self._take_host())
+        self._device_next = None
+        try:
+            # Keep one device batch ahead. The host producer is already filling
+            # the queue while train_step runs, so this should not add a CPU
+            # stall beyond the normal prefetch handoff.
+            self._device_next = self._stage_to_device(*self._take_host())
+        except BaseException:
+            # Do not retain a stale staged batch after surfacing a producer
+            # failure; the caller should see the failure rather than reuse it.
+            self._device_next = None
+            raise
+        return self._wait_staged(ready)
 
     def preload(self) -> None:
         """Sync path only: fill the one host slot on the caller thread."""
@@ -428,6 +506,8 @@ class BatchPrefetcher:
         return host
 
     def next(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._cuda_staging and self._async:
+            return self._next_cuda_staged()
         host = self._take_host()
         if not self._async:
             # Sync: refill before return (same as historical one-slot behavior).
@@ -450,6 +530,7 @@ class BatchPrefetcher:
         self._thread = None
         self._q = None
         self._host_next = None
+        self._device_next = None
 
     def __del__(self):
         try:
