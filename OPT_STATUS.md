@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#299; #160 docs scope retained)
+# OPT status — landed work (#1–#306; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `1a2a8f8` (#299 full-vocab sampler output layout contract) follows #298 aliased score-V dispatch gradient contract, #297 tiled multi-query online decode contract, #296 docs refresh through #294, #295 AUTO blank cold-threshold contract, #294 gen-bench AUTO input contract, #293 batched blocked-tile partial-tile coverage, #292 sparse guardrail threshold coverage, #291 prefetch H2D global opt-out coverage, #290 GPU-harness device-local synchronization, and #289 AMP forward-only contract. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
+Tip pointer: `3e87aaa` (#306 GPU-measure skip boundary) follows #305 packed multi-query decode GEMM contract, #304 self-attention backward dispatch contract, #303 successful compile-probe cleanup, #302 CUDA flag opt-in boundary, #301 paired RoPE position contract, and #299 full-vocab sampler output layout contract. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -456,8 +456,14 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **297** | `tests/test_online_decode_v5.py` | CPU-only tiled multi-query online decode contract across a decode score-tile boundary with signed raw QK scores, past-only per-head values, and no GPU performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **298** | `tests/test_fuse_scorev.py` | Extend aliased self-attention Q/K score×V gradient parity through the public dispatch entry point across blocked, online, Triton-fallback, and CUDA-reference CPU paths; no GPU performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **299** | `tests/test_layout_v3.py` | Extend the sampler layout contract to full-vocab top-k fallback, including exact and overflow top-k writes into a non-contiguous decode narrow with seeded output parity; no GPU performance claim | CPU-only layout contract coverage; no GPU timing or sampler-layout claim | **P0** GPU sampler-layout validation remains open |
-| **tip** | `tests/test_layout_v3.py` | Tip `1a2a8f8`: full-vocab sampler output layout contract; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
-| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `8b562f4`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#284 add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **301** | `tests/test_rope_fuse.py` | CPU-only paired T=1 RoPE cache refresh across absolute decode positions for eager and fused dispatch; no GPU timing or fused-RoPE result | **P0** GPU fused-RoPE validation remains open |
+| **302** | `tests/test_cuda_build.py` | CPU-only verify `BDH_BUILD_CUDA` alone remains a pure-Python/no-native-extension opt-in boundary; no GPU build or timing claim | **P0** GPU build/measurement remains open |
+| **303** | `tests/test_compile_v9_contract.py` | CPU-only successful `train_bwd` compile-probe cleanup restores caller train mode and clears probe gradients; no GPU/CUDA-graph claim | **P1** GPU inductor / CUDA-graph validation remains open |
+| **304** | `tests/test_attn_bwd_v4_contract.py` | CPU-only self-attention alias backward parity across eager, blocked, online, Triton-fallback, and CUDA-reference dispatch; raw strict-tril semantics preserved, with no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **305** | `tests/test_decode_gemm_v9.py` | CPU-only packed multi-query decode GEMM parity for shared-value and per-head K/V layouts across blocked, online, and Triton fallback; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **306** | `tests/test_bench_gpu_attn.py` | CPU-only unavailable-CUDA skip returns before device selection or timing; no GPU timing or speedup claim | **P0** real GPU measurement remains open |
+| **tip** | `tests/test_bench_gpu_attn.py` | Tip `3e87aaa`: GPU-measure skip boundary; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `8b562f4`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#284 and #301–#306 add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -571,7 +577,6 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#282** `b573e96` adds CPU-only mixed-dtype RoPE parity for non-contiguous fp32 cache slots receiving fp16 writes; no GPU timing or fused-RoPE claim.
 - **#283** `de72dad` adds CPU-only train_bwd no-loss fallback coverage, preserving caller mode and clearing gradients; no GPU or CUDA-graph claim.
 - **#284** `8b562f4` adds CPU-only coverage for a non-executable PATH `nvcc` entry, preserving the clear missing-toolchain skip; no GPU build or timing claim.
-- **Current tip** `8b562f4` carries the flat profile-v20 counts plus the CPU-only contracts/docs through #284; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 - **#285** `0ea2052` and **#286** `f19f972` are docs refreshes carrying the private matrix through #282 and #284.
 - **#287** `609973c` adds CPU-only raw strict-tril score/backward contract coverage; no GPU timing.
@@ -588,6 +593,13 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#297** `1b4e695` adds CPU-only tiled multi-query online decode coverage across a decode score-tile boundary; no GPU performance claim.
 - **#298** `34c6d60` adds CPU-only aliased score-V dispatch gradient parity across supported paths; no GPU performance claim.
 - **#299** `1a2a8f8` adds CPU-only full-vocab sampler output-layout coverage for exact and overflow top-k on a non-contiguous decode narrow; no GPU performance claim.
+- **#301** `58c95c0` adds CPU-only paired T=1 RoPE cache-refresh coverage across absolute decode positions for eager and fused dispatch; no GPU timing or fused-RoPE result.
+- **#302** `a5a09ab` adds CPU-only coverage that `BDH_BUILD_CUDA` alone remains a pure-Python/no-native-extension opt-in boundary; no GPU build or timing claim.
+- **#303** `48d7d0d` adds CPU-only successful `train_bwd` compile-probe cleanup coverage, restoring caller train mode and clearing probe gradients; no GPU/CUDA-graph claim.
+- **#304** `fdae58e` adds CPU-only self-attention alias backward parity across supported dispatches with raw strict-tril semantics; no GPU timing or performance claim.
+- **#305** `6f6e871` adds CPU-only packed multi-query decode GEMM parity for shared-value and per-head K/V layouts; no GPU timing or performance claim.
+- **#306** `3e87aaa` adds CPU-only unavailable-CUDA skip coverage that returns before device selection or timing; no GPU timing or speedup claim.
+- **Current tip** `3e87aaa` carries the flat profile-v20 counts plus CPU-only contracts/docs through #306; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
