@@ -324,6 +324,29 @@ def test_attn_auto_nested_override_restores_outer_gates(monkeypatch):
     assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
 
 
+def test_attn_auto_nested_exception_restores_outer_gates(monkeypatch):
+    """An interrupted nested AUTO probe must restore the outer override."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "old-auto")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "old-decode")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "old-cold")
+
+    with bench_generate._attn_auto(True, threshold=256, cold_threshold=128):
+        with pytest.raises(RuntimeError, match="stop nested auto"):
+            with bench_generate._attn_auto(False, threshold=512):
+                assert os.environ["BDH_ATTN_AUTO"] == "0"
+                assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "512"
+                assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "128"
+                raise RuntimeError("stop nested auto")
+
+        assert os.environ["BDH_ATTN_AUTO"] == "1"
+        assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "256"
+        assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "128"
+
+    assert os.environ["BDH_ATTN_AUTO"] == "old-auto"
+    assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
+    assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
+
+
 def test_attn_auto_applies_zero_thresholds_and_restores_them(monkeypatch):
     """Zero is a valid strict gate and must not be treated as omitted."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "0")
