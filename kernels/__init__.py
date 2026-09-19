@@ -16,6 +16,7 @@ from .attention import pick_triton_cold_tiles, triton_decode_available
 from .rope_dispatch import (
     backend_info as rope_backend_info,
     bdh_rope_rotate,
+    bdh_rope_rotate_paired,
     resolve_rope_impl,
 )
 from .attention_bwd import (
@@ -85,6 +86,7 @@ __all__ = [
     "CUDA_DECODE_TILE_N",
     "CUDA_DECODE_TILE_N_MAX",
     "bdh_rope_rotate",
+    "bdh_rope_rotate_paired",
     "resolve_rope_impl",
     "rope_backend_info",
 ]

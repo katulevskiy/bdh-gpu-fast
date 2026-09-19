@@ -16,8 +16,11 @@ from bdh_cache import CacheManager
 # Dynamo or the generate decode loop (n_layer × steps).
 from kernels.attention_dispatch import bdh_attn, bdh_attn_decode, resolve_attn_impl
 from kernels.attention_bwd import _env_autograd_enabled
-from kernels.rope_dispatch import bdh_rope_rotate, resolve_rope_impl
-from kernels.rope import rope_rotate_paired
+from kernels.rope_dispatch import (
+    bdh_rope_rotate,
+    bdh_rope_rotate_paired,
+    resolve_rope_impl,
+)
 
 
 @dataclasses.dataclass
@@ -361,7 +364,9 @@ class Attention(torch.nn.Module):
         if T == 1:
             paired = self.t1_cis_pairs(rope_start, Q.device)
             if paired is not None:
-                QR = rope_rotate_paired(Q, paired[0], paired[1], out=out_kr)
+                QR = bdh_rope_rotate_paired(
+                    Q, paired[0], paired[1], out=out_kr
+                )
             else:
                 QR = self.rope(None, Q, cos_sin=cos_sin, out=out_kr)
         else:
