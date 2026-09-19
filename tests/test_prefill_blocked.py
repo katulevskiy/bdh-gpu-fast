@@ -309,6 +309,44 @@ def test_bdh_attn_blocked_autograd_preserves_padded_qk_sequence_storage(
     assert torch.count_nonzero(got_grads[1][:, :, T, :]) == 0
 
 
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_bdh_attn_blocked_autograd_preserves_padded_v_sequence_storage(
+    impl, value_heads
+):
+    """Dispatcher-selected prefill preserves capacity-padded V rows."""
+    T, B, H, N, D = 257, 2, 2, 5, 4
+    g = torch.Generator().manual_seed(347 + value_heads)
+    Q0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    K0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    V_storage0 = torch.randn(
+        B, value_heads, T + 1, D, dtype=torch.float64, generator=g
+    )
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q = Q0.clone().requires_grad_()
+        K = K0.clone().requires_grad_()
+        V_storage = V_storage0.clone().requires_grad_()
+        V = V_storage[:, :, :T, :]
+        assert not V.is_contiguous()
+        assert V.stride(-2) == D
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad((out * weight).sum(), (Q, K, V_storage))
+        return out, grads
+
+    ref, ref_grads = run(eager_tril_attn)
+    got, got_grads = run(
+        lambda Q, K, V: bdh_attn(Q, K, V, impl=impl, use_autograd_fn=True)
+    )
+
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+    assert torch.count_nonzero(got_grads[2][:, :, T, :]) == 0
+
+
 @pytest.mark.parametrize("T", [256, 512, 1024])
 def test_blocked_online_parity_long_t(T):
     Q, K, V = _qkv(T, seed=T)
