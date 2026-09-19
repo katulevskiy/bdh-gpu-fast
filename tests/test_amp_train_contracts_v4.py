@@ -145,6 +145,35 @@ def test_cpu_amp_failure_preserves_active_amp_state(monkeypatch):
     assert tr._amp_forward_only is previous["forward_only"]
 
 
+def test_amp_construction_failure_preserves_full_previous_state(monkeypatch):
+    """A backend construction failure cannot partially replace AMP state."""
+    if tr.device.type != "cpu":
+        pytest.skip("CPU-only AMP construction contract")
+    tr.configure_amp("float32")
+    previous = {
+        "dtype": tr.dtype,
+        "ptdtype": tr.ptdtype,
+        "ctx": tr.ctx,
+        "scaler": tr.scaler,
+        "use_scaler": tr._use_scaler,
+        "forward_only": tr._amp_forward_only,
+    }
+    monkeypatch.setattr(tr, "cpu_bf16_available", lambda: True)
+
+    def _raise_grad_scaler(*args, **kwargs):
+        raise RuntimeError("synthetic GradScaler construction failure")
+
+    monkeypatch.setattr(tr.torch.amp, "GradScaler", _raise_grad_scaler)
+    with pytest.raises(RuntimeError, match="synthetic GradScaler construction failure"):
+        tr.configure_amp("bfloat16", forward_only=True)
+    assert tr.dtype == previous["dtype"]
+    assert tr.ptdtype is previous["ptdtype"]
+    assert tr.ctx is previous["ctx"]
+    assert tr.scaler is previous["scaler"]
+    assert tr._use_scaler is previous["use_scaler"]
+    assert tr._amp_forward_only is previous["forward_only"]
+
+
 def test_invalid_amp_request_preserves_full_previous_state():
     """An invalid dtype request cannot partially replace AMP configuration."""
     tr.configure_amp("float32")
