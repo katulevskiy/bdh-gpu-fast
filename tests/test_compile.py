@@ -217,6 +217,7 @@ def test_train_backward_probe_without_targets_soft_falls_back(monkeypatch, capsy
     assert out is model
     captured = capsys.readouterr().out
     assert "probe=train_bwd requires example_y" in captured
+    assert "no backward probe was attempted" in captured
     assert "pass example_y to maybe_compile" in captured
     assert "BDH_COMPILE_PROBE=train" in captured
 
@@ -255,6 +256,32 @@ def test_maybe_compile_train_probe_fallback_and_enable():
     # Restore default so other tests importing train stay opt-in-off
     os.environ["BDH_COMPILE"] = "0"
     importlib.reload(tr)
+
+
+def test_maybe_compile_eval_probe_cpu_smoke(monkeypatch, capsys):
+    """The eval probe runs on CPU and restores the caller's train mode."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "eval")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    assert out is not None
+    assert out.training
+    captured = capsys.readouterr().out
+    assert "probe=eval" in captured
 
 
 def test_generate_disabled_under_compile():
@@ -895,7 +922,8 @@ def test_compile_first_probe_failure_reports_retry_guidance(monkeypatch, capsys)
     captured = capsys.readouterr().out
     assert out is model
     assert "first probe failed" in captured
-    assert "soft-fallback to original eager module" in captured
+    assert "compiled wrapper is discarded" in captured
+    assert "original eager module is retained" in captured
     assert "check the probe inputs and backend" in captured
 
 
