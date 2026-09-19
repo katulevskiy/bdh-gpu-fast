@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#165; #160 docs scope retained)
+# OPT status — landed work (#1–#169; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `aa73a43` (`#165` shared-V decode epilogue follows `#164` packed T=1 decode views, `#163` structured GPU-attention measurement, `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2; `#158` docs refresh through #157 and `#157` profile-v15 remain documented below). The requested through-#160 documentation is retained, with #159 now landed, #161 profile-v16 carried forward, #163 structured GPU measurement scaffolding, #164 packed-view decode deepening, and #165 shared-V decode accumulation deepening. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163 adds structured cold/decode/dtype measurement and CPU skip coverage, #164 preserves capacity-strided packed KR/V decode views without an unconditional staging copy, and #165 accumulates B>1 shared-V decode tiles in place; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `62acaa7` (`#169` prefetch H2D v3 follows `#168` fused RoPE scaffold v3, `#167` docs refresh through #165, `#166` compile-train-v4 fallback guidance, and `#165` shared-V decode epilogue after `#164` packed T=1 decode views, `#163` structured GPU-attention measurement, `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2; `#158` docs refresh through #157 and `#157` profile-v15 remain documented below). The requested through-#160 documentation is retained, with #159 now landed, #161 profile-v16 carried forward, #163 structured GPU measurement scaffolding, #164 packed-view decode deepening, #165 shared-V decode accumulation deepening, #166 actionable compile-probe fallback guidance, #168 actionable Triton skip reasons plus strided T=1 RoPE output parity, and #169 expanded CPU no-op coverage plus explicit CUDA staged-buffer lifetime guidance. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163, #164, #165, #166, #168, and #169 add no CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#165)
+## Landed opts (#1–#169)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -343,6 +343,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **163** | `opt/gpu-measure-v2` | Deepen structured GPU-attention measurement for cold and T=1 decode paths with JSON fields, parity deltas, and CPU-safe skip diagnostics; preserve defaults and raw strict `tril(-1)` math | CPU tests/skip path only here; no CUDA run or GPU win claim | **P0** run on real GPU remains open |
 | **164** | `opt/decode-gemm-v3` | Preserve capacity-strided packed CacheManager Q/K/V views in T=1 Triton decode; avoid an unconditional staging copy while retaining eager defaults, raw strict `tril(-1)`, and past-only decode semantics | CPU parity/stride contract; no GPU timing | **P0** GPU decode measure / cold CUDA-Triton validation |
 | **165** | `opt/scorev-fuse-v4` | Accumulate B>1 shared-V decode tiles in place, removing the accumulated shared-V score×V staging product while preserving CPU-safe strict-tril parity, autograd fallback, and eager defaults | CPU parity/coverage; no GPU timing | **P0** GPU decode measure / cold CUDA-Triton validation |
+| **166** | `opt/compile-train-v4` | Clarify unprobed, missing-target, and first-probe `torch.compile` fallbacks with actionable retry guidance; preserve compile/probe defaults and eager attention | `test_compile.py`: 37 passed, 1 skipped; full suite: 561 passed, 19 skipped; CPU-only diagnostics | No GPU/CUDA-graph measurement; compile validation remains open |
+| **167** | `opt/docs-v41` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #165 on the #168 predecessor tip | Docs only | — |
+| **168** | `opt/rope-gpu-v3` | Expose stable Triton/CUDA skip reasons and preserve T=1 paired RoPE parity for a strided cache-slot-like `out=` buffer without changing eager defaults | Focused CPU: 41 passed, 2 skipped; full suite: 569 passed, 19 skipped, 3 warnings; no GPU timing | **P0** GPU fused-RoPE validation remains open |
+| **169** | `opt/prefetch-h2d-v3` | Expand CPU no-op coverage across async/sync host modes and H2D overrides; document CUDA staged-buffer event/lifetime handoff without changing defaults | CPU: 20 passed, 1 skipped; full suite: 571 passed, 19 skipped, 3 warnings; no GPU timing | GPU H2D overlap/throughput remains unmeasured |
 
 ### Concurrent main updates
 
@@ -350,6 +354,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#161** `opt/profile-v16` merged as `8bd6b17`; **#163** `opt/gpu-measure-v2` merged as `d0e667b` with structured GPU measurement scaffolding but no CUDA results on this box.
 - **#164** `opt/decode-gemm-v3` merged as `7719e9a`; preserves capacity-strided packed T=1 decode views without an unconditional staging copy, with CPU parity only and no CUDA timing.
 - **#165** `opt/scorev-fuse-v4` merged as `aa73a43`; deepens B>1 shared-V decode accumulation in place with CPU-safe strict-tril parity, no CUDA timing.
+- **#166** `opt/compile-train-v4` merged as `79eef11`; clarifies missing-target and first-probe soft-fallback guidance without changing compile/probe defaults or making a GPU claim.
+- **#167** `opt/docs-v41` merged as `fb698fc`; refreshes the status/backlog docs through #165.
+- **#168** `opt/rope-gpu-v3` merged as `c3233ed`; exposes actionable Triton skip reasons and adds CPU parity for strided T=1 RoPE output buffers, with no GPU timing.
+- **#169** `opt/prefetch-h2d-v3` merged as `62acaa7`; expands CPU no-op coverage across host/H2D settings and documents CUDA staged-buffer lifetime, with no GPU timing or overlap claim.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
