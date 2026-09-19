@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#331+; #160 docs scope retained)
+# OPT status — landed work (#1–#342; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `cc20049` (#331 long-path score×V gradients) follows #330 offset packed online-decode views, #329 shared AUTO-threshold recovery, #328 sparse falsey-gate coverage, #327 blocked-prefill V-layout coverage, #326 AMP forward-only train-step coverage, #325 CPU DataLoader H2D identity coverage, #324 docs-v69, #323 packed decode GEMM dtype parity, and the gen-bench threshold-sweep contract at `6d575a3`. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
+Tip pointer: `59030a3` (#342 forward-only AMP CE input contract) follows #341 CPU DataLoader worker H2D coverage, #340 GPU-bench timing skip coverage, #339 T=1 decode dtype coverage, #338 compile default-option coverage, #337 half-dtype attention backward coverage, #336 CUDA-build opt-in coverage, #335 gen-bench prompt validation, #334 paired RoPE gradient coverage, #333 strided sampler-layout coverage, and #332 docs-v70. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#331+; prefetch, docs-v69, sparse, AMP, blocked, AUTO, packed shared-V, per-head score×V, layout, RoPE, compile, CUDA-build, duplicate-Q, forced-CPU measurement, packed decode dtype, score×V gradients, and online-decode tip coverage)
+## Landed opts (#1–#342; prefetch, docs-v70, sparse, AMP, blocked, AUTO, packed shared-V, per-head score×V, layout, RoPE, compile, CUDA-build, duplicate-Q, forced-CPU measurement, packed decode dtype, score×V gradients, sampler layout, GPU-harness skips, CPU DataLoader worker coverage, and forward-only AMP CE coverage)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -486,8 +486,19 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **329** | `tests/test_auto_threshold_contract_v11.py` | Cover malformed shared AUTO threshold overrides across decode and cold dispatch, then recover after a valid update at the strict boundary | CPU-only AUTO threshold contract; no GPU timing or threshold claim | **P0** GPU threshold/tile validation remains open |
 | **330** | `tests/test_online_decode_v5.py` | Deepen long CPU scans over nonzero-offset, capacity-padded packed K/V views; preserve raw decode parity and read-only packed cache views | CPU-only packed-view parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **331** | `tests/test_fuse_scorev.py` | Extend long-path score×V coverage to distinct Q/K and per-head V gradients while preserving raw scores × strict `tril(-1)` × V | CPU-only gradient parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
-| **tip** | `tests/test_fuse_scorev.py` | Tip `cc20049`: #331 long-path score×V gradients follows #330 offset packed views, #329 AUTO recovery, #328 sparse gate, #327 blocked-prefill V layouts, #326 AMP forward-only, #325 prefetch identity, and docs-v69; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
-| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `cc20049`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #307–#331 and follow-up threshold-sweep tests add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **332** | `opt/docs-v70` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #331 | Docs only; no GPU evidence | — |
+| **333** | `tests/test_layout_v3.py` | Protect strided sampler outputs and neighboring backing values across multinomial, narrow top-k, and full-vocabulary fallback paths | CPU-only layout contract; no GPU timing or sampler-layout claim | **P0** GPU layout/measurement remains open |
+| **334** | `tests/test_rope_fuse.py` | Deepen paired T=1 RoPE CPU fallback coverage with eager input-gradient parity | CPU-only gradient parity; no GPU timing or fused-RoPE result | **P0** GPU fused-RoPE validation remains open |
+| **335** | `benchmarks/bench_generate.py` / `tests/test_bench_generate.py` | Reject malformed or empty AUTO prompt-length lists before model/device setup | CPU-only fail-closed harness contract; no GPU generate claim | **P1** GPU generate measurement remains open |
+| **336** | `tests/test_cuda_build.py` | Keep non-`1` extension flags on the pure-Python path, including paired CUDA/CPU flags | CPU-only setup contract; no GPU build or timing claim | **P0** GPU build/measurement remains open |
+| **337** | `tests/test_attn_bwd_v4_contract.py` | Cover fp16/bfloat16 tiled strict-tril backward parity and restore input-gradient dtypes | CPU-only half-dtype parity; no GPU timing or train claim | **P0** real GPU attention-backward measurement remains open |
+| **338** | `tests/test_compile_v11_contract.py` | Verify the successful default `train_bwd` compile probe forwards mode without forcing `fullgraph=False` and cleans up | CPU-only compile contract; no GPU/CUDA-graph measurement | **P1** GPU inductor/CUDA-graph validation remains open |
+| **339** | `tests/test_decode_gemm_v11.py` | Cover packed T=1 decode dtype parity for fp16/bfloat16 and shared/per-head value layouts | CPU-only decode parity; no GPU timing or performance claim | **P0** real GPU decode/cold CUDA–Triton validation remains open |
+| **340** | `tests/test_bench_gpu_attn.py` | Keep timing-only backend failures as explicit skips with null medians and no CPU-smoke GPU claims | CPU-only GPU-harness contract; no GPU timing result | **P0** real GPU measurement remains open |
+| **341** | `tests/test_dataloader.py` | Keep CPU DataLoader workers on `pin_memory=False` without CUDA probing or CUDA object construction | CPU-only worker/H2D contract; no H2D timing or overlap claim | **P1** GPU H2D overlap remains unmeasured |
+| **342** | `tests/test_amp_train_contracts_v12.py` | Verify forward-only AMP sends flattened fp32 logits and int64 targets to cross-entropy outside autocast | CPU-safe AMP contract; no GPU throughput claim | **P3** GPU AMP train measurement remains open |
+| **tip** | `tests/test_amp_train_contracts_v12.py` | Tip `59030a3`: #332–#342 add docs and CPU-safe layout, RoPE, gen-bench, CUDA-build, analytic-bwd, compile, decode, GPU-harness, DataLoader-worker, and forward-only AMP CE contracts only; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `59030a3`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #332–#342 add CPU-safe contract or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -648,7 +659,19 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#329** `b516f3b` covers malformed shared AUTO threshold recovery across decode and cold dispatch; no GPU timing or threshold claim.
 - **#330** `eb0c2ee` covers nonzero-offset, capacity-padded packed online-decode views with raw parity and read-only cache assertions; no GPU timing or performance claim.
 - **#331** `cc20049` extends long-path score×V coverage to distinct Q/K and per-head V gradients; no GPU timing or performance claim.
-- **Current tip** `cc20049` carries the flat profile-v20 counts plus CPU-only contracts/docs through #331+; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#332** `4dfab0e` refreshes `OPT_STATUS.md` / `OPT_BACKLOG.md` through #331 as docs-v70; no GPU evidence.
+- **#333** `bf2758a` protects strided sampler outputs and neighboring backing values across CPU layout paths; no GPU timing or sampler-layout claim.
+- **#334** `26e64c1` deepens paired T=1 RoPE CPU input-gradient parity against eager rotation; no GPU timing or fused-RoPE result.
+- **#335** `a83f063` rejects malformed AUTO prompt-length lists before model setup; CPU harness contract only.
+- **#336** `b967fe5` keeps non-1 extension flags on the pure-Python path; no GPU build or timing claim.
+- **#337** `4c71e14` covers fp16/bfloat16 strict-tril analytic backward parity and input-gradient dtype restoration; no GPU train claim.
+- **#338** `3e9dce4` covers default compile option forwarding without forcing `fullgraph=False`; no GPU/CUDA-graph measurement.
+- **#339** `65c8ae2` covers packed T=1 decode dtype parity for fp16/bfloat16 and shared/per-head values; no GPU timing claim.
+- **#340** `10cff45` keeps timing-only backend failures as explicit skips with null medians; CPU smoke makes no GPU timing claim.
+- **#341** `c4c87a6` covers CPU DataLoader workers with pinning disabled and no CUDA setup; no H2D timing or overlap claim.
+- **#342** `59030a3` covers forward-only AMP CE input boundaries: fp32 flattened logits, int64 flattened targets, and no autocast in CE; no GPU throughput claim.
+- **Current tip** `59030a3` carries the flat profile-v20 counts plus CPU-only contracts/docs through #342; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **Current tip** `c4c87a6` carries the flat profile-v20 counts plus CPU-only contracts/docs through #341; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 

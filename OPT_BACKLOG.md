@@ -6,8 +6,8 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `tril(diagonal=-1)` — **no softmax**, **no `1/√d`**, **no**
 `F.scaled_dot_product_attention`.
 
-Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), with profile-v20 counts unchanged: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, `cat=0`, and `contiguous=0`. Through tip `cc20049`, #307 prefetch, #308 docs-v67, #309 sparse, #310 AMP, #311 blocked-prefill, #312 AUTO validation, #314 packed shared-V online-decode parity, #315 per-head score×V parity, #316 layout, #317 docs-v68, #318 RoPE, #319 compile, #320 CUDA-build, #321 duplicate-Q backward, #322 forced-CPU measurement, #323 packed decode GEMM dtype parity, #324 docs-v69, #325 prefetch identity, #326 AMP forward-only, #327 blocked-prefill V layouts, #328 sparse falsey gate, #329 AUTO recovery, #330 offset packed online-decode views, #331 long-path score×V gradients, and the gen-bench threshold-sweep follow-ups add CPU-safe contract/harness/docs coverage only; none adds a CUDA run, GPU timing, GPU speedup, sparse-kernel result, or cold CUDA–Triton validation. Absolute ms are **profiler-inflated**; use `% self CPU` and call counts. Re-run on GPU before claiming kernel wins.
-Post-#307–#331+ current tip (`cc20049`): #307 deepens CPU H2D-prefetch identity/no-allocation behavior; #308 is docs-v67 through #306; #309 makes the sparse density guardrail evaluate the latest sample; #310 completes CPU-safe AMP forward-only toggle coverage and explicit override precedence; #311 exercises blocked/prefill AUTO dispatch above threshold with non-divisible strict-tril parity; #312 rejects malformed/negative AUTO cold thresholds before dispatch with clean recovery after a valid update; #314 preserves packed shared-V online decode parity across a tiled multi-query boundary; #315 preserves distinct-Q/K score×V parity with per-head V values across the long blocked/online path; #316 covers non-unit-stride sampler outputs; #317 is docs-v68; #318 covers paired T=1 RoPE writes into a strided output slot; #319 covers successful compile option forwarding and probe cleanup; #320 makes the explicit CPU extension flag take precedence over CUDA build; #321 pins duplicate-Q strict-tril backward locality; #322 keeps forced-CPU smoke from initializing GPU metadata while preserving CPU timing labels; #323 adds packed multi-query decode GEMM float16/bfloat16 parity across broadcast and per-head values; #324 is docs-v69; #325 deepens CPU DataLoader H2D identity/no-probe coverage; #326 covers forward-only AMP train-step boundaries; #327 extends blocked-prefill parity across shared/head-matched V; #328 hardens false-like sparse-probe gates; #329 covers malformed shared AUTO threshold recovery across decode and cold paths; #330 covers nonzero-offset, capacity-padded packed online-decode views with read-only cache assertions; and #331 extends long-path score×V coverage to distinct Q/K and per-head V gradients. The gen-bench threshold-sweep follow-up de-duplicates decode thresholds and mirrors the cold gate. All evidence is CPU-only; sparse remains opt-in/default-off, defaults remain eager/fp32/AUTO-off, and real GPU measurement plus cold CUDA–Triton validation remain P0.
+Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), with profile-v20 counts unchanged: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, `cat=0`, and `contiguous=0`. Through tip `59030a3`, #307–#342 plus the gen-bench threshold-sweep follow-ups add CPU-safe contract, harness, and docs coverage only; none adds a CUDA run, GPU timing, GPU speedup, sparse-kernel result, or cold CUDA–Triton validation. Absolute ms are **profiler-inflated**; use `% self CPU` and call counts. Re-run on GPU before claiming kernel wins.
+Post-#307–#342 current tip (`59030a3`): #307–#331 plus the threshold-sweep follow-ups retain their CPU-safe contracts; #332 is docs-v70; #333 protects strided sampler outputs; #334 deepens paired T=1 RoPE gradient parity; #335 hardens gen-bench prompt-length validation before model setup; #336 keeps non-1 CUDA-extension flags pure-Python; #337 covers fp16/bfloat16 analytic backward parity; #338 covers default compile option forwarding; #339 covers packed T=1 decode dtype parity; #340 keeps timing-only GPU-backend failures as explicit skips with null medians; and #341 keeps CPU DataLoader workers on the non-pinned/no-CUDA path; #342 keeps forward-only AMP cross-entropy inputs flattened/fp32 outside autocast. All evidence is CPU-only; sparse remains opt-in/default-off, defaults remain eager/fp32/AUTO-off, and real GPU measurement plus cold CUDA–Triton validation remain P0.
 
 Post-#95 re-profile (`opt/profile-v9`, source `8e7a4d2`; current docs tip `1363794` after #96–#102): forward warmed harness `aten::copy_` is 48 over three active calls (16/call), while an isolated one-forward check reproduces #95's **18**; forward and generate remain `aten::cat=0` and `aten::contiguous=0`. Generate `aten::copy_` is 1,674 over three active calls (558/call), so generate remains copy_-heavy. CPU-only evidence; **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v9.
 
@@ -449,7 +449,24 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 ## Ranked next work
 
-Current evidence boundary through `cc20049`: #307–#331+ and the gen-bench threshold-sweep follow-ups add only CPU-safe prefetch, docs-v67/v69, sparse, AMP, blocked-prefill, packed shared-V online-decode, per-head score×V, sampler-layout, RoPE output-slot, compile, CUDA-build, duplicate-Q backward, forced-CPU measurement, packed decode dtype, AUTO-threshold, long-path gradients, and harness-contract coverage. No CUDA run, GPU timing, GPU speedup, sparse-kernel result, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
+Current evidence boundary through `59030a3`: #332–#342 add docs plus CPU-safe layout, RoPE, gen-bench, CUDA-build, analytic-backward, compile, decode, GPU-harness, DataLoader-worker, and forward-only AMP CE contracts on top of the earlier CPU-only matrix. No CUDA run, GPU timing, GPU speedup, sparse-kernel result, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
+
+Recent #332–#341 contract matrix:
+
+| # | Landing | Evidence boundary |
+|---|---|---|
+| #332 docs-v70 | `4dfab0e` — docs refresh through #331 | Docs only; no GPU evidence |
+| #333 layout | `bf2758a` — strided sampler outputs preserve neighboring backing values | CPU-only; no GPU timing |
+| #334 rope | `26e64c1` — paired T=1 RoPE input-gradient parity | CPU-only; no fused-RoPE result |
+| #335 gen-bench | `a83f063` — malformed prompt lists fail closed before model setup | CPU-only harness contract |
+| #336 CUDA | `b967fe5` — non-1 extension flags remain pure-Python | CPU-only setup contract |
+| #337 attn-bwd | `4c71e14` — fp16/bfloat16 strict-tril backward parity and grad dtype restoration | CPU-only; no GPU train claim |
+| #338 compile | `3e9dce4` — default compile probe omits false fullgraph option | CPU-only; no CUDA-graph result |
+| #339 decode | `65c8ae2` — packed T=1 decode dtype parity | CPU-only; no GPU timing |
+| #340 gpu-measure | `10cff45` — timing-only backend failures skip with null medians | CPU smoke; no GPU timing |
+| #341 dataloader | `c4c87a6` — CPU workers keep pinning off without CUDA setup | CPU-only; no H2D timing |
+| #342 amp | `59030a3` — forward-only CE receives flattened fp32 logits and int64 targets outside autocast | CPU-only; no GPU throughput |
+
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
@@ -693,7 +710,8 @@ Current evidence boundary through `cc20049`: #307–#331+ and the gen-bench thre
 | Packed shared-V online decode #314 | **Landed** `8e4ce85` — CPU multi-query tiled parity preserves packed shared-V views; no GPU timing or performance claim |
 | Per-head score×V parity #315 | **Landed** `c58a8d9` — CPU distinct-Q/K parity with per-head V values across long blocked/online tiles; no GPU timing or performance claim |
 | Gen-bench threshold sweep tip | **Landed** `6d575a3` — de-duplicates decode thresholds and mirrors the cold gate; CPU harness contract only |
-| Current tip | **Landed** at `cc20049` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #307–#331+ and threshold-sweep follow-ups add CPU-safe contract coverage only; the real-GPU P0 blocker remains open |
+| #332 docs-v70 | **Landed** at `4dfab0e` — docs-only refresh through #331; no GPU evidence |
+| Current tip (before docs-v71) | **Landed** at `cc20049` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #307–#331+ and threshold-sweep follow-ups add CPU-safe contract coverage only; the real-GPU P0 blocker remains open |
 | #316 sampler output layout | **Landed** at `8c94c29` — CPU-only non-unit-stride `(B, 1)` output coverage across default multinomial, narrow top-k, and full-vocabulary fallback paths; no GPU timing or sampler-layout claim
 | #317 docs-v68 | **Landed** at `0849591` — docs-only refresh through #315; no GPU evidence
 | #318 paired RoPE output slot | **Landed** at `34be609` — CPU-only parity for paired T=1 writes into a non-contiguous cache slot while preserving untouched backing slots; no GPU timing or fused-RoPE result
@@ -710,6 +728,17 @@ Current evidence boundary through `cc20049`: #307–#331+ and the gen-bench thre
 | #329 AUTO threshold recovery | **Landed** at `b516f3b` — malformed shared threshold overrides recover across decode/cold dispatch after a valid update; no GPU timing claim
 | #330 offset packed online decode | **Landed** at `eb0c2ee` — CPU raw parity for nonzero-offset, capacity-padded packed K/V views with read-only cache assertions; no GPU timing or performance claim
 | #331 long-path score×V gradients | **Landed** at `cc20049` — CPU-only distinct-Q/K and per-head-V gradient parity on the long path; no GPU timing or performance claim
+| #333 layout | **Landed** at `bf2758a` — CPU-only strided sampler-output and backing-neighbor protection across sampler paths; no GPU timing or layout claim |
+| #334 RoPE | **Landed** at `26e64c1` — CPU-only paired T=1 input-gradient parity against eager rotation; no GPU timing or fused-RoPE claim |
+| #335 gen-bench | **Landed** at `a83f063` — malformed prompt-length lists fail closed before model setup; CPU harness contract only |
+| #336 CUDA build | **Landed** at `b967fe5` — non-1 extension flags remain pure-Python no-ops; no GPU build or timing claim |
+| #337 attn-bwd | **Landed** at `4c71e14` — CPU fp16/bfloat16 strict-tril analytic-backward parity with restored input-gradient dtypes; no GPU train claim |
+| #338 compile | **Landed** at `3e9dce4` — default train_bwd probe forwards mode without forcing fullgraph=False; no GPU/CUDA-graph measurement |
+| #339 decode | **Landed** at `65c8ae2` — CPU packed T=1 fp16/bfloat16 decode parity across shared/per-head values; no GPU timing claim |
+| #340 gpu-measure | **Landed** at `10cff45` — timing-only backend failures remain explicit skips with null medians; CPU smoke makes no GPU timing claim |
+| #341 dataloader | **Landed** at `c4c87a6` — CPU DataLoader workers keep pinning off without CUDA setup; no H2D timing or overlap claim |
+| #342 AMP CE | **Landed** at `59030a3` — forward-only cross-entropy receives flattened fp32 logits and int64 targets outside autocast; no GPU throughput claim |
+| Current tip | **Landed** at `59030a3` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #332–#342 add CPU-safe docs/contract coverage only; the real-GPU P0 blocker remains open |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
