@@ -16,7 +16,7 @@ No softmax, no `1/sqrt(d)`, diagonal excluded.
 | `eager` (default) | Full T×T then `tril(diagonal=-1)` |
 | `blocked` | Tiled pure PyTorch (no full upper triangle) |
 | `triton` | Triton fused on CUDA; blocked fallback otherwise |
-| `cuda` | `kernels.cuda_attn.tril_score_v` (native ext if built, else ref) |
+| `cuda` | `kernels.cuda_attn.tril_score_v` (native ext if built, else CPU ref) |
 
 ```bash
 export BDH_ATTN_IMPL=eager     # default
@@ -39,7 +39,7 @@ CUDA decode is tiled online vs packed KR/V. Default remains **eager**.
 | `attention.py` | cold tril + decode: `blocked_*` / `online_*`, `triton_*`, shared `_tiled_score_v` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
-| `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref (full + decode) |
+| `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |
 | `rope.py` | RoPE rotate: eager / fused PyTorch / optional Triton |
 | `rope_dispatch.py` | `BDH_ROPE_IMPL` → `bdh_rope_rotate()` |
 
@@ -47,34 +47,46 @@ CUDA decode is tiled online vs packed KR/V. Default remains **eager**.
 
 | Symbol | Role |
 |--------|------|
-| `tril_score_v_ref(q,k,v)` | Pure PyTorch full tril score×V — **always works** |
-| `tril_score_v(q,k,v)` | Native ext if built, else reference |
-| `tril_decode_ref(q,k_past,v)` | Pure PyTorch decode vs packed past — **always** |
-| `tril_decode(q,k_past,v)` | Native decode ext if built, else reference |
-| `has_cuda_ext()` / `has_cuda_kernel()` | Capability probes |
+| `tril_score_v_ref(q,k,v)` | Golden eager full tril — **bit-identical**, always works |
+| `tril_score_v_tiled_ref(...)` | CPU mirror of CUDA tiled online cold (TILE_M/N=16; no full T×T) |
+| `tril_score_v(q,k,v)` | Native ext if built; else tiled (large T) / eager (small T) |
+| `tril_decode_ref(q,k_past,v)` | Decode ref — vectorized small S; tiles large past |
+| `tril_decode_tiled_ref(...)` | CPU mirror of CUDA tiled online decode |
+| `tril_decode(q,k_past,v)` | Native decode ext if built, else decode ref |
+| `has_cuda_ext()` / `has_cuda_kernel()` | Capability probes (soft — import never raises) |
+| `ext_status()` | Human-readable build / load smoke string |
+
+**Honesty:** CPU refs validate correctness on boxes without a GPU / without a
+successful `BDH_BUILD_EXT` compile. They are **not** a claim of GPU speedups.
+When native is missing, dispatch prefers tiled online for large T to avoid
+materializing a full T×T score buffer (same structure the `.cu` scaffold uses).
 
 ## Optional native build (`csrc/`)
 
 ```bash
-# default: no compile — CPU ref only
+# default: no compile — CPU ref only (BDH_BUILD_EXT unset)
 pip install -e .
 
 # compile native (needs matching torch headers + g++/nvcc)
 BDH_BUILD_EXT=1 pip install -e . --no-build-isolation
 BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation  # force .cu
+BDH_BUILD_EXT=1 BDH_FORCE_CPU_EXT=1 pip install -e . --no-build-isolation  # CPU ext only
 ```
 
-On this CPU sandbox, native compile may fail (torch/g++ ABI); that is OK — tests
-skip CUDA paths and still validate the CPU reference.
+Documented in `setup.py` docstring + `pyproject.toml` comments. On this CPU
+sandbox, native compile may fail (torch/g++ ABI); that is OK — `import
+kernels.cuda_attn` never raises, tests skip CUDA paths, and CPU refs still run.
 
-### Cold CUDA kernel shape (`opt/cuda-cold`)
+### Cold / decode CUDA kernel shape
 
-`tril_attn_cuda.cu` cold path is a **tiled online** scaffold:
+`tril_attn_cuda.cu`:
 
-- Grid `(ceil(T/16), B·H, ceil(Dv/32))`, block `(32, 16)`
-- Shared Q/K/V tiles; accumulate `score×V` in registers — **no global T×T**
-- Falls back to a per-element fused loop if dynamic smem would exceed 48 KiB
-- Decode: **tiled online** packed-past score×V (`opt/decode-gemm`); falls back to naive fused loop if smem > 48 KiB
+- Cold: **tiled online** — grid `(ceil(T/16), B·H, ceil(Dv/32))`, block `(32, 16)`;
+  shared Q/K/V tiles; register `score×V`; smem>48 KiB → fused naive (still no T×T)
+- Decode: **tiled online** packed-past score×V; same tile constants; naive fallback
+
+CPU tiled refs in `cuda_attn.py` / `tril_attn_cpu.cpp` use the same TILE_M/N=16
+so a GPU drop-in build can reuse the tested online structure.
 
 ## RoPE rotate (`BDH_ROPE_IMPL`)
 

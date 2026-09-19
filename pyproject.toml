@@ -13,8 +13,16 @@ dependencies = ["torch"]
 [project.optional-dependencies]
 dev = ["pytest", "numpy"]
 
-# Optional native build: `pip install -e .`
-# Pure-Python CPU reference in kernels/cuda_attn.py always works without it.
+# ---------------------------------------------------------------------------
+# Native extension is OPT-IN via setup.py env flags (not a pyproject toggle):
+#
+#   pip install -e .                                          # pure Python
+#   BDH_BUILD_EXT=1 pip install -e . --no-build-isolation     # C++/CUDA
+#   BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+#
+# Without BDH_BUILD_EXT=1, setuptools installs kernels/ only. CPU refs in
+# kernels/cuda_attn.py always work; missing bdh_cuda_ext imports fail soft.
+# ---------------------------------------------------------------------------
 [tool.setuptools.packages.find]
 include = ["kernels*"]
 

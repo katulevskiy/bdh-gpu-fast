@@ -2,6 +2,10 @@
 // Full: out[b,h,i,:] = sum_{j < i} (Q[b,h,i,:] · K[b,h,j,:]) * V[b,h_or_1,j,:]
 // Decode: out[b,h,i,:] = sum_{j < S} (Q[b,h,i,:] · K_past[b,h,j,:]) * V_past[...]
 //   (K/V are packed past only — new token never attends to itself.)
+//
+// CPU path (tril_attn_cpu.cpp): vectorized eager for small T/S; tiled online
+// (TILE_M=16, TILE_N=16, matching tril_attn_cuda.cu) for large footprints —
+// no unnecessary float cast when already f32/f64; V broadcast without expand.
 #pragma once
 
 #include <torch/extension.h>
