@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#61+)
+# OPT status — landed work (#1–#63)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `16a15fb` (`#63` compile-reduce on `main`; after `#62` triton-decode-v3). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
+Tip documented here: `16a15fb` (`#63` compile-reduce on `main`; after `#62` triton-decode-v3, `#61` fix-gen-host-test, and `#60` docs-matrix-v5). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -209,6 +209,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **57** | `opt/cache-page` | Geometric CacheManager page growth + empty+prefix `copy_`; `ensure_capacity`; long-S grow stats | fewer grows/bytes vs linear; cats=0; defaults unchanged | GPU long-S peak still open |
 | **58** | `opt/layout-v2` | Eval cached contiguous encoder `(nh*N,D)` + `F.linear`; train einsum; compile traces einsum | T=1/32 eval ~1.3–1.4× vs train path; T=128 ~noise; gen uses cache | GPU layout still open |
 | **59** | `opt/profile-v5` | Re-profile tip after #55–#58; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #58 layout visible on generate | No GPU measurements; defaults unchanged |
+| **60** | `opt/docs-matrix-v5` | Refresh optimization matrix through #59; update documented tip/profile metadata | Docs only | — |
+| **61** | `opt/fix-gen-host-test` | Repair environ-hoist assertion after #56 `BDH_ATTN_AUTO` decode probes; generate semantics unchanged | 372 passed, 9 skipped; test-only | — |
 | **62** | `opt/triton-decode-v3` | Deepen Triton T=1 decode scaffold (long-S tiles, Q-hoist); AUTO→triton when CUDA else #55 blocked | ≡ eager/blocked on CPU; CUDA tests skip; default eager | GPU `--mode decode` open |
 | **63** | `opt/compile-reduce` | Document/measure `BDH_COMPILE_MODE=reduce-overhead` vs `default` on CPU; warn no CUDA graphs | CPU MODE A/B in `bench_train_step`; reduce-overhead not useful on CPU | GPU CUDA graphs still P1 |
 | **64** | `opt/cuda-decode-v3` | Deepen CUDA T=1 decode tiles (adaptive DECODE_TILE_N 32/64/128 + TQ1 Q-hoist); ≡ blocked parity | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode decode` open |
