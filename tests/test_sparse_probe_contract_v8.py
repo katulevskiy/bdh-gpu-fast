@@ -610,3 +610,34 @@ def test_density_only_skips_crossover_after_unenforced_guardrail_failure(
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "density re-smoke guardrail failed" not in captured.err
     assert "exit_code=0 reason=probe_complete" in captured.out
+
+
+def test_skip_training_without_enforcement_allows_crossover(monkeypatch, capsys):
+    """Skipping diagnostics without enforcement must preserve the CPU sweep."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    calls = []
+
+    def unexpected_training(**_):
+        raise AssertionError("--skip-train must not collect density samples")
+
+    def fake_bench_matmul(M, K, N, density, seed=0):
+        calls.append((M, K, N, density, seed))
+        return {
+            "density_measured": density,
+            "dense_ms": 1.0,
+            "coo_ms": 2.0,
+            "csr_ms": 2.0,
+            "row_ms": 2.0,
+            "col_ms": 2.0,
+        }
+
+    monkeypatch.setattr(probe, "short_train_density", unexpected_training)
+    monkeypatch.setattr(probe, "bench_matmul", fake_bench_matmul)
+    assert probe.main(["--skip-train"]) == probe.EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "density_guardrail" not in captured.out
+    assert "density_guardrail" not in captured.err
+    assert "CPU sparse vs dense crossover" in captured.out
+    assert len(calls) == 3 * 8
+    assert "exit_code=0 reason=probe_complete" in captured.out
