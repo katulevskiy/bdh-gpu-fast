@@ -386,6 +386,19 @@ def test_dataloader_num_workers_zero(tr, monkeypatch):
     assert dl.persistent_workers is False
 
 
+def test_dataloader_negative_workers_clamp_to_cpu_safe_zero(tr, monkeypatch):
+    """Invalid negative worker counts stay a synchronous CPU DataLoader."""
+    monkeypatch.setattr(tr, "NUM_WORKERS", -1)
+    src = tr.DataLoaderBatchSource("train")
+    x, y = src.next()
+    dl = src._loader
+    assert x.device.type == "cpu" and y.device.type == "cpu"
+    assert dl.num_workers == 0
+    assert dl.pin_memory is False
+    assert dl.persistent_workers is False
+    assert not hasattr(dl, "prefetch_factor") or dl.prefetch_factor is None
+
+
 def test_dataloader_worker_prefetch_contract(tr, monkeypatch):
     """Worker DataLoader keeps full host batches and bounded lookahead."""
     monkeypatch.setattr(tr, "NUM_WORKERS", 2)
