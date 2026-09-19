@@ -232,3 +232,58 @@ def test_compile_failure_without_probe_preserves_caller_state(
     assert "soft-fallback to original eager module" in captured
     assert "without a first probe" not in captured
     assert "first probe failed" not in captured
+
+
+@pytest.mark.parametrize("caller_training", [False, True])
+def test_successful_backward_probe_returns_clean_wrapper(
+    monkeypatch, capsys, caller_training
+):
+    """A successful backward probe clears grads and restores caller mode."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    model = bdh.BDH(_small_cfg()).train(caller_training)
+
+    class ProbedWrapper(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.calls = 0
+
+        def forward(self, *args, **kwargs):
+            self.calls += 1
+            return self.module(*args, **kwargs)
+
+    wrapper = ProbedWrapper(model)
+
+    def compile_spy(compiled_model, **kwargs):
+        assert compiled_model is model
+        compile_kwargs.update(kwargs)
+        return wrapper
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    x = torch.randint(0, 256, (2, 8))
+    y = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert out is wrapper
+    assert wrapper.calls == 1
+    assert model.training is caller_training
+    assert all(param.grad is None for param in model.parameters())
+    assert "torch.compile enabled (mode=default, probe=train_bwd" in captured
+    assert "first probe failed" not in captured
