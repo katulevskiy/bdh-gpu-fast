@@ -121,3 +121,65 @@ python -m pytest tests/ -v
 python benchmarks/bench_forward.py
 python benchmarks/bench_batch.py
 ```
+
+## opt/sparse-relu (experimental, default OFF)
+
+**Owned files:** `bdh_sparse.py`, `tests/test_sparse.py`, `benchmarks/bench_sparse.py`.
+**Default `bdh.py` path unchanged** — sparse helpers are opt-in imports only.
+
+### Motivation
+
+Paper claims post-ReLU activations ≈ **5% density** when trained. BDH already uses
+`relu` on encoder / encoder_v latents and the product `xy = x_sparse * y_sparse`
+before `@ decoder`. Zeros contribute nothing to those GEMMs, so sparse matmul or
+masked densification can replace dense `A @ W` if the sparsity pattern is the
+true ReLU support.
+
+### What was implemented
+
+1. **`sparse_relu_matmul`** — ReLU → COO/CSR → `torch.sparse.mm` → dense out
+2. **`masked_densify_matmul`** — skip all-zero *rows*
+3. **`masked_densify_matmul_gather`** — drop globally inactive *columns*, smaller dense GEMM
+4. **BDH decoder layout helpers** — same `permute → view → @ decoder` as `bdh.py`
+5. **`force_sparsity`** — synthetic paper-like density for benches
+
+### Correctness (positive)
+
+```text
+.venv/bin/python -m pytest tests/test_sparse.py -v
+# 12 passed — COO/CSR/masked/row/col match dense ReLU GEMMs on random inputs;
+# decoder-layout path matches; sparse round-trip Q matches plain ReLU;
+# importing bdh_sparse does not alter BDH.forward
+```
+
+Large-K FP32: `sparse.mm` vs dense can differ at ~1e-4 abs (accumulation order);
+tests use shapes where atol/rtol 1e-5 holds; bench uses 1e-3/1e-4.
+
+### Density (this box, random init — not trained)
+
+```text
+mean x_sparse ≈ 0.50   (ReLU of ~symmetric Gaussian)
+mean xy_sparse ≈ 0.25  (product of two independent ReLUs)
+```
+
+Trained ~5% density is **not** reproduced at init; synthetic `force_sparsity(0.05)`
+used for low-density timing.
+
+### Perf (CPU microbench — honest, not a win)
+
+```text
+.venv/bin/python benchmarks/bench_sparse.py
+# dens~0.50: dense << coo/csr/row/col  (conversion dominates)
+# dens~0.05: dense still faster on CPU for decoder-shaped GEMMs
+```
+
+**Verdict:** numerical equivalence **proven**; keep as **experimental module,
+default off**. Real speedups need trained sparsity + GPU sparse kernels (or a
+custom sparse×dense decoder). Do not wire into `BDH.forward` yet.
+
+### How to re-run
+
+```bash
+python -m pytest tests/test_sparse.py -v
+python benchmarks/bench_sparse.py
+```
