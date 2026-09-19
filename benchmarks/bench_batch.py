@@ -73,6 +73,7 @@ def main():
     tr.device = device
     tr._train_data = None
     tr._val_data = None
+    tr._offsets = None
 
     # Correctness: same shapes / dtypes / split bounds for a fixed seed.
     torch.manual_seed(0)

@@ -405,3 +405,66 @@ big GPU opportunity (`opt/triton-attn`).
 
 No intentional numerical approximations.
 
+## opt/compile-train (train loop)
+
+**Owns:** `train.py`, optional `train_fast.py`, `benchmarks/bench_train_step.py`.
+Did **not** change `bdh.py` core.
+
+### Goals
+
+torch.compile-friendly training loop, `zero_grad(set_to_none=True)`, fused AdamW
+when available, fewer graph-break footguns, better dataloader prefetch, CUDA-graph
+notes for when a GPU exists.
+
+### Changes
+
+1. **`optimizer.zero_grad(set_to_none=True)`** via `train_step()` — frees grad
+   storage instead of filling zeros (friendlier to CUDA graphs / allocator).
+2. **Fused AdamW** — `make_optimizer()` tries `fused=True`, falls back on error.
+   Env: `BDH_FUSED_ADAMW=0` to disable.
+3. **Compile path** — `maybe_compile()` wraps `torch.compile(mode=BDH_COMPILE_MODE)`
+   and **probes** with the first batch (inductor errors often appear only then).
+   Falls back to eager. Env: `BDH_COMPILE=0`, `BDH_COMPILE_MODE=default|reduce-overhead|max-autotune`.
+4. **Graph-break hygiene** — logging uses `float(loss.detach())`; GradScaler only
+   when fp16+CUDA; batch fetch / print stay outside the compiled module.
+5. **`BatchPrefetcher`** — one-slot prefetch; on CUDA uses a side stream for
+   pin+`non_blocking` H2D overlapped with the previous step.
+6. **Reusable `_offsets`** arange for window gather (reset-safe if `BLOCK_SIZE` changes).
+7. **`train_fast.py`** — optional entry: defaults to `reduce-overhead` on CUDA and
+   documents CUDA-graph requirements (static B×T, no sync in step, fused AdamW,
+   set_to_none, side-stream prefetch; keep `generate()` out of the hot loop).
+
+### Benchmarks (CPU — honest)
+
+```text
+BDH_COMPILE=0 .venv/bin/python benchmarks/bench_train_step.py
+# device=cpu  layers=2 d=64 B=4 T=64  (torch 2.14.0+cu130, cuda=False)
+# train_step legacy (zero_grad fill, no fused) median: 12.75 ms
+# train_step fused+set_to_none median:                 10.06 ms  (1.27×)
+# zero_grad fill vs set_to_none:                       9.18 → 8.89 ms  (1.03×)
+
+BDH_COMPILE=0 .venv/bin/python benchmarks/bench_batch.py
+# get_batch baseline 0.563 ms → vectorized+pretensor 0.072 ms  (7.84×)
+# (also: x/y now .contiguous() so CE targets.view(-1) works)
+```
+
+Compile microbench is opt-in (`BDH_BENCH_COMPILE=1`): inductor warmup is minutes on
+CPU and needs `g++` + `python3-dev` (Python.h). No CUDA on this runner — CUDA-graph
+/`reduce-overhead` wins not measured. Under heavy multi-agent CPU load medians
+inflate wildly; prefer a quiet box for re-measure.
+
+### Correctness
+
+`pytest tests/` → **54 passed, 4 skipped** on this branch (train-only diff).
+3-step smoke with fused AdamW + BatchPrefetcher OK. get_batch split semantics
+unchanged; contiguous fix is value-identical.
+
+### How to run
+
+```bash
+BDH_COMPILE=0 python train.py          # eager + fused AdamW + prefetch
+BDH_COMPILE=1 python train.py          # compile with probe/fallback
+BDH_MAX_ITERS=50 python train_fast.py  # aggressive defaults
+python benchmarks/bench_train_step.py
+BDH_BENCH_COMPILE=1 python benchmarks/bench_train_step.py
+```
