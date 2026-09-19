@@ -286,3 +286,27 @@ def test_density_only_honors_custom_cli_floors_on_pass(monkeypatch, capsys):
     assert "required_x>=0.2300 required_xy>=0.0900" in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=0 reason=probe_complete" in captured.out
+
+
+def test_enforced_guardrail_honors_explicit_skip_crossover(monkeypatch, capsys):
+    """A passing enforced probe must honor an explicit crossover skip."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.20, "y": 0.25, "xy": 0.08}],
+    )
+
+    def unexpected_crossover(**_):
+        raise AssertionError("--skip-crossover must not run crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(["--skip-crossover", "--enforce-density-guardrail"])
+        == probe.EXIT_OK
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=pass" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=0 reason=probe_complete" in captured.out
