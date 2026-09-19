@@ -267,8 +267,8 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 
 ### Correctness (this box)
 ```text
-.venv/bin/python -m pytest tests/ -v
-# 20 passed, 3 skipped
+.venv/bin/python -m pytest tests/ -q
+# 54 passed, 4 skipped (post-rebase onto main w/ triton+sparse)
 #   test_cuda_attn: 6 passed (CPU ref), 3 skipped (no bdh_cuda_ext / no CUDA)
 ```
 
