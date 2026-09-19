@@ -12,6 +12,10 @@ Reports:
 Usage:
   .venv/bin/python benchmarks/bench_sparse_probe.py
   .venv/bin/python benchmarks/bench_sparse_probe.py --steps 100 --log-every 25
+
+Exit status:
+  0  probe completed, or the default-off gate intentionally did no work
+  2  an enforced density guardrail failed
 """
 
 from __future__ import annotations
@@ -36,6 +40,9 @@ os.environ.setdefault("BDH_DATALOADER", "0")
 import bdh
 import bdh_sparse as sp
 import train as tr
+
+EXIT_OK = 0
+EXIT_DENSITY_GUARDRAIL = 2
 
 
 def density_guardrail(
@@ -276,7 +283,7 @@ def crossover_report(rows: list[dict]) -> list[str]:
     return lines
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--steps", type=int, default=150)
     ap.add_argument("--log-every", type=int, default=25)
@@ -297,14 +304,14 @@ def main() -> None:
     )
     ap.add_argument("--min-final-x", type=float, default=0.20)
     ap.add_argument("--min-final-xy", type=float, default=0.08)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if not sp.sparse_probe_enabled():
         print(
             "SPARSE PROBE DISABLED (default): no training or benchmark work. "
             "Set BDH_SPARSE_PROBE=1 for the optional probe."
         )
-        return
+        return EXIT_OK
 
     device = torch.device("cpu")
     print(
@@ -347,7 +354,8 @@ def main() -> None:
         )
         print(f"density_guardrail={'pass' if ok else 'fail'} {detail}")
         if args.enforce_density_guardrail and not ok:
-            raise SystemExit("density re-smoke guardrail failed")
+            print("density re-smoke guardrail failed", file=sys.stderr)
+            return EXIT_DENSITY_GUARDRAIL
 
     rows: list[dict] = []
     if not args.skip_crossover and not args.density_only:
@@ -412,6 +420,8 @@ def main() -> None:
         ]
         print(f"cpu_sparse_wins={wins if wins else 'none'}")
 
+    return EXIT_OK
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
