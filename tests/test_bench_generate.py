@@ -57,3 +57,27 @@ def test_attn_auto_restores_all_threshold_environment_after_exception(monkeypatc
     assert os.environ["BDH_ATTN_AUTO"] == "0"
     assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
     assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
+
+
+def test_attn_auto_restores_unset_environment_after_exception(monkeypatch):
+    """AUTO must not leave newly introduced variables behind."""
+    for name in (
+        "BDH_ATTN_AUTO",
+        "BDH_ATTN_AUTO_THRESHOLD",
+        "BDH_ATTN_AUTO_COLD_THRESHOLD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(RuntimeError, match="stop auto"):
+        with bench_generate._attn_auto(True, threshold=256, cold_threshold=128):
+            assert os.environ["BDH_ATTN_AUTO"] == "1"
+            assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "256"
+            assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "128"
+            raise RuntimeError("stop auto")
+
+    for name in (
+        "BDH_ATTN_AUTO",
+        "BDH_ATTN_AUTO_THRESHOLD",
+        "BDH_ATTN_AUTO_COLD_THRESHOLD",
+    ):
+        assert name not in os.environ
