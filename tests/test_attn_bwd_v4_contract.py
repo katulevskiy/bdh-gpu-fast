@@ -127,3 +127,27 @@ def test_single_query_shared_v_backward_reduces_head_grads(impl):
     assert torch.equal(
         V.grad[:, :, query:, :], torch.zeros_like(V.grad[:, :, query:, :])
     )
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_self_attn_aliases_preserve_raw_strict_tril_backward(impl):
+    """Self-attention aliases must keep duplicate-Q gradients exact."""
+    generator = torch.Generator().manual_seed(2029)
+    Q = torch.randn(1, 3, 5, 4, generator=generator, dtype=torch.float64)
+    V = torch.randn(1, 1, 5, 6, generator=generator, dtype=torch.float64)
+    dO = torch.randn(1, 3, 5, 6, generator=generator, dtype=torch.float64)
+
+    Q_impl = Q.clone().requires_grad_(True)
+    V_impl = V.clone().requires_grad_(True)
+    out = strict_tril_attn(Q_impl, Q_impl, V_impl, impl=impl, use_fn=True)
+
+    Q_ref = Q.clone().requires_grad_(True)
+    V_ref = V.clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, Q_ref, V_ref)
+
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+    assert torch.allclose(Q_impl.grad, Q_ref.grad, rtol=1e-10, atol=1e-10)
+    assert torch.allclose(V_impl.grad, V_ref.grad, rtol=1e-10, atol=1e-10)
+    assert torch.equal(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
