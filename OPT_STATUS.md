@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#298; #160 docs scope retained)
+# OPT status — landed work (#1–#299; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `34c6d60` (#298 aliased score-V dispatch gradient contract) follows #297 tiled multi-query online decode contract, #296 docs refresh through #294, #295 AUTO blank cold-threshold contract, #294 gen-bench AUTO input contract, #293 batched blocked-tile partial-tile coverage, #292 sparse guardrail threshold coverage, #291 prefetch H2D global opt-out coverage, #290 GPU-harness device-local synchronization, #289 AMP forward-only contract, and #288 shared-V tiled decode gradients, and #287 raw strict-tril score/backward contract. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
+Tip pointer: `1a2a8f8` (#299 full-vocab sampler output layout contract) follows #298 aliased score-V dispatch gradient contract, #297 tiled multi-query online decode contract, #296 docs refresh through #294, #295 AUTO blank cold-threshold contract, #294 gen-bench AUTO input contract, #293 batched blocked-tile partial-tile coverage, #292 sparse guardrail threshold coverage, #291 prefetch H2D global opt-out coverage, #290 GPU-harness device-local synchronization, and #289 AMP forward-only contract. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -455,7 +455,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **296** | docs refresh | Record the optimization contracts through #294 | Docs only | — |
 | **297** | `tests/test_online_decode_v5.py` | CPU-only tiled multi-query online decode contract across a decode score-tile boundary with signed raw QK scores, past-only per-head values, and no GPU performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **298** | `tests/test_fuse_scorev.py` | Extend aliased self-attention Q/K score×V gradient parity through the public dispatch entry point across blocked, online, Triton-fallback, and CUDA-reference CPU paths; no GPU performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
-| **tip** | `tests/test_fuse_scorev.py` | Tip `34c6d60`: aliased score-V dispatch gradient contract; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **299** | `tests/test_layout_v3.py` | Extend the sampler layout contract to full-vocab top-k fallback, including exact and overflow top-k writes into a non-contiguous decode narrow with seeded output parity; no GPU performance claim | CPU-only layout contract coverage; no GPU timing or sampler-layout claim | **P0** GPU sampler-layout validation remains open |
+| **tip** | `tests/test_layout_v3.py` | Tip `1a2a8f8`: full-vocab sampler output layout contract; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `8b562f4`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#284 add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
@@ -586,6 +587,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#295** `cde4388` adds CPU-safe empty/whitespace AUTO cold-threshold fallback coverage after live decode-threshold updates; no GPU performance claim.
 - **#297** `1b4e695` adds CPU-only tiled multi-query online decode coverage across a decode score-tile boundary; no GPU performance claim.
 - **#298** `34c6d60` adds CPU-only aliased score-V dispatch gradient parity across supported paths; no GPU performance claim.
+- **#299** `1a2a8f8` adds CPU-only full-vocab sampler output-layout coverage for exact and overflow top-k on a non-contiguous decode narrow; no GPU performance claim.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
