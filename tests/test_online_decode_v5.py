@@ -318,6 +318,32 @@ def test_decode_dispatch_nonempty_preserves_float64_query_dtype():
         )
 
 
+def test_decode_dispatch_per_head_preserves_float64_query_dtype():
+    """Per-head V keeps float64 through every CPU-safe decode dispatch."""
+    B, H, S, Tq, N, D = 2, 3, 1025, 3, 4, 3
+    offset = 3
+    capacity = S + 11
+    g = torch.Generator().manual_seed(1819)
+    Q = torch.randn(B, H, Tq, N, dtype=torch.float64, generator=g)
+    K_storage = torch.randn(
+        B, H, offset + capacity, N, dtype=Q.dtype, generator=g
+    )
+    V_storage = torch.randn(
+        B, H, offset + capacity, D, dtype=Q.dtype, generator=g
+    )
+    K = K_storage.narrow(2, offset, S)
+    V = V_storage.narrow(2, offset, S)
+
+    ref = eager_decode_attn(Q, K, V)
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K, V, impl=impl, block_size=64)
+        assert got.shape == (B, H, Tq, D)
+        assert got.dtype == Q.dtype
+        assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10), (
+            f"impl={impl} maxdiff={(got - ref).abs().max().item()}"
+        )
+
+
 def test_decode_dispatch_multi_query_preserves_offset_packed_kv_views():
     """All decode dispatches preserve multi-query offset packed K/V semantics."""
     B, H, S, Tq, N, D = 2, 3, 1025, 3, 4, 2
