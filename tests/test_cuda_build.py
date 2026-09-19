@@ -503,6 +503,34 @@ def test_non_one_cuda_flag_does_not_select_cuda_setup(value):
     assert "skipping CUDA extension build" not in output
 
 
+@pytest.mark.parametrize("value", ["", "01", " 1"])
+def test_non_exact_cuda_flag_stays_cpu_only_with_nvcc(tmp_path, value):
+    """CUDA toolkit presence must not widen the exact CUDA opt-in."""
+    nvcc = tmp_path / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": value,
+            "CUDA_HOME": str(tmp_path / "missing-cuda-home"),
+            "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
+            "CUDA_VISIBLE_DEVICES": "",
+            "PATH": str(nvcc.parent),
+        }
+    )
+    env.pop("BDH_FORCE_CPU_EXT", None)
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "Building bdh_cuda_ext WITH CUDA" not in output
+    assert "skipping CUDA extension build" not in output
+
+
 @pytest.mark.parametrize("value", ["0", "true", "yes"])
 def test_non_one_extension_flag_remains_pure_python_noop(value):
     """Only the exact opt-in value may enter native extension setup."""
