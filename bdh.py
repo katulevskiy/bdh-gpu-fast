@@ -360,7 +360,8 @@ class BDH(nn.Module):
         D = config.n_embd
         N = config.mlp_internal_dim_multiplier * D // nh
         # Weight layouts (baseline shapes preserved for state_dict / tests):
-        #   encoder / encoder_v: (nh, D, N) — used via einsum → contiguous (B,T,nh,N)
+        #   encoder / encoder_v: (nh, D, N) — train einsum → contiguous (B,T,nh,N);
+        #     eval encoder also keeps a versioned contiguous (nh*N, D) F.linear cache
         #   decoder: (nh*N, D) — F.linear with .T view (no hot-path .contiguous())
         #   lm_head: (D, vocab) — same F.linear pattern
         # Optional biases registered as None; F.linear / add fuse when present.
@@ -395,6 +396,12 @@ class BDH(nn.Module):
         self.register_parameter("encoder_bias", None)
         self.register_parameter("encoder_v_bias", None)
         self.register_parameter("decoder_bias", None)
+
+        # Layout-v2: versioned contiguous (nh*N, D) for eval F.linear encoder path.
+        # Not Parameters — absent from state_dict. Refresh when weight._version/ptr bumps.
+        self._encoder_w_lin = None
+        self._encoder_w_lin_ver = None
+        self._encoder_w_lin_ptr = None
 
         self.apply(self._init_weights)
 
@@ -620,37 +627,126 @@ class BDH(nn.Module):
         """``(nh, D, N)`` -> ``(nh*N, D)`` for ``F.linear`` (out, in).
 
         Layout ``(nh,D,N)`` is baseline/state_dict-compatible; the transpose+reshape
-        copies once (``(nh,N,D)`` is not a free view of ``(nh,D,N)``). Prefer
-        einsum on the default ``bias is None`` hot path to skip this copy.
+        copies once (``(nh,N,D)`` is not a free view of ``(nh,D,N)``). Train /
+        ``bias is None`` default still prefers einsum to skip this copy; eval
+        forward reuses a versioned contiguous cache (see ``_encoder_w_lin_cached``).
         """
         nh, D, N = weight_hdn.shape
         return weight_hdn.transpose(1, 2).reshape(nh * N, D)
 
+    def _refresh_encoder_w_lin_cache(self, *, force: bool = False) -> None:
+        """Build/refresh contiguous ``(nh*N, D)`` encoder cache (call from ``train``/``eval``).
+
+        Kept out of ``forward`` so ``torch.compile`` does not see module-attr
+        mutations mid-graph. Not a Parameter; not in ``state_dict``.
+        ``force=True`` rebuilds even if version/ptr look unchanged (post-load).
+        """
+        w = self.encoder
+        ver = w._version
+        ptr = w.data_ptr()
+        if (
+            force
+            or self._encoder_w_lin is None
+            or self._encoder_w_lin_ver != ver
+            or self._encoder_w_lin_ptr != ptr
+        ):
+            self._encoder_w_lin = self._hdn_as_linear_weight(w).contiguous()
+            self._encoder_w_lin_ver = ver
+            self._encoder_w_lin_ptr = ptr
+
+    def _encoder_w_lin_cached(self) -> torch.Tensor:
+        """Return contiguous ``(nh*N, D)`` for ``self.encoder``, refreshing if needed."""
+        self._refresh_encoder_w_lin_cache()
+        assert self._encoder_w_lin is not None
+        return self._encoder_w_lin
+
+    def train(self, mode: bool = True):
+        """Enter train (einsum path) or eval (warm encoder linear cache).
+
+        Cache refresh happens here — not inside ``forward`` — for Dynamo safety.
+        """
+        r = super().train(mode)
+        if mode:
+            self._encoder_w_lin = None
+            self._encoder_w_lin_ver = None
+            self._encoder_w_lin_ptr = None
+        else:
+            self._refresh_encoder_w_lin_cache()
+        return r
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        """Invalidate/rebuild encoder layout cache after weight load.
+
+        ``load_state_dict`` may ``copy_`` into the same storage (ptr unchanged) and
+        on some builds leave ``_version`` ambiguous relative to our cache — using a
+        stale ``(nh*N, D)`` buffer would silently desync eval ``F.linear`` from the
+        Parameter (breaks compile-vs-eager decode parity). Always drop the cache
+        around the load; re-warm when already in eval.
+        """
+        self._encoder_w_lin = None
+        self._encoder_w_lin_ver = None
+        self._encoder_w_lin_ptr = None
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
+        if not self.training:
+            self._refresh_encoder_w_lin_cache(force=True)
+
     @staticmethod
     def _encoder_relu(
-        x_btd: torch.Tensor, weight_hdn: torch.Tensor, bias=None
+        x_btd: torch.Tensor,
+        weight_hdn: torch.Tensor,
+        bias=None,
+        *,
+        weight_lin: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Project ``(B,T,D)`` with ``(nh,D,N)`` -> contiguous ``(B,T,nh,N)`` + ReLU.
 
-        Default (``bias is None``): ``einsum("btd,hdn->bthn")`` then in-place ReLU —
-        writes decoder-friendly contiguous ``(B,T,nh,N)`` without a weight
-        transpose-copy (always-on ``F.linear`` paid that copy and lost on CPU).
+        Default (``bias is None``, no ``weight_lin``): ``einsum("btd,hdn->bthn")``
+        then in-place ReLU — train hot path; no weight transpose-copy.
 
-        Optional bias: ``F.linear`` on a ``(nh*N,D)`` weight view with bias fused
-        in the GEMM epilogue (no separate ``add_`` temp), then ``view`` + ReLU.
-        Bit-identical to ``F.relu(einsum(...) + bias)`` at ``dropout=0``.
+        When ``weight_lin`` is a contiguous ``(nh*N, D)`` (eval cache) and/or
+        ``bias`` is set: ``F.linear`` with optional fused bias epilogue, then
+        ``view`` + ReLU. Bit-identical to ``F.relu(einsum(...) [+ bias])`` at
+        ``dropout=0``. Always-on uncached ``F.linear`` still loses on CPU (#47);
+        the cached eval path is the layout-v2 deepen.
         """
-        if bias is None:
+        if weight_lin is None and bias is None:
             out = torch.einsum("btd,hdn->bthn", x_btd, weight_hdn)
             return F.relu(out, inplace=True)
         nh, D, N = weight_hdn.shape
         B, T, _ = x_btd.shape
-        out = F.linear(
-            x_btd,
-            BDH._hdn_as_linear_weight(weight_hdn),
-            bias.reshape(nh * N),
-        )
+        wl = weight_lin if weight_lin is not None else BDH._hdn_as_linear_weight(weight_hdn)
+        b = None if bias is None else bias.reshape(nh * N)
+        out = F.linear(x_btd, wl, b)
         return F.relu(out.view(B, T, nh, N), inplace=True)
+
+    def _encoder_relu_fwd(self, x_btd: torch.Tensor) -> torch.Tensor:
+        """Forward encoder proj: eval uses cached ``F.linear``; train keeps einsum.
+
+        Forward is side-effect free (cache warmed in ``train(False)``/``eval()``).
+        Under ``torch.compile`` tracing we keep the einsum path so Dynamo does not
+        bake a non-Parameter layout buffer into the graph (that desynced packed
+        T=1 decode vs eager). Eager eval/generate still hits the cached linear.
+        channels_last / always-on uncached linear measured slower here — not used.
+        ``encoder_v`` stays einsum (matmul+contig loses).
+        """
+        bias = self.encoder_bias
+        if (
+            not self.training
+            and not torch.compiler.is_compiling()
+        ):
+            w = self.encoder
+            lin = self._encoder_w_lin
+            if (
+                lin is not None
+                and self._encoder_w_lin_ver == w._version
+                and self._encoder_w_lin_ptr == w.data_ptr()
+            ):
+                return self._encoder_relu(x_btd, w, bias, weight_lin=lin)
+        return self._encoder_relu(x_btd, self.encoder, bias)
 
     @staticmethod
     def _encoder_v_relu(
@@ -732,7 +828,7 @@ class BDH(nn.Module):
 
         for level in range(C.n_layer):
             # Contiguous (B, T, nh, N): decoder merge is a view; attn gets a permute view.
-            x_bthn = self._encoder_relu(x, self.encoder, self.encoder_bias)
+            x_bthn = self._encoder_relu_fwd(x)
             x_sparse = x_bthn.permute(0, 2, 1, 3)  # (B, nh, T, N) — view, no copy
 
             past_kr = past_v = None

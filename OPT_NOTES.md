@@ -3364,3 +3364,68 @@ generate(prompt=8, +64, cache_page_size=8): aten::cat = 0
 - No change to default `page_size` / `cache_page_size` (still `None`)
 - No softmax / scale / SDPA; no pathwaycom PRs
 - No fake GPU speedups from CPU grow-count deltas
+
+## opt/layout-v2 — deepen weight/activation layout (2026-09-19)
+
+**Branch:** `opt/layout-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `0b80d0b` (#57 cache-page on main; after #56 attn-auto).
+
+### Goal
+
+Further cut forward `copy_` / `mm` tax from layout after #13/#16/#36/#47.
+Preserve Parameter shapes / `state_dict`; `tril(-1)`; defaults.
+
+### Attempt vs land
+
+| Candidate | CPU (`OMP=2`) |
+|-----------|---------------|
+| channels_last on `(B,nh,T,N)` / activations | **Loses** — extra contig copy; not bit-free |
+| Always-on uncached `F.linear` for encoder (`(nh,D,N)→(nh*N,D)` each call) | **Loses** — same as #47 |
+| matmul + permute→contiguous for `encoder_v` | **Loses** — extra activation copy |
+| **Eval-only versioned contiguous `(nh*N,D)` cache + `F.linear`** | **Wins** on T≤32 / generate; T=128 ~noise |
+
+### What landed (`bdh.py`)
+
+1. **`_encoder_w_lin` cache** — contiguous `(nh*N, D)` for `self.encoder`; not a Parameter / not in `state_dict`.
+2. **Warm in `train(False)` / `eval()`**; clear in `train(True)`; **`_load_from_state_dict` force-refresh** so `load_state_dict` cannot leave a stale buffer.
+3. **`_encoder_relu_fwd`** — eager eval uses cached `F.linear` when cache coherent; **train keeps einsum**; under **`torch.compiler.is_compiling()`** keep einsum so Dynamo does not bake the non-Parameter buffer (packed T=1 decode parity).
+4. **`encoder_v` unchanged** (einsum); channels_last not used.
+5. Tests + `benchmarks/bench_layout_v2.py` + docs.
+
+**Preserved:** `tril(diagonal=-1)`, Parameter shapes / `state_dict`, defaults, `BDH_ATTN_IMPL`.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_layout_v2.py tests/test_encoder_fuse.py \
+  tests/test_vs_baseline.py tests/test_compile.py::test_compile_cache_decode_matches_eager_dropout_zero -q
+# layout-v2 + encoder-fuse + baseline + compile decode: passed
+# Full suite: 367 passed, 9 skipped; 1 failed test_gen_host environ hoist — also fails on clean tip a96acaf (#56), not this branch
+```
+
+No intentional numerical approximations at `dropout=0` (train≡eval logits bit-identical).
+
+### Honest CPU numbers (`OMP_NUM_THREADS=2`, Europe/Podgorica)
+
+```text
+OMP_NUM_THREADS=2 python benchmarks/bench_layout_v2.py
+# device=cpu torch=2.14.0+cu130 cuda=False OMP=2
+# encoder micro T=1   einsum 0.163 ms → cached-linear 0.042 ms  (~3.9×)
+# encoder micro T=32  einsum 1.259 ms → cached-linear 0.384 ms  (~3.3×)
+# encoder micro T=128 einsum 1.620 ms → cached-linear 1.488 ms  (~1.09×)
+# full forward T=1    train 1.975 ms → eval 1.537 ms  (~1.29×)
+# full forward T=32   train 14.40 ms → eval 10.39 ms  (~1.39×)
+# full forward T=128  train 71.3 ms → eval 73.0 ms   (~0.98× noise)
+# generate(32→32) eval ~43.7 ms (cached encoder path)
+# train==eval logits bit-identical: True
+```
+
+**Verdict:** real eager eval/generate layout win on short T; long prefill ~noise; train path unchanged (einsum). No GPU claim.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No Parameter shape / checkpoint migration
+- No default `BDH_ATTN_IMPL` change
+- No softmax / diagonal inclusion / scale
+- No fake GPU speedups from CPU medians
