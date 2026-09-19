@@ -136,3 +136,14 @@ def test_invalid_cold_threshold_does_not_override_explicit_backend(
 
     assert resolve_cold_impl(99) == expected
     assert resolve_decode_impl(99) == expected
+
+
+@pytest.mark.parametrize("resolver", [resolve_cold_impl, resolve_decode_impl])
+def test_requested_backend_bypasses_invalid_auto_threshold(monkeypatch, resolver):
+    """An explicit resolver backend remains usable when AUTO config is invalid."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "not-an-int")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "-1")
+
+    assert resolver(99, requested="blocked") == "blocked"
