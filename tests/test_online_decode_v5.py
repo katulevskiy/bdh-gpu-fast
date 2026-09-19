@@ -793,3 +793,29 @@ def test_decode_dispatch_t1_zero_stride_shared_v_preserves_contract():
         )
         assert torch.equal(K, K_before)
         assert torch.equal(V_storage, V_before)
+
+
+def test_decode_dispatch_multi_query_zero_stride_shared_v_preserves_contract():
+    """Multi-query dispatch accepts head-expanded shared-V cache views."""
+    B, H, S, Tq, N, D = 2, 3, 1025, 3, 4, 2
+    offset = 5
+    capacity = S + 17
+    g = torch.Generator().manual_seed(3435)
+    Q = torch.randn(B, H, Tq, N, generator=g)
+    K_storage = torch.randn(B, H, offset + capacity, N, generator=g)
+    V_storage = torch.randn(B, 1, offset + capacity, D, generator=g)
+    K = K_storage.narrow(2, offset, S)
+    V_shared = V_storage.narrow(2, offset, S)
+    V_expanded = V_shared.expand(B, H, S, D)
+    K_before, V_before = K.clone(), V_storage.clone()
+
+    assert V_expanded.stride() == ((offset + capacity) * D, 0, D, 1)
+    ref = eager_decode_attn(Q, K, V_shared)
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K, V_expanded, impl=impl, block_size=64)
+        assert got.shape == (B, H, Tq, D)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+            f"impl={impl} maxdiff={(got - ref).abs().max().item()}"
+        )
+        assert torch.equal(K, K_before)
+        assert torch.equal(V_storage, V_before)
