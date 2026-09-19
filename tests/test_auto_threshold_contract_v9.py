@@ -14,6 +14,7 @@ from kernels.attention_dispatch import (  # noqa: E402
     attn_auto_cold_threshold,
     attn_auto_threshold,
     resolve_cold_impl,
+    resolve_decode_impl,
 )
 
 
@@ -29,9 +30,13 @@ def test_blank_cold_threshold_tracks_decode_threshold(monkeypatch, raw):
     assert attn_auto_cold_threshold() == 4
     assert resolve_cold_impl(4) == "eager"
     assert resolve_cold_impl(5) != "eager"
+    assert resolve_decode_impl(4) == "eager"
+    assert resolve_decode_impl(5) != "eager"
 
     monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "8")
     assert attn_auto_threshold() == 8
     assert attn_auto_cold_threshold() == 8
     assert resolve_cold_impl(8) == "eager"
     assert resolve_cold_impl(9) != "eager"
+    assert resolve_decode_impl(8) == "eager"
+    assert resolve_decode_impl(9) != "eager"
