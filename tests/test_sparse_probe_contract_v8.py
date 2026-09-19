@@ -586,3 +586,27 @@ def test_all_truthy_gate_values_enable_density_only_probe(monkeypatch, capsys):
         assert "density_guardrail=pass" in captured.out
         assert "CPU sparse vs dense crossover" not in captured.out
         assert "exit_code=0 reason=probe_complete" in captured.out
+
+
+def test_density_only_skips_crossover_after_unenforced_guardrail_failure(
+    monkeypatch, capsys
+):
+    """A diagnostic miss stays non-blocking while density-only still skips work."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.19, "y": 0.25, "xy": 0.07}],
+    )
+
+    def unexpected_crossover(**_):
+        raise AssertionError("density-only mode must not run crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert probe.main(["--density-only"]) == probe.EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=fail" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "density re-smoke guardrail failed" not in captured.err
+    assert "exit_code=0 reason=probe_complete" in captured.out
