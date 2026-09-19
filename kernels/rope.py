@@ -53,9 +53,94 @@ def _validate_rope_inputs(
             raise ValueError("rope out= must not alias v")
 
 
+def _validate_paired_cis(
+    v: torch.Tensor,
+    cos_p: torch.Tensor,
+    sin_p: torch.Tensor,
+    out: Optional[torch.Tensor],
+) -> None:
+    """cos_p/sin_p are pair views: ``(..., N/2, 2)`` with N = v.shape[-1]."""
+    if v.shape[-1] % 2 != 0:
+        raise ValueError(f"RoPE last dim must be even, got {v.shape[-1]}")
+    n_pairs = v.shape[-1] // 2
+    if cos_p.shape != sin_p.shape:
+        raise ValueError(f"paired cos/sin shape mismatch: {cos_p.shape} vs {sin_p.shape}")
+    if cos_p.shape[-2:] != (n_pairs, 2):
+        raise ValueError(
+            f"paired cis trailing dims must be ({n_pairs}, 2), got {cos_p.shape[-2:]}"
+        )
+    if out is not None:
+        if out.shape != v.shape or out.device != v.device:
+            raise ValueError(
+                f"rope out= must match v shape/device, got out={tuple(out.shape)}/"
+                f"{out.device} vs v={tuple(v.shape)}/{v.device}"
+            )
+        if out is v:
+            raise ValueError("rope out= must not alias v")
+
+
 def _is_t1_seq(v: torch.Tensor) -> bool:
     """True when the sequence axis (dim -2) is length 1 — incremental decode."""
     return v.dim() >= 2 and v.shape[-2] == 1
+
+
+def _rotate_pair_views(
+    vp: torch.Tensor,
+    cp: torch.Tensor,
+    sp: torch.Tensor,
+    *,
+    v_dtype: torch.dtype,
+    cis_dtype: torch.dtype,
+):
+    """Compute (y0, y1) from pair views; cis may broadcast over vp leading dims."""
+    x0, x1 = vp[..., 0], vp[..., 1]
+    c0, c1 = cp[..., 0], cp[..., 1]
+    s0, s1 = sp[..., 0], sp[..., 1]
+    if v_dtype != cis_dtype:
+        y0 = (x0 * c0).to(v_dtype) + ((-x1) * s0).to(v_dtype)
+        y1 = (x1 * c1).to(v_dtype) + (x0 * s1).to(v_dtype)
+    else:
+        y0 = x0 * c0 - x1 * s0
+        y1 = x1 * c1 + x0 * s1
+    return y0, y1
+
+
+def _store_pairs(
+    y0: torch.Tensor,
+    y1: torch.Tensor,
+    v: torch.Tensor,
+    out: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Write interleaved pairs into ``out`` (or a fresh buffer) — no ``stack``.
+
+    Pair-axis stores are contiguous when ``out``'s last dim is contiguous; avoids
+    the extra ``stack→reshape`` temporary that previously taxed fuse/T=1 alloc.
+    """
+    if out is None:
+        out = torch.empty_like(v)
+    op = out.reshape(*v.shape[:-1], -1, 2)
+    op[..., 0] = y0
+    op[..., 1] = y1
+    return out
+
+
+def rope_rotate_paired(
+    v: torch.Tensor,
+    cos_p: torch.Tensor,
+    sin_p: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Rotate using already-paired cis ``(..., N/2, 2)`` — no cis reshape tax.
+
+    Used by T=1 decode when ``Attention`` narrows ``_rope_table_pairs`` (built
+    once in ``ensure_rope_table``). Same math as ``eager_rope_rotate``.
+    """
+    _validate_paired_cis(v, cos_p, sin_p, out)
+    vp = v.reshape(*v.shape[:-1], -1, 2)
+    y0, y1 = _rotate_pair_views(
+        vp, cos_p, sin_p, v_dtype=v.dtype, cis_dtype=cos_p.dtype
+    )
+    return _store_pairs(y0, y1, v, out)
 
 
 def rope_rotate_t1(
@@ -68,7 +153,8 @@ def rope_rotate_t1(
 
     Cos/sin are typically ``(1,1,1,N)`` narrows from the generate table. Pair
     reshape lets mul broadcast without ``expand(v.shape)`` materialization.
-    Same math as ``eager_rope_rotate`` (bit-identical on CPU fp32 / cast path).
+    ``out=None`` uses empty + pair store (no ``stack``). Same math as
+    ``eager_rope_rotate`` (bit-identical on CPU fp32 / cast path).
     """
     _validate_rope_inputs(v, cos, sin, out)
     if not _is_t1_seq(v):
@@ -80,26 +166,8 @@ def rope_rotate_t1(
     vp = v.reshape(*v.shape[:-1], -1, 2)
     cp = cos.reshape(*cos.shape[:-1], -1, 2)
     sp = sin.reshape(*sin.shape[:-1], -1, 2)
-
-    x0, x1 = vp[..., 0], vp[..., 1]
-    c0, c1 = cp[..., 0], cp[..., 1]
-    s0, s1 = sp[..., 0], sp[..., 1]
-
-    if v.dtype != cos.dtype:
-        y0 = (x0 * c0).to(v.dtype) + ((-x1) * s0).to(v.dtype)
-        y1 = (x1 * c1).to(v.dtype) + (x0 * s1).to(v.dtype)
-    else:
-        y0 = x0 * c0 - x1 * s0
-        y1 = x1 * c1 + x0 * s1
-
-    if out is None:
-        # stack→reshape is one alloc; avoid strided even/odd scatter into empty_like.
-        return torch.stack((y0, y1), dim=-1).reshape(v.shape)
-
-    op = out.reshape(*v.shape[:-1], -1, 2)
-    op[..., 0] = y0
-    op[..., 1] = y1
-    return out
+    y0, y1 = _rotate_pair_views(vp, cp, sp, v_dtype=v.dtype, cis_dtype=cos.dtype)
+    return _store_pairs(y0, y1, v, out)
 
 
 def eager_rope_rotate(
@@ -111,7 +179,7 @@ def eager_rope_rotate(
     """Reference rotate: strided even/odd slices (matches historical ``Attention.rope``).
 
     When ``v`` has sequence length 1 (decode), uses ``rope_rotate_t1`` — same
-    math, pair-contiguous stores into ``out`` / one stack alloc when ``out`` is
+    math, pair-contiguous stores into ``out`` / empty+pair store when ``out`` is
     None. Multi-token keeps the historical strided path.
     """
     if _is_t1_seq(v):
@@ -146,41 +214,63 @@ def fused_rope_rotate_pytorch(
     """Pure-PyTorch fused rotate via last-dim pair views (fewer strided stores).
 
     Reshapes ``(..., N) → (..., N/2, 2)`` so even/odd live in a contiguous pair
-    axis, computes both outputs, then writes via a single ``stack→flatten`` (or
-    into ``out``'s pair view). Same math as ``eager_rope_rotate``.
+    axis. Cos/sin are reshaped in their *native* leading shape and broadcast on
+    mul — no ``expand(v.shape)``. Writes via empty+pair store (or into ``out``).
+    Same math as ``eager_rope_rotate``.
 
-    T=1 decode shares ``rope_rotate_t1`` (skips ``expand(v.shape)`` on cis).
+    T=1 decode shares ``rope_rotate_t1``.
     """
     if _is_t1_seq(v):
         return rope_rotate_t1(v, cos, sin, out=out)
     _validate_rope_inputs(v, cos, sin, out)
 
-    # Contiguous last-dim helps reshape without an extra copy; leave non-contig
-    # as-is (reshape may still view when strides allow).
     vp = v.reshape(*v.shape[:-1], -1, 2)
-    # Broadcast cos/sin to v's leading dims for the pair view (cos often 1×1×T×N).
-    cos_b = cos.expand(v.shape) if cos.shape != v.shape else cos
-    sin_b = sin.expand(v.shape) if sin.shape != v.shape else sin
-    cp = cos_b.reshape(*v.shape[:-1], -1, 2)
-    sp = sin_b.reshape(*v.shape[:-1], -1, 2)
+    # Native-shape pair views broadcast over v's batch/head dims (cos often 1×1×T×N).
+    cp = cos.reshape(*cos.shape[:-1], -1, 2)
+    sp = sin.reshape(*sin.shape[:-1], -1, 2)
+    y0, y1 = _rotate_pair_views(vp, cp, sp, v_dtype=v.dtype, cis_dtype=cos.dtype)
+    return _store_pairs(y0, y1, v, out)
 
-    x0, x1 = vp[..., 0], vp[..., 1]
-    c0, c1 = cp[..., 0], cp[..., 1]
-    s0, s1 = sp[..., 0], sp[..., 1]
 
-    if v.dtype != cos.dtype:
-        y0 = (x0 * c0).to(v.dtype) + ((-x1) * s0).to(v.dtype)
-        y1 = (x1 * c1).to(v.dtype) + (x0 * s1).to(v.dtype)
-    else:
-        y0 = x0 * c0 - x1 * s0
-        y1 = x1 * c1 + x0 * s1
+def fused_rope_rotate_blocked(
+    v: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    *,
+    block: int = 64,
+) -> torch.Tensor:
+    """CPU / scaffold rotate mirroring Triton pair tiling (parity + fallback).
 
+    Flattens nothing extra: walks the pair axis in tiles of ``block``, same
+    ``y0/y1`` math as eager/fused. Used as the Triton entry's CPU fallback and
+    for tile-structure parity tests. Not a claimed CPU wall win vs pytorch fuse.
+    """
+    if _is_t1_seq(v):
+        return rope_rotate_t1(v, cos, sin, out=out)
+    _validate_rope_inputs(v, cos, sin, out)
+    if block < 1:
+        raise ValueError(f"block must be >= 1, got {block}")
+
+    n_pairs = v.shape[-1] // 2
+    vp = v.reshape(*v.shape[:-1], n_pairs, 2)
+    cp = cos.reshape(*cos.shape[:-1], -1, 2)
+    sp = sin.reshape(*sin.shape[:-1], -1, 2)
     if out is None:
-        return torch.stack((y0, y1), dim=-1).reshape(v.shape)
+        out = torch.empty_like(v)
+    op = out.reshape(*v.shape[:-1], n_pairs, 2)
 
-    op = out.reshape(*v.shape[:-1], -1, 2)
-    op[..., 0] = y0
-    op[..., 1] = y1
+    for start in range(0, n_pairs, block):
+        end = min(start + block, n_pairs)
+        y0, y1 = _rotate_pair_views(
+            vp[..., start:end, :],
+            cp[..., start:end, :],
+            sp[..., start:end, :],
+            v_dtype=v.dtype,
+            cis_dtype=cos.dtype,
+        )
+        op[..., start:end, 0] = y0
+        op[..., start:end, 1] = y1
     return out
 
 
@@ -234,20 +324,30 @@ if _HAS_TRITON:
             tl.store(o_row + offs1, y1, mask=mask)
 
 
+def _triton_cis_rows(v: torch.Tensor, cis: torch.Tensor) -> torch.Tensor:
+    """Stage cis for the row-wise Triton kernel with less host tax when possible.
+
+    Same-shape cis: contig view only. Broadcast cis (e.g. 1×1×T×N vs B×H×T×N):
+    still expand+contig on host — kernel takes per-row pointers today; a future
+    stride-0 broadcast load would drop this copy (scaffold note, no GPU here).
+    """
+    if cis.shape == v.shape and cis.dtype == v.dtype:
+        return cis.contiguous() if not cis.is_contiguous() else cis
+    return cis.expand(v.shape).to(dtype=v.dtype).contiguous()
+
+
 def _triton_rope_forward(
     v: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
     out: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Launch Triton rotate; cos/sin broadcast-expanded to v shape on host."""
+    """Launch Triton rotate; cos/sin broadcast-staged to v rows on host."""
     assert _HAS_TRITON
     _validate_rope_inputs(v, cos, sin, out)
-    # Host staging: contiguous rows, broadcast cis to v (cache tables stay small
-    # until expand). Same dtype as v for the kernel.
     vc = v.contiguous()
-    cos_b = cos.expand(v.shape).to(dtype=v.dtype).contiguous()
-    sin_b = sin.expand(v.shape).to(dtype=v.dtype).contiguous()
+    cos_b = _triton_cis_rows(v, cos)
+    sin_b = _triton_cis_rows(v, sin)
     if out is None:
         out_t = torch.empty_like(vc)
     else:
@@ -298,8 +398,9 @@ class _TritonRopeFn(torch.autograd.Function):
         cos, sin = ctx.saved_tensors
         # ∂L/∂x0 = g0*c0 + g1*s1 ; ∂L/∂x1 = -g0*s0 + g1*c1
         go = grad_out.reshape(*ctx.shape[:-1], -1, 2)
-        cos_b = cos.expand(ctx.shape).reshape(*ctx.shape[:-1], -1, 2)
-        sin_b = sin.expand(ctx.shape).reshape(*ctx.shape[:-1], -1, 2)
+        # Native-shape pair views broadcast (no expand-to-full materialize).
+        cos_b = cos.reshape(*cos.shape[:-1], -1, 2)
+        sin_b = sin.reshape(*sin.shape[:-1], -1, 2)
         g0, g1 = go[..., 0], go[..., 1]
         c0, c1 = cos_b[..., 0], cos_b[..., 1]
         s0, s1 = sin_b[..., 0], sin_b[..., 1]
@@ -309,8 +410,7 @@ class _TritonRopeFn(torch.autograd.Function):
         else:
             dx0 = g0 * c0 + g1 * s1
             dx1 = -g0 * s0 + g1 * c1
-        dx = torch.stack((dx0, dx1), dim=-1).reshape(ctx.shape)
-        return dx, None, None
+        return _store_pairs(dx0, dx1, grad_out, None), None, None
 
 
 def fused_rope_rotate_triton(
@@ -319,9 +419,10 @@ def fused_rope_rotate_triton(
     sin: torch.Tensor,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """CUDA Triton fused rotate; falls back to pure-PyTorch fused if unavailable."""
+    """CUDA Triton fused rotate; CPU → blocked tile scaffold (then same math)."""
     if not _can_use_triton_rope(v):
-        return fused_rope_rotate_pytorch(v, cos, sin, out=out)
+        # Scaffold deepen: tile-structured CPU path mirrors kernel BLOCK loop.
+        return fused_rope_rotate_blocked(v, cos, sin, out=out)
     # out= + autograd: run Function then copy if needed
     if v.requires_grad or (isinstance(v, torch.Tensor) and v.grad_fn is not None):
         y = _TritonRopeFn.apply(v, cos, sin)
@@ -338,7 +439,12 @@ def fused_rope_rotate(
     sin: torch.Tensor,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Fused entry: Triton on CUDA when usable, else pure-PyTorch pair path."""
+    """Fused entry: Triton on CUDA when usable, else pure-PyTorch pair path.
+
+    CPU default for ``BDH_ROPE_IMPL=fused`` stays ``fused_rope_rotate_pytorch``
+    (no expand / no stack). Triton entry falls back to ``blocked`` for tile
+    parity when CUDA is unavailable.
+    """
     if _can_use_triton_rope(v):
         return fused_rope_rotate_triton(v, cos, sin, out=out)
     return fused_rope_rotate_pytorch(v, cos, sin, out=out)

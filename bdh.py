@@ -17,6 +17,7 @@ from bdh_cache import CacheManager
 from kernels.attention_dispatch import bdh_attn, bdh_attn_decode, resolve_attn_impl
 from kernels.attention_bwd import _env_autograd_enabled
 from kernels.rope_dispatch import bdh_rope_rotate, resolve_rope_impl
+from kernels.rope import rope_rotate_paired
 
 
 @dataclasses.dataclass
@@ -102,6 +103,9 @@ class Attention(torch.nn.Module):
         # (defensive if caller does not share cos_sin; zero-cost when shared).
         self._rope_t1_cis_key = None
         self._rope_t1_cis = None
+        # Paired narrow of `_rope_table_pairs` for the same T=1 key — apply path
+        # skips per-step full-N→pair reshape of cis (opt/rope-fuse-v2).
+        self._rope_t1_cis_pairs = None
         # Optional: generate hoists resolve_attn_impl() once per call.
         self._attn_impl_override = None
 
@@ -172,6 +176,7 @@ class Attention(torch.nn.Module):
             # Invalidate T=1 cis narrow cache (table identity changed).
             self._rope_t1_cis_key = None
             self._rope_t1_cis = None
+            self._rope_t1_cis_pairs = None
             # Also warm the rope_start=0 single-T cache for max_T.
             self._rope_cis_key = self._rope_cis_cache_key(max_T, device)
             self._rope_cis = (cos, sin)
@@ -226,6 +231,16 @@ class Attention(torch.nn.Module):
                         if not torch.compiler.is_compiling():
                             self._rope_t1_cis_key = t1_key
                             self._rope_t1_cis = cis
+                            # Pair narrow from generate table (same position).
+                            pairs = self._rope_table_pairs
+                            if pairs is not None:
+                                cp, sp = pairs
+                                self._rope_t1_cis_pairs = (
+                                    cp.narrow(-3, rope_start, 1),
+                                    sp.narrow(-3, rope_start, 1),
+                                )
+                            else:
+                                self._rope_t1_cis_pairs = None
                         return cis
                     return cos.narrow(-2, rope_start, T), sin.narrow(-2, rope_start, T)
 
@@ -249,6 +264,51 @@ class Attention(torch.nn.Module):
             self._rope_cis_key = key
             self._rope_cis = (cos, sin)
         return cos, sin
+
+    def t1_cis_pairs(self, rope_start: int, device):
+        """Return cached T=1 paired cis narrow, or build from ``_rope_table_pairs``.
+
+        ``None`` when no covering generate table / pairs. Call after
+        ``rope_cos_sin(1, rope_start, device)`` (or ``ensure_rope_table``) so the
+        single-slot flat+pair caches stay aligned.
+        """
+        if torch.compiler.is_compiling():
+            return None
+        pairs = self._rope_table_pairs
+        table = self._rope_table
+        tkey = self._rope_table_key
+        if pairs is None or table is None or tkey is None:
+            return None
+        max_T, dev_type, dev_index, dtype = tkey
+        if not (
+            0 <= rope_start < max_T
+            and device.type == dev_type
+            and device.index == dev_index
+            and self.freqs.dtype == dtype
+        ):
+            return None
+        t1_key = (int(rope_start), device.type, device.index, int(max_T))
+        if (
+            self._rope_t1_cis_pairs is not None
+            and self._rope_t1_cis_key == t1_key
+        ):
+            return self._rope_t1_cis_pairs
+        cp, sp = pairs
+        cis_p = (
+            cp.narrow(-3, rope_start, 1),
+            sp.narrow(-3, rope_start, 1),
+        )
+        self._rope_t1_cis_key = t1_key
+        self._rope_t1_cis_pairs = cis_p
+        # Keep flat narrow cache in sync when missing (pairs-only warm path).
+        if self._rope_t1_cis is None:
+            cos, sin = table
+            self._rope_t1_cis = (
+                cos.narrow(-2, rope_start, 1),
+                sin.narrow(-2, rope_start, 1),
+            )
+        return cis_p
+
 
     def forward(
         self,
@@ -296,7 +356,16 @@ class Attention(torch.nn.Module):
         B, nh, T, _ = Q.size()
         if cos_sin is None:
             cos_sin = self.rope_cos_sin(T, rope_start, Q.device)
-        QR = self.rope(None, Q, cos_sin=cos_sin, out=out_kr)
+        # T=1 + generate table pairs: rotate from paired cis (skip per-step
+        # flat→pair reshape). Falls back to dispatch for T>1 / no table.
+        if T == 1:
+            paired = self.t1_cis_pairs(rope_start, Q.device)
+            if paired is not None:
+                QR = rope_rotate_paired(Q, paired[0], paired[1], out=out_kr)
+            else:
+                QR = self.rope(None, Q, cos_sin=cos_sin, out=out_kr)
+        else:
+            QR = self.rope(None, Q, cos_sin=cos_sin, out=out_kr)
 
         if past_kr is None:
             # Training / cold prefill: unified backend dispatch.

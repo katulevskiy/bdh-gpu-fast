@@ -16,6 +16,7 @@ import bdh_baseline as baseline
 from kernels.rope import (
     eager_rope_rotate,
     fused_rope_rotate_pytorch,
+    rope_rotate_paired,
     rope_rotate_t1,
 )
 from kernels.rope_dispatch import bdh_rope_rotate
@@ -208,3 +209,77 @@ def test_rope_rotate_t1_rejects_multi_token():
     sin = torch.randn(1, 1, 4, 8)
     with pytest.raises(ValueError, match="sequence length 1"):
         rope_rotate_t1(v, cos, sin)
+
+
+def test_rope_rotate_paired_from_table_bit_identical():
+    """Generate-table pair narrow → rope_rotate_paired ≡ strided / t1."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    attn.ensure_rope_table(32, device)
+    rope_start = 9
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    assert paired is not None
+    cp, sp = paired
+    assert cp.shape[-2:] == (N // 2, 2)
+    torch.manual_seed(0)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    ref = _strided_ref(v, cos, sin)
+    out_p = rope_rotate_paired(v, cp, sp)
+    out_t1 = rope_rotate_t1(v, cos, sin)
+    assert torch.equal(out_p, ref)
+    assert torch.equal(out_t1, ref)
+
+
+def test_t1_cis_pairs_reuse_same_object():
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    attn.ensure_rope_table(24, device)
+    attn.rope_cos_sin(1, 11, device)
+    p1 = attn.t1_cis_pairs(11, device)
+    p2 = attn.t1_cis_pairs(11, device)
+    assert p1 is not None and p1 is p2
+    assert p1[0] is p2[0] and p1[1] is p2[1]
+
+
+def test_attention_forward_t1_uses_paired_path():
+    """Attention.forward T=1 with warmed table writes via paired cis into out_kr."""
+    cfg = _small_cfg(n_layer=1)
+    attn = bdh.Attention(cfg).eval()
+    device = torch.device("cpu")
+    B, nh = 1, cfg.n_head
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    D = cfg.n_embd
+    S = 6
+    attn.ensure_rope_table(S + 2, device)
+    torch.manual_seed(3)
+    q = torch.randn(B, nh, 1, N)
+    v = torch.randn(B, 1, 1, D)
+    past_kr = torch.randn(B, nh, S, N)
+    past_v = torch.randn(B, 1, S, D)
+    out_kr = torch.empty(B, nh, 1, N)
+    cos_sin = attn.rope_cos_sin(1, S, device)
+    out, kr, vv = attn(
+        Q=q, K=q, V=v, rope_start=S, past_kr=past_kr, past_v=past_v,
+        cos_sin=cos_sin, out_kr=out_kr,
+    )
+    assert kr is out_kr
+    ref = _strided_ref(q, cos_sin[0], cos_sin[1])
+    assert torch.equal(out_kr, ref)
+    assert out.shape == (B, nh, 1, D)
+
+
+def test_rope_rotate_t1_out_none_no_stack_parity():
+    """out=None path (empty+pair store) still bit-identical to strided."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    attn.ensure_rope_table(8, device)
+    cos, sin = attn.rope_cos_sin(1, 2, device)
+    torch.manual_seed(8)
+    v = torch.randn(3, cfg.n_head, 1, N)
+    assert torch.equal(rope_rotate_t1(v, cos, sin), _strided_ref(v, cos, sin))

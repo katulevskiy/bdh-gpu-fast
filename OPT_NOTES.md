@@ -4762,3 +4762,71 @@ cat-free through the preallocated cache path, while layout-v2's cached
 - No softmax / diagonal inclusion / scale / SDPA
 - No GPU speedup claims from profiler-inflated CPU timings
 - No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1`
+
+## opt/rope-fuse-v2 — deepen fused RoPE / T=1 (2026-09-19)
+
+**Branch:** `opt/rope-fuse-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `fd6d62d` (`#89` profile-v8 on main).
+
+### Goal
+
+Deepen the fused RoPE / T=1 path after `#69` rope-decode: cut remaining
+mul/copy_/stack tax on apply, wire the previously unused generate-table pair
+views into decode, and deepen the Triton scaffold with a CPU blocked tile
+fallback + parity tests. **Defaults unchanged** (`BDH_ROPE_IMPL=eager`).
+
+### Audit (remaining tax)
+
+| Path | Tax found |
+|------|-----------|
+| T=1 `rope_rotate_t1` | `stack→reshape` when `out=None`; per-step flat→pair cis reshape |
+| `_rope_table_pairs` | Built in `ensure_rope_table` but **unused** on apply |
+| Fused T>1 pytorch | Needless `cos.expand(v.shape)` before pair reshape; `stack` alloc |
+| Triton host | Always `expand+contiguous` cis; CPU fallback was pytorch (no tile scaffold) |
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/rope.py` | `_store_pairs` (no stack); `rope_rotate_paired`; fused pytorch **no expand**; `fused_rope_rotate_blocked` tile scaffold; Triton CPU → blocked; lighter cis staging helper |
+| `kernels/rope_dispatch.py` | Export paired/blocked; document fallback chain |
+| `bdh.py` | `_rope_t1_cis_pairs` + `t1_cis_pairs()`; `Attention.forward` T=1 uses paired cis when generate table is warm |
+| `tests/test_rope_decode.py` / `test_rope_fuse.py` | Paired ≡ strided; blocked ≡ eager/fused; Triton CPU→blocked; generate cache continuity under eager+fused |
+
+```bash
+export BDH_ROPE_IMPL=eager   # default — T=1 uses paired table path when warmed
+export BDH_ROPE_IMPL=fused   # pytorch pair path (no expand/stack); Triton on CUDA
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_rope_decode.py tests/test_rope_fuse.py \
+  tests/test_rope_cache.py tests/test_vs_baseline.py tests/test_correctness.py \
+  tests/test_attention_mask.py -q
+# 48 passed, 1 skipped — paired/blocked ≡ eager ≡ baseline; generate tokens match
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```text
+device=cpu  B=4 H=4 N=256  torch=2.14.0+cu130 cuda=False
+T=1 strided out=  median: ~26 us
+T=1 t1      out=  median: ~33 us  (≈0.79× — pair path still no CPU wall win)
+T=1 paired  out=  median: ~35 us  (≈0.74× — structural; skips cis reshape)
+T=128 eager_rotate   median: ~100 ms
+T=128 fused_pytorch  median: ~71 ms   (≈1.41× vs eager — no-expand/no-stack)
+T=128 blocked_tile   median: ~143 ms  (≈0.70× — scaffold only, not a win claim)
+```
+
+**Verdict:** keep **default eager**. Opt-in `BDH_ROPE_IMPL=fused` shows a real
+CPU rotate win on cold T>1 after dropping expand/stack; T=1 paired is structural
+(for CUDA / fewer reshape nodes). **No GPU on this box** — Triton still
+unexecuted; blocked is the CPU tile parity fallback.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; no public PR
+- No change to default `BDH_ROPE_IMPL=eager`
+- No fake GPU speedups from CPU medians
+- No attention math / `tril(-1)` / CacheManager changes
