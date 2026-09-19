@@ -335,3 +335,30 @@ def test_cold_reference_uses_raw_strict_lower_triangle():
     actual = namespace["BACKENDS_COLD"]["eager"](q, k, v)
 
     assert torch.equal(actual, expected)
+
+
+def test_decode_reference_uses_raw_past_scores_without_scaling():
+    """Packed past decode uses raw score×V, with every past key valid."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    q = torch.tensor(
+        [[[[2.0, 1.0]], [[-1.0, 3.0]]]],
+    )
+    k = torch.tensor(
+        [
+            [
+                [[1.0, 0.0], [0.0, 3.0], [-1.0, 2.0]],
+                [[2.0, 1.0], [1.0, -1.0], [0.0, 2.0]],
+            ]
+        ]
+    )
+    v = torch.tensor([[[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]]])
+
+    expected = (q @ k.transpose(-2, -1)) @ v
+    actual = namespace["BACKENDS_DECODE"]["eager"](q, k, v)
+
+    assert torch.equal(actual, expected)
