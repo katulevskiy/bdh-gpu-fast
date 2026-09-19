@@ -204,7 +204,8 @@ def _tiled_score_v(
 
     ``Vh`` may be ``(B, H, S, D)`` or broadcast ``(B, 1, S, D)`` — matmul
     broadcasts heads, so decode can skip an expand copy into ``(B, H, S, D)``.
-    Tile loop accumulates with ``out.add_`` (no ``out + x`` temporary).
+    Tile loop accumulates into the output directly for T=1 shared/head-matched
+    V in inference mode; other paths use ``out.add_`` (no ``out + x`` temp).
     """
     B, H, Tq, _N = Q.shape
     S = K.size(2)
@@ -216,6 +217,30 @@ def _tiled_score_v(
         _SCORE_ELEMS_BUDGET if oneshot_elems is None else max(1, int(oneshot_elems))
     )
     BS = _pick_tile_size(S, Tq, block_size, score_budget=budget)
+    # T=1 + broadcast V is the CacheManager hot path. Keep scores flattened
+    # over BH and send score×V straight into the output in inference mode;
+    # the generic 4-D matmul otherwise allocates both the score and product
+    # buffers even for a one-row decode. The autograd fallback remains graph
+    # safe and uses the same broadcast math.
+    if Tq == 1 and Vh.size(1) == 1 and H != 1:
+        Qf = Q.reshape(B * H, 1, _N)
+        Kf = K.reshape(B * H, S, _N)
+        out = Q.new_zeros(B, H, 1, D)
+        outf = out.reshape(B * H, 1, D)
+        if S <= BS or Tq * S <= budget:
+            scores = torch.bmm(Qf, Kf.transpose(1, 2))
+            _broadcast_t1_score_v_into(outf, scores, Vh, B=B, H=H, beta=0)
+            return out
+        for j0 in range(0, S, BS):
+            j1 = min(j0 + BS, S)
+            tile = j1 - j0
+            Kj = Kf[:, j0:j1, :]
+            Vj = Vh[:, :, j0:j1, :]
+            scores = torch.bmm(Qf, Kj.transpose(1, 2))
+            _broadcast_t1_score_v_into(outf, scores, Vj, B=B, H=H, beta=1)
+            del scores
+        return out
+
     # Modest past / small score: single two-GEMM (same as eager decode).
     # Ephemeral ``(Tq × S)`` only — never ``(S+Tq)×(S+Tq)``.
     if S <= BS or Tq * S <= budget:
@@ -299,6 +324,49 @@ def _broadcast_score_v_into(
         scores.view(B, H, Bi, Bj),
         Vj[:, None, :, :],
     ).reshape(B * H, Bi, Vj.size(-1))
+    if beta == 0:
+        target.copy_(product)
+    else:
+        target.add_(product)
+
+
+def _broadcast_t1_score_v_into(
+    target: torch.Tensor,
+    scores: torch.Tensor,
+    Vj: torch.Tensor,
+    *,
+    B: int,
+    H: int,
+    beta: float,
+) -> None:
+    """Accumulate a T=1 shared-V tile without a score×V product buffer.
+
+    ``baddbmm`` has no head broadcast, so the inference path batches one
+    value view per sample (with a zero-stride head expansion) and writes each
+    result directly into ``target``. This keeps the CacheManager layout
+    ``(B,1,S,D)`` unexpanded and removes the temporary product from the hot
+    blocked/online decode epilogue. Training keeps the graph-safe matmul
+    fallback because ``out=`` operators do not participate in autograd.
+    """
+    Bi, Bj = scores.size(1), scores.size(2)
+    target4 = target.view(B, H, Bi, Vj.size(-1))
+    scores4 = scores.view(B, H, Bi, Bj)
+    use_out = not torch.is_grad_enabled() or not any(
+        t.requires_grad for t in (target, scores, Vj)
+    )
+    if use_out:
+        for b in range(B):
+            Vshared = Vj[b, 0].unsqueeze(0).expand(H, Bj, Vj.size(-1))
+            torch.baddbmm(
+                target4[b],
+                scores4[b],
+                Vshared,
+                beta=beta,
+                out=target4[b],
+            )
+        return
+
+    product = torch.matmul(scores4, Vj).reshape_as(target)
     if beta == 0:
         target.copy_(product)
     else:
