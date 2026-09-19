@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#131)
+# OPT status — landed work (#1–#136)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `891b7c5` (`#131` AUTO threshold sweep / `#130` attn-bwd-v2 / `#129` profile-v13 / `#128` decode-gemm-v2 / `#127` profile-ci / `#126` docs-matrix-v30). The landed matrix below is aligned through #131; #131 deepens the CPU-only AUTO generate threshold harness with stable, de-duplicated sweeps while preserving seeded parity, strict cold/decode gates, cat-free output, and default eager behavior. No GPU timing or speedup evidence was added; real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `546192d` (`#136` compile-train-v3 / `#135` scorev-fuse-v3 / `#134` cuda-build-v2 / `#133` docs refresh through #131 / `#132` docs refresh through #130). The landed matrix below is aligned through #136; #134 makes optional CUDA setup skip cleanly when `nvcc` is unavailable on runtime-only boxes, #135 deepens the common B=1, T=1 shared-V decode epilogue by reusing flattened score/output views and writing score×V through `baddbmm(..., out=target)`, and #136 clarifies CPU-safe compile/probe soft-fallback diagnostics without changing defaults. CPU validation preserves strict raw-tril semantics, eager defaults, autograd fallback, and cat-free generate; no GPU timing or speedup evidence was added, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -37,7 +37,7 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 | Value | Cold / prefill | T=1 decode vs packed KR/V | Notes |
 |-------|----------------|---------------------------|-------|
 | `eager` | Full `T×T` then `tril_(diagonal=-1)` | `_two_gemm_decode` (Tq=1 BH-bmm / 4D @) | **Default**; reference math |
-| `blocked` | Online / tiled fused score×V (no full `T×T`) | Online tiled decode (tight oneshot; peak ~Tq×tile) | Lower peak; #100/#116 deepen no-grad score×V epilogues and shared-V T=1 tiling; long-S CPU wall can beat eager |
+| `blocked` | Online / tiled fused score×V (no full `T×T`) | Online tiled decode (tight oneshot; peak ~Tq×tile) | Lower peak; #100/#116/#135 deepen no-grad score×V epilogues and shared-V T=1 tiling; long-S CPU wall can beat eager |
 | `triton` | Triton fused on CUDA; else blocked | Triton decode + `V_BROADCAST`; else blocked | Needs CUDA + Triton to run kernel |
 | `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` Tq=1 + adaptive `DECODE_TILE_N` (v3) | Deepened tiles; GPU measure open |
 
@@ -95,7 +95,7 @@ export BDH_ROPE_IMPL=fused
 
 `generate()` is `@torch.compiler.disable`. Changing `BDH_ATTN_IMPL` after compile → recompile. On CPU, `reduce-overhead` is **not useful** — CUDA graphs need a real GPU (`maybe_compile` warns; prefer `MODE=default`).
 
-**Operator guidance (CPU, after #46 / #63 / #84 / #117):** recommend `BDH_COMPILE=1` **only** with
+**Operator guidance (CPU, after #46 / #63 / #84 / #117 / #136):** recommend `BDH_COMPILE=1` **only** with
 `BDH_ATTN_IMPL=eager` and `BDH_COMPILE_MODE=default` (optionally `BDH_ATTN_AUTOGRAD=1` and/or `BDH_COMPILE_FULLGRAPH=1` — tip cold path
 still 0 Dynamo graph breaks; FULLGRAPH soft-falls back if Unsupported). `maybe_compile` logs a clear warning if `COMPILE=1` with
 `IMPL∈{blocked,online,triton}` (measured CPU regression) **or** `MODE=reduce-overhead` on non-CUDA.
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#131)
+## Landed opts (#1–#136)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -307,6 +307,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **129** | `opt/profile-v13` | Re-profile the clean #128 tip and record attention/forward/generate operator evidence without changing semantics | CPU-only profile: attention `copy_`=2/call, forward=12/call, generate=394/call; `cat=0`, `contiguous=0` | No GPU timing or speedup claim |
 | **130** | `opt/attn-bwd-v2` | Include the `online` alias alongside `blocked` in the analytic-attention GPU train matrix, crossed with `AUTOGRAD=0|1`, while retaining the CPU-safe parity gate | CPU parity/skip contract; full smoke 525 passed, 19 skipped; GPU matrix unrun | **P2** GPU analytic-attention train measure remains open |
 | **131** | `opt/auto-threshold-sweep` | Deepen the CPU AUTO generate microbench with `--auto-threshold-sweep` over stable, de-duplicated decode thresholds; preserve seeded token parity, strict cold/decode resolver checks, `aten::cat=0`, and default eager behavior | CPU harness/tests only; no GPU timing | — |
+| **132** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #130 | Docs only | — |
+| **133** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #131 | Docs only | — |
+| **134** | `opt/cuda-build-v2` | Skip optional `CUDAExtension` setup cleanly when `nvcc` is unavailable; add default/no-`nvcc` subprocess smoke coverage | CPU configuration tests pass; CUDA-only tests skip cleanly | No GPU build, timing, or kernel claim; P0 GPU validation remains open |
+| **135** | `opt/scorev-fuse-v3` | Deepen the common B=1, T=1 shared-V decode epilogue by reusing flattened score/output views and writing score×V with `baddbmm(..., out=target)`; preserve broadcast-V layout, autograd fallback, eager default, strict raw `tril`, and cat-free generate | Focused CPU: 111 passed, 3 skipped; full suite: 533 passed, 19 skipped, 3 warnings | No GPU timing or speedup; GPU/Triton/CUDA validation remains P0 |
+| **136** | `opt/compile-train-v3` | Clarify CPU-safe compile/probe soft-fallback diagnostics, identify the original eager module on fallback, and document FULLGRAPH/AUTOGRAD/probe boundaries without changing defaults | `test_compile.py`: 36 passed, 1 skipped, 1 warning; full suite: 533 passed, 19 skipped, 4 warnings; baseline smoke skips compile matrix/AMP sections | No GPU or CUDA-graph measurement; compile validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
