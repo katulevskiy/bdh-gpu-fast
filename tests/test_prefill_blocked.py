@@ -126,6 +126,40 @@ def test_cpu_flattened_bmm_padded_v_view_preserves_layout_contract(value_heads):
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_long_padded_v_autograd_matches_eager(impl, value_heads):
+    """Long CPU tiles preserve gradients through a capacity-padded V view."""
+    T, B, H, N, D = 257, 2, 2, 5, 4
+    g = torch.Generator().manual_seed(121 + value_heads)
+    Q0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    K0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    V_storage0 = torch.randn(
+        B, value_heads, T, D + 1, dtype=torch.float64, generator=g
+    )
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q = Q0.clone().requires_grad_()
+        K = K0.clone().requires_grad_()
+        V_storage = V_storage0.clone().requires_grad_()
+        V = V_storage[..., :D]
+        assert not V.is_contiguous()
+        assert V.stride(-2) == D + 1
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad((out * weight).sum(), (Q, K, V_storage))
+        return out, grads
+
+    ref, ref_grads = run(eager_tril_attn)
+    tiled = blocked_tril_attn if impl == "blocked" else online_tril_attn
+    got, got_grads = run(lambda Q, K, V: tiled(Q, K, V, block_size=128))
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+    assert torch.count_nonzero(got_grads[2][..., D]) == 0
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("value_heads", [1, 2])
 def test_cpu_flattened_bmm_low_precision_padded_v_view_matches_eager(
