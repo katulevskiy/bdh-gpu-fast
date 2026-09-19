@@ -484,6 +484,36 @@ def test_t_gt1_noncontiguous_cpu_parity_and_out():
     assert torch.equal(fused_rope_rotate_pytorch(v_nc, cos_nc, sin_nc), ref)
 
 
+def test_fused_strided_pair_input_and_out_preserve_parity():
+    """Pair views preserve RoPE parity when both input and cache slot stride."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=271)
+    sentinel = torch.tensor(-321.0)
+
+    input_backing = torch.full((*v.shape[:-1], v.shape[-1] * 2), sentinel.item())
+    v_strided = input_backing[..., ::2]
+    v_strided.copy_(v)
+    ref = eager_rope_rotate(v_strided, cos, sin)
+    assert not v_strided.is_contiguous()
+
+    paths = (
+        ("pytorch", fused_rope_rotate_pytorch, {}),
+        ("blocked", fused_rope_rotate_blocked, {"block": 3}),
+        ("triton-cpu-fallback", fused_rope_rotate_triton, {}),
+    )
+    for name, rotate, kwargs in paths:
+        out_backing = torch.full(
+            (*v.shape[:-1], v.shape[-1] * 2), sentinel.item()
+        )
+        out = out_backing[..., ::2]
+        got = rotate(v_strided, cos, sin, out=out, **kwargs)
+        assert got is out and not got.is_contiguous(), name
+        assert torch.equal(got, ref), name
+        assert torch.equal(
+            out_backing[..., 1::2],
+            torch.full_like(out_backing[..., 1::2], sentinel),
+        ), name
+
+
 def test_fused_out_none_pair_store_parity():
     _, _, cos, sin, v, _ = _cis_and_v(T=10, seed=27)
     # Explicit out=None path
