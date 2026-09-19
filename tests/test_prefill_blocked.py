@@ -34,6 +34,7 @@ def _bump():
     d._ATTN_IMPL_ENV = object()
     d._ATTN_AUTO_ENV = object()
     d._ATTN_AUTO_THR_ENV = object()
+    d._ATTN_AUTO_COLD_THR_ENV = object()
 
 
 def _qkv(T, *, B=1, H=4, N=32, D=64, seed=0):

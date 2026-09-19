@@ -4192,3 +4192,99 @@ GPU wins from these CPU medians.
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No re-introducing `aten::cat` in generate / CacheManager
 
+## opt/auto-tune — retune AUTO thresholds after prefill-blocked (2026-09-19)
+
+**Branch:** `opt/auto-tune` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `acd26d7` (main after `#76` docs matrix through #75).
+
+### Goal
+
+After `#72` gen-long + `#73` attn-mem + `#75` prefill-blocked, document
+**recommended operator settings** and optionally split cold vs decode AUTO
+thresholds. Hard constraints: `tril(diagonal=-1)`, `aten::cat=0`, default
+`IMPL=eager`, **AUTO remains off by default**. No pathwaycom / public PR.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention_dispatch.py` | Keep `DEFAULT_ATTN_AUTO_THRESHOLD=512`; add `BDH_ATTN_AUTO_COLD_THRESHOLD` / `attn_auto_cold_threshold()` (unset → mirrors decode thr); `resolve_cold_impl` uses cold thr |
+| `kernels/__init__.py` / `README.md` | Export + document cold thr |
+| `tests/test_attn_auto.py` | Independent cold thr; fallback; invalid env |
+| Docs | This note + light `OPT_STATUS` / `OPT_BACKLOG` operator recommendations |
+
+```bash
+# defaults unchanged
+unset BDH_ATTN_AUTO
+export BDH_ATTN_IMPL=eager
+
+# long-S generate wall (CPU-validated after #75)
+export BDH_ATTN_AUTO=1
+export BDH_ATTN_AUTO_THRESHOLD=512          # shared default; wall crossover ~≥512
+# export BDH_ATTN_AUTO_COLD_THRESHOLD=512   # optional; unset ≡ THRESHOLD
+
+# mid-T peak-mem (accept wall loss @128–256; #73)
+export BDH_ATTN_AUTO=1
+export BDH_ATTN_AUTO_THRESHOLD=512          # decode still wall-gated
+export BDH_ATTN_AUTO_COLD_THRESHOLD=256     # cold switches earlier for peak↓
+
+# always blocked (never overridden by AUTO)
+export BDH_ATTN_IMPL=blocked   # alias: online
+```
+
+### Evidence → recommended settings
+
+From `#73` attn-mem (cold score×V, CPU) and `#75` generate AUTO A/B:
+
+| Goal | Setting | Why |
+|------|---------|-----|
+| Short / train / safe default | AUTO **off**, `IMPL=eager` | Unchanged defaults; mid-T train shapes stay eager-faster |
+| Long-S **generate wall** | `AUTO=1`, `THRESHOLD=512` | `#75`: e2e AUTO **1.26× @1024 / 1.39× @2048**; cold microbench wall win from T=512 (`3.23×`); S=256 stays eager |
+| Mid-T **peak-score** budget | `IMPL=blocked` **or** `AUTO=1` + `COLD_THRESHOLD=256` | `#73`: T∈{128,256} peak≪eager **while wall slower** (~0.3–0.4×); do not lower shared thr for wall |
+| Always tiled | `IMPL=blocked` | Explicit IMPL never overridden by AUTO |
+
+**Default thr stays 512** — do **not** lower the shared default for peak-mem;
+use `COLD_THRESHOLD` or explicit `IMPL=blocked` instead. GPU unmeasured —
+re-check on A100/H100 with `bench_generate.py --mode auto-ab --device cuda`.
+
+### Semantics
+
+```text
+AUTO off:                 eager cold + eager decode (any length)
+AUTO on / decode:         past_len > AUTO_THRESHOLD → triton|blocked
+AUTO on / cold:           T > COLD_THRESHOLD (fallback AUTO_THRESHOLD) → triton|blocked
+explicit IMPL ≠ eager:    never overridden
+aten::cat generate:       0
+```
+
+### Short AUTO A/B (this box, after change)
+
+`OMP_NUM_THREADS=2`, `torch 2.14.0+cu130`, `cuda=False`, tip `acd26d7`+,
+cfg `layers=4 d=128 nh=4 B=1`, thr=512, `--new 8`, warmup=2 iters=5.
+
+| prompt | AUTO=0 ms | AUTO=1 ms | spd | match | cats | cold@S / decode@S |
+|--------|-----------|-----------|-----|-------|------|-------------------|
+| 256 | 38.35 | 37.45 | 1.02× | yes | 0 | eager / eager |
+| 1024 | 244.20 | 196.05 | **1.25×** | yes | 0 | **blocked / blocked** |
+
+Direction matches `#75` (1.26× @1024). Default thr=512 confirmed: S=256 never
+fires; long-S wins e2e when AUTO on. AUTO still off by default.
+
+```bash
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_generate.py \
+  --mode auto-ab --prompts 256,1024 --new 8
+```
+
+### Correctness
+
+```bash
+.venv/bin/python -m pytest tests/test_attn_auto.py tests/test_prefill_blocked.py -q
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No defaulting `BDH_ATTN_AUTO=1` or flipping `IMPL` default
+- No changing shared default thr away from 512 without GPU evidence
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No fake GPU claims from CPU medians

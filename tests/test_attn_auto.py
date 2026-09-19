@@ -1,4 +1,7 @@
-"""Opt-in BDH_ATTN_AUTO: long-T cold + long-S decode → triton|blocked; default eager."""
+"""Opt-in BDH_ATTN_AUTO: long-T cold + long-S decode → triton|blocked; default eager.
+
+Optional ``BDH_ATTN_AUTO_COLD_THRESHOLD`` (defaults to ``AUTO_THRESHOLD``).
+"""
 
 from __future__ import annotations
 
@@ -21,6 +24,7 @@ from kernels.attention import (
 )
 from kernels.attention_dispatch import (
     DEFAULT_ATTN_AUTO_THRESHOLD,
+    attn_auto_cold_threshold,
     attn_auto_enabled,
     attn_auto_threshold,
     backend_info,
@@ -39,6 +43,7 @@ def _bump_caches():
     d._ATTN_IMPL_ENV = object()
     d._ATTN_AUTO_ENV = object()
     d._ATTN_AUTO_THR_ENV = object()
+    d._ATTN_AUTO_COLD_THR_ENV = object()
 
 
 def _make_decode(S, B=2, H=4, N=16, D=32, seed=0):
@@ -58,15 +63,19 @@ def _auto_long_s_impl() -> str:
 def test_default_auto_off(monkeypatch):
     monkeypatch.delenv("BDH_ATTN_AUTO", raising=False)
     monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
     monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
     _bump_caches()
     assert not attn_auto_enabled()
     assert attn_auto_threshold() == DEFAULT_ATTN_AUTO_THRESHOLD == 512
+    assert attn_auto_cold_threshold() == 512
     assert resolve_attn_impl() == "eager"
     assert resolve_decode_impl(4096) == "eager"
+    assert resolve_cold_impl(4096) == "eager"
     info = backend_info()
     assert info["BDH_ATTN_AUTO"] is False
     assert info["BDH_ATTN_AUTO_THRESHOLD"] == 512
+    assert info["BDH_ATTN_AUTO_COLD_THRESHOLD"] == 512
 
 
 @pytest.mark.parametrize(
@@ -99,11 +108,14 @@ def test_auto_switches_eager_decode_past_threshold(monkeypatch):
 def test_auto_custom_threshold(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "128")
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
     monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
     _bump_caches()
     assert attn_auto_threshold() == 128
+    assert attn_auto_cold_threshold() == 128
     assert resolve_decode_impl(128) == "eager"
     assert resolve_decode_impl(129) == _auto_long_s_impl()
+    assert resolve_cold_impl(129) == _auto_long_s_impl()
 
 
 def test_auto_does_not_override_explicit_non_eager(monkeypatch):
@@ -214,6 +226,47 @@ def test_attention_module_auto_decode(monkeypatch):
     )
     assert torch.allclose(out, out2, atol=0)
     assert resolve_decode_impl(S) == _auto_long_s_impl()
+
+
+
+def test_cold_threshold_defaults_to_decode_thr(monkeypatch):
+    """Unset COLD_THRESHOLD mirrors AUTO_THRESHOLD."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "128")
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump_caches()
+    assert attn_auto_threshold() == 128
+    assert attn_auto_cold_threshold() == 128
+    assert resolve_cold_impl(128) == "eager"
+    assert resolve_cold_impl(129) == _auto_long_s_impl()
+    assert resolve_decode_impl(129) == _auto_long_s_impl()
+
+
+def test_independent_cold_threshold(monkeypatch):
+    """COLD_THRESHOLD can be lower than decode thr for peak-mem mid-T (#73)."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "512")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "256")
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump_caches()
+    assert attn_auto_threshold() == 512
+    assert attn_auto_cold_threshold() == 256
+    # Mid-T: cold switches, decode still eager
+    assert resolve_cold_impl(256) == "eager"
+    assert resolve_cold_impl(257) == _auto_long_s_impl()
+    assert resolve_decode_impl(257) == "eager"
+    assert resolve_decode_impl(513) == _auto_long_s_impl()
+    info = backend_info()
+    assert info["BDH_ATTN_AUTO_COLD_THRESHOLD"] == 256
+    assert info["BDH_ATTN_AUTO_THRESHOLD"] == 512
+
+
+def test_invalid_cold_threshold_raises(monkeypatch):
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "nope")
+    _bump_caches()
+    with pytest.raises(ValueError, match="BDH_ATTN_AUTO_COLD_THRESHOLD"):
+        attn_auto_cold_threshold()
 
 
 def test_invalid_threshold_raises(monkeypatch):
