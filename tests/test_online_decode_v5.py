@@ -66,3 +66,37 @@ def test_decode_uses_raw_scores_without_softmax_or_scale():
         assert torch.allclose(got, expected, atol=0, rtol=0), (
             f"impl={impl} maxdiff={(got - expected).abs().max().item()}"
         )
+
+
+def test_decode_preserves_signed_raw_scores_with_per_head_values():
+    """Signed raw QK scores and independent per-head V stay unnormalized."""
+    Q = torch.tensor(
+        [
+            [[[2.0, -1.0]], [[-1.0, 2.0]]],
+            [[[1.0, 1.0]], [[2.0, 1.0]]],
+        ]
+    )
+    K_past = torch.tensor(
+        [
+            [[[1.0, 0.0], [0.0, 2.0]], [[1.0, 1.0], [2.0, 0.0]]],
+            [[[1.0, -1.0], [2.0, 1.0]], [[1.0, 0.0], [0.0, -1.0]]],
+        ]
+    )
+    V_past = torch.tensor(
+        [
+            [[[3.0, 5.0], [-2.0, 4.0]], [[7.0, -1.0], [1.0, 2.0]]],
+            [[[2.0, 3.0], [4.0, -1.0]], [[5.0, 6.0], [-3.0, 2.0]]],
+        ]
+    )
+    expected = torch.tensor(
+        [
+            [[[10.0, 2.0]], [[5.0, -5.0]]],
+            [[[12.0, -3.0]], [[13.0, 10.0]]],
+        ]
+    )
+
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K_past, V_past, impl=impl)
+        assert torch.equal(got, expected), (
+            f"impl={impl} maxdiff={(got - expected).abs().max().item()}"
+        )
