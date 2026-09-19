@@ -58,6 +58,18 @@ def test_blocked_online_parity_long_t(T):
     assert torch.count_nonzero(blk[:, :, 0, :]) == 0
 
 
+@pytest.mark.parametrize("value_heads", [1, 3])
+def test_cpu_flattened_bmm_broadcast_and_head_matched(value_heads):
+    """Long CPU cold tiles keep parity for broadcast and per-head V."""
+    Q, K, _ = _qkv(256, B=2, H=3, N=7, D=5, seed=17 + value_heads)
+    g = torch.Generator().manual_seed(23 + value_heads)
+    V = torch.randn(2, value_heads, 256, 5, generator=g)
+    ref = eager_tril_attn(Q, K, V)
+    got = blocked_tril_attn(Q, K, V, block_size=128)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 def test_pick_cold_block_size_adaptive():
     assert pick_cold_block_size(64) == DEFAULT_BLOCK_COLD
     assert pick_cold_block_size(255) == DEFAULT_BLOCK_COLD
