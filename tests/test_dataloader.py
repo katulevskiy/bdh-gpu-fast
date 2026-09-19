@@ -385,6 +385,7 @@ def test_dataloader_num_workers_zero(tr, monkeypatch):
     assert dl.pin_memory is False  # CPU device
     assert dl.persistent_workers is False
     assert dl.worker_init_fn is None
+    assert dl.batch_size is None  # each dataset item is already a full batch
 
 
 def test_dataloader_negative_workers_clamp_to_cpu_safe_zero(tr, monkeypatch):
