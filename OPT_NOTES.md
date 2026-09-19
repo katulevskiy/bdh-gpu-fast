@@ -6905,3 +6905,19 @@ remain unchanged (`BDH_PREFETCH_ASYNC=1`, `BDH_PREFETCH_H2D=1`).
 - No default prefetch or H2D flag changes.
 - No GPU timing or overlap claims.
 - No public PR.
+
+## opt/online-decode-v4 — retain shared-V packed views (2026-09-19)
+
+**Branch:** `opt/online-decode-v4` on the private repository. **Base tip:**
+`62acaa7` (#169).
+
+The opt-in blocked/online T=1 shared-V decode now keeps a non-flattenable
+`(B,H,S,N)` key view on the 4-D CPU score path instead of forcing a
+`B*H` reshape copy. The reused `(B,S,D)` shared-V view, direct inference
+accumulation, and grad-enabled fallback remain unchanged. Raw scores ×
+`tril(diagonal=-1)` semantics, eager defaults, and cat-free generate remain
+unmodified.
+
+CPU validation covers B>1 long-S tiles, capacity-strided cache parity,
+non-flattenable key views, autograd, incremental decode, and generate. This
+box has no GPU; no GPU timing, correctness, or win claim is made.

@@ -82,6 +82,19 @@ def _reshape_decode_view(t: torch.Tensor, *shape: int) -> torch.Tensor:
         return t.reshape(*shape)
 
 
+def _try_decode_view(t: torch.Tensor, *shape: int) -> torch.Tensor | None:
+    """Return a decode reshape view, or ``None`` without staging a copy.
+
+    Packed cache prefixes keep the full-capacity sequence stride.  Flattening
+    ``(B,H,...)`` is therefore not always view-compatible; the CPU blocked
+    fallback can retain the original 4-D cache view instead of copying it.
+    """
+    try:
+        return t.view(*shape)
+    except RuntimeError:
+        return None
+
+
 def _pick_triton_cold_tiles(
     T: int,
     N: int,
@@ -241,25 +254,35 @@ def _tiled_score_v(
     # buffers even for a one-row decode. The autograd fallback remains graph
     # safe and uses the same broadcast math.
     if Tq == 1 and Vh.size(1) == 1 and H != 1:
-        Qf = Q.reshape(B * H, 1, _N)
-        Kf = K.reshape(B * H, S, _N)
         # Reuse one 3-D shared-V view across the whole past scan. This keeps
         # the cache's (B,1,S,D) layout out of the tile loop and never stages
         # a repeated B*H value tensor.
         Vshared = Vh[:, 0, :, :]
         out = Q.new_zeros(B, H, 1, D)
         outf = out.reshape(B * H, 1, D)
+        # A contiguous caller can use dense BH-bmm. Capacity-padded cache
+        # prefixes are not flattenable without a copy; retain their 4-D
+        # strides and only flatten the fresh score tile (a view).
+        Qf = _try_decode_view(Q, B * H, 1, _N)
+        Kf = _try_decode_view(K, B * H, S, _N)
+        flat_ok = Qf is not None and Kf is not None
+        if not flat_ok:
+            def _score_tile(Kj: torch.Tensor) -> torch.Tensor:
+                return (Q @ Kj.transpose(-2, -1)).view(B * H, 1, Kj.size(2))
+        else:
+            def _score_tile(Kj: torch.Tensor) -> torch.Tensor:
+                return torch.bmm(Qf, Kj.transpose(1, 2))
         if S <= BS or Tq * S <= budget:
-            scores = torch.bmm(Qf, Kf.transpose(1, 2))
+            scores = _score_tile(Kf if flat_ok else K)
             _broadcast_t1_score_v_into(
                 outf, scores, Vshared, B=B, H=H, beta=0
             )
             return out
         for j0 in range(0, S, BS):
             j1 = min(j0 + BS, S)
-            Kj = Kf[:, j0:j1, :]
+            Kj = (Kf[:, j0:j1, :] if flat_ok else K[:, :, j0:j1, :])
             Vj = Vshared[:, j0:j1, :]
-            scores = torch.bmm(Qf, Kj.transpose(1, 2))
+            scores = _score_tile(Kj)
             _broadcast_t1_score_v_into(outf, scores, Vj, B=B, H=H, beta=1)
             del scores
         return out

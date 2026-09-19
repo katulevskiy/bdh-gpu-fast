@@ -8,6 +8,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from bdh_cache import CacheManager  # noqa: E402
 from kernels.attention import (  # noqa: E402
     _DECODE_ONESHOT_ELEMS,
     blocked_decode_attn,
@@ -57,6 +58,49 @@ def test_batched_shared_v_accumulation_writes_output(monkeypatch):
     assert accumulated
     assert all(input_ptr == out_ptr for _, input_ptr, out_ptr, _ in accumulated)
     assert all(shape[0] == B and shape[1] == H for _, _, _, shape in accumulated)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
+
+
+def test_batched_shared_v_nonflat_key_view_keeps_4d_strides(monkeypatch):
+    """Long B>1 decode retains a non-flattenable K view instead of copying."""
+    B, H, S, N, D = 2, 4, _DECODE_ONESHOT_ELEMS * 2 + 129, 8, 16
+    cm = CacheManager(
+        n_layer=1,
+        max_seq=S + 17,
+        batch_size=B,
+        n_head=H,
+        n_latent=N,
+        n_embd=D,
+        device="cpu",
+    )
+    torch.manual_seed(404)
+    cm._kr_buf[0].normal_()
+    cm._v_buf[0].normal_()
+    cm.seq_len = S
+    K, V = cm.get_past(0)
+    assert K is not None and V is not None
+    assert K.stride() == (H * cm.capacity * N, cm.capacity * N, N, 1)
+
+    # Reorder the backing storage so (B,H,...) cannot flatten as a view while
+    # preserving the same logical K values and the shared-V cache layout.
+    K = K.transpose(0, 1).contiguous().permute(1, 0, 2, 3)
+    Q = torch.randn(B, H, 1, N)
+    assert K.stride(0) != H * K.stride(1)
+    bmm_calls = []
+    original = torch.bmm
+
+    def spy(input, batch1, batch2):
+        bmm_calls.append((batch1.shape, batch2.shape))
+        return original(input, batch1, batch2)
+
+    monkeypatch.setattr(torch, "bmm", spy)
+    with torch.inference_mode():
+        got = blocked_decode_attn(Q, K, V, block_size=64)
+        ref = eager_decode_attn(Q, K, V)
+
+    # The non-flattenable K view takes the 4-D score path; the shared-V
+    # epilogue may still use baddbmm, but never a score bmm staging copy.
+    assert not bmm_calls
     assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
 
 
