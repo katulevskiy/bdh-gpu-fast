@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#90)
+# OPT status — landed work (#1–#93)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `24f44a6` (`#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `f10bdd4` (`#89` profile-v8, post-#85–#87); default eager unchanged, short-window opt-ins remain unexercised, and #90 adds no GPU measurement. Defaults remain unchanged and GPU validation remains open.
+Tip documented here: `b9ce421` (`#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source remains `f10bdd4` (`#89` profile-v8, post-#85–#87); default eager remains unchanged, #92 is CPU no-op and #93 is an opt-in CPU cold-path win at T≥256. No GPU speedup is measured; GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -131,6 +131,22 @@ BDH_PREFETCH_ASYNC=1 python train.py  # default
 BDH_PREFETCH_ASYNC=0 python train.py  # sync debug / A-B
 ```
 
+### `BDH_PREFETCH_H2D` — CUDA side-stream H2D lookahead (default `1`)
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `BDH_PREFETCH_H2D` | `1` | On CUDA, stage one pinned batch ahead on a dedicated side stream and hand it to the caller stream via an event; `0` keeps H2D on the caller stream |
+
+This flag is a CPU no-op. It applies to the async host-prefetch path;
+`BDH_PREFETCH_ASYNC=0` remains the synchronous debug/A-B mode. GPU H2D
+overlap and throughput are unmeasured. The `cuda_staging=` constructor override
+is available for tests/A-B and is ignored on CPU.
+
+```bash
+BDH_PREFETCH_H2D=1 python train.py  # default on CUDA
+BDH_PREFETCH_H2D=0 python train.py  # caller-stream H2D
+```
+
 ### `BDH_AMP_DTYPE` — train autocast (default `float32` / unset)
 
 | Value | Autocast | GradScaler |
@@ -156,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#90)
+## Landed opts (#1–#93)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -250,6 +266,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **88** | `opt/docs-matrix-v15` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #87 | Docs only | — |
 | **89** | `opt/profile-v8` | Re-profile the post-#85–#87 tip; refresh profile/status/backlog evidence and keep the GPU blocker explicit | Docs/profile only; `aten::cat`=0 and `aten::contiguous`=0 on the short window | No GPU measurements; defaults unchanged |
 | **90** | `opt/rope-fuse-v2` | Deepen fused RoPE and T=1 pair apply: pair-contiguous stores, no expand/stack allocs, cached table-pair path, blocked Triton CPU fallback/scaffold, and parity tests | Fused T>1 rotate ~1.4× in the honest CPU microbench; T=1 parity; no default change | GPU Triton/CUDA validation open; default `BDH_ROPE_IMPL=eager` |
+| **91** | `opt/docs-matrix-v16` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #90 | Docs only | — |
+| **92** | `opt/prefetch-h2d` | Opt-in CUDA pinned-batch, side-stream H2D lookahead with event handoff; CPU path is a no-op; `BDH_PREFETCH_H2D=1` default | CPU smoke only; no throughput claim | GPU H2D overlap unmeasured; default CPU behavior unchanged |
+| **93** | `opt/blocked-tile-v2` | Flatten long CPU cold blocked/online `(B,H)` heads once and use dense `bmm` score and score×V tiles; preserve strict `tril(-1)` and default eager | Blocked wins at T≥256: 1.25× @256, 4.00× @512, 5.87× @1024 in the honest single-thread bench; short T still loses | CUDA path and GPU speedup unmeasured; default eager unchanged |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -269,6 +288,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` / `MODE` / `FULLGRAPH` | `0` / `default` / `0` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); optional `FULLGRAPH=1` (#84; soft-fallback); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
+| `BDH_PREFETCH_H2D` | `1` on CUDA | `0` to keep H2D on the caller stream; CPU no-op; GPU overlap still needs measurement |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on **CUDA** train boxes (CPU = smoke only) |
 | `BDH_AMP_FORWARD_ONLY` | `0` | `1` for logits-only autocast + fp32 CE |
 | Sparse ReLU | OFF | Only if density + GPU sparse kernel win |
