@@ -6980,7 +6980,7 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
 ## opt/blocked-tile-v4 — deepen CPU wide-head cold parity (2026-09-19)
 
 **Branch:** `opt/blocked-tile-v4` on the private repository. **Base tip:**
-`f95c143` (#173).
+`bc3967b` (#174).
 
 The blocked cold-path parity matrix now includes a wider, batched shape at the
 128-row tile boundary: `B=2, H=3, T=257, N=160, D=192`. Both shared-V
