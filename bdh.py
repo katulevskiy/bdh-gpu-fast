@@ -12,9 +12,11 @@ from torch import nn
 
 from bdh_cache import CacheManager
 
-# Eager import so Attention.forward has no lazy-import graph break under Dynamo.
-from kernels.attention_dispatch import bdh_attn, bdh_attn_decode
+# Eager imports so Attention.forward / rope have no lazy-import tax under
+# Dynamo or the generate decode loop (n_layer × steps).
+from kernels.attention_dispatch import bdh_attn, bdh_attn_decode, resolve_attn_impl
 from kernels.attention_bwd import _env_autograd_enabled
+from kernels.rope_dispatch import bdh_rope_rotate, resolve_rope_impl
 
 
 @dataclasses.dataclass
@@ -88,6 +90,12 @@ class Attention(torch.nn.Module):
         # Reused across layers (caller) and across batches while T is unchanged.
         self._rope_cis_key = None
         self._rope_cis = None
+        # Full-sequence table for generate: positions [0, max_seq). Decode slices
+        # (rope_start!=0) hit this instead of redoing arange+trig every step.
+        self._rope_table_key = None
+        self._rope_table = None
+        # Optional: generate hoists resolve_attn_impl() once per call.
+        self._attn_impl_override = None
 
     @staticmethod
     def phases_cos_sin(phases):
@@ -110,9 +118,6 @@ class Attention(torch.nn.Module):
             phases_cos, phases_sin = Attention.phases_cos_sin(phases)
         else:
             phases_cos, phases_sin = cos_sin
-
-        from kernels.rope_dispatch import bdh_rope_rotate
-
         return bdh_rope_rotate(v, phases_cos, phases_sin, out=out)
 
     def _rope_phases(self, T: int, rope_start: int, device):
@@ -130,14 +135,59 @@ class Attention(torch.nn.Module):
         head_dim = self.freqs.shape[-1]
         return (T, int(head_dim), device.type, device.index, self.freqs.dtype)
 
+    def ensure_rope_table(self, max_T: int, device) -> None:
+        """Precompute cos/sin for positions ``[0, max_T)`` (generate warm path).
+
+        Decode steps then ``narrow`` into this table instead of ``arange`` +
+        trig every token. No-op when an identical table is already resident.
+        Skips Python attribute writes while Dynamo is tracing/compiling.
+        """
+        if max_T < 1:
+            raise ValueError("max_T must be >= 1")
+        key = (int(max_T), device.type, device.index, self.freqs.dtype)
+        hit = self._rope_table
+        if hit is not None and self._rope_table_key == key:
+            cos, sin = hit
+            if cos.device == device and cos.shape[-2] == max_T:
+                return
+        cos, sin = self.phases_cos_sin(self._rope_phases(max_T, 0, device))
+        cos, sin = cos.detach(), sin.detach()
+        if not torch.compiler.is_compiling():
+            self._rope_table_key = key
+            self._rope_table = (cos, sin)
+            # Also warm the rope_start=0 single-T cache for max_T.
+            self._rope_cis_key = self._rope_cis_cache_key(max_T, device)
+            self._rope_cis = (cos, sin)
+
     def rope_cos_sin(self, T: int, rope_start: int, device):
         """Precompute (cos, sin); cache by (T, head_dim, device, dtype) when rope_start=0.
 
         Training / full prefill (rope_start=0) regenerates phases only when T,
         head_dim, device, or dtype change — reused across layers and batches.
-        Decode (rope_start!=0) computes fresh so absolute positions stay correct
-        without polluting the fixed-T training table.
+        When ``ensure_rope_table`` has warmed a full sequence, both prefill and
+        decode (``rope_start!=0``) ``narrow`` into that table (no fresh trig).
+        Without a covering table, decode still computes fresh so absolute
+        positions stay correct without polluting the fixed-T training table.
         """
+        # Prefer full generate table when it covers [rope_start, rope_start+T).
+        table = self._rope_table
+        tkey = self._rope_table_key
+        if table is not None and tkey is not None:
+            max_T, dev_type, dev_index, dtype = tkey
+            end = rope_start + T
+            if (
+                rope_start >= 0
+                and end <= max_T
+                and device.type == dev_type
+                and device.index == dev_index
+                and self.freqs.dtype == dtype
+            ):
+                cos, sin = table
+                if cos.device == device and cos.shape[-2] == max_T:
+                    if rope_start == 0 and T == max_T:
+                        return cos, sin
+                    return cos.narrow(-2, rope_start, T), sin.narrow(-2, rope_start, T)
+
         if rope_start != 0:
             return self.phases_cos_sin(self._rope_phases(T, rope_start, device))
 
@@ -222,7 +272,10 @@ class Attention(torch.nn.Module):
             out = V.new_zeros(B, nh, T, V.size(-1))
             return out, QR, V
 
-        impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
+        # Hoisted by generate when set; else cached env resolve.
+        impl = self._attn_impl_override
+        if impl is None:
+            impl = resolve_attn_impl()
 
         if T == 1:
             # Hot decode: attend only to past (j < i). New token does not attend
@@ -547,7 +600,7 @@ class BDH(nn.Module):
                 # reserve BEFORE get_past so page growth cannot invalidate past views.
                 inplace_ok = (
                     not grad_enabled
-                    and cache.storage_dtype == cache.compute_dtype
+                    and cache.storage_matches_compute
                     and v_tok.dtype == cache.storage_dtype
                 )
                 if inplace_ok:
@@ -606,7 +659,7 @@ class BDH(nn.Module):
 
         return logits, loss
 
-    @torch.no_grad()
+    @torch.inference_mode()
     @torch.compiler.disable
     def generate(
         self,
@@ -625,6 +678,9 @@ class BDH(nn.Module):
         and CacheManager mutation graph-break / fight CUDA graphs. Call from
         eager (or after training); ``forward`` itself may still be compiled.
 
+        ``torch.inference_mode`` (not only ``no_grad``): skips view-tracking
+        version counters on the decode loop — measurable host win on CPU.
+
         cache_dtype: optional storage dtype for the cache (e.g. torch.float16).
         Compute stays fp32 for RoPE score GEMMs when storage is narrower.
 
@@ -642,38 +698,64 @@ class BDH(nn.Module):
 
         B, prompt_len = idx.size()
         max_seq = prompt_len + max_new_tokens
+        device = idx.device
         cache = CacheManager.from_config(
             self.config,
             batch_size=B,
             max_seq=max_seq,
-            device=idx.device,
+            device=device,
             compute_dtype=torch.float32,
             storage_dtype=cache_dtype,
             page_size=cache_page_size,
         )
-        # Preallocate full output — eliminates generate's remaining aten::cat.
-        out = torch.empty(
-            B, max_seq, dtype=idx.dtype, device=idx.device
-        )
-        out[:, :prompt_len].copy_(idx)
-        device = idx.device
-        with _autocast_context(device, amp_dtype):
-            logits, _ = self(idx, cache=cache)
+        # One RoPE trig pass for the whole generate span; per-step narrow slices.
+        self.attn.ensure_rope_table(max_seq, device)
+        # Resolve attn/rope backends once for the whole decode loop.
+        attn_impl = resolve_attn_impl()
+        resolve_rope_impl()  # warm env cache for rope path
+        self.attn._attn_impl_override = attn_impl
 
-            for t in range(max_new_tokens):
-                # Sampling in fp32 for numerical stability under AMP
-                step_logits = logits[:, -1, :].float() / temperature
-                if top_k is not None:
-                    values, _ = torch.topk(
-                        step_logits, min(top_k, step_logits.size(-1))
-                    )
-                    step_logits = step_logits.clone()
-                    step_logits[step_logits < values[:, [-1]]] = float("-inf")
-                probs = F.softmax(step_logits, dim=-1)
-                idx_next = torch.multinomial(probs, num_samples=1)
-                pos = prompt_len + t
-                out[:, pos : pos + 1] = idx_next
-                logits, _ = self(idx_next, cache=cache)
+        # Preallocate full output — eliminates generate's remaining aten::cat.
+        out = torch.empty(B, max_seq, dtype=idx.dtype, device=device)
+        out[:, :prompt_len].copy_(idx)
+
+        # Hoist sampling constants / callables out of the decode loop.
+        temp = float(temperature)
+        scale = None if temp == 1.0 else (1.0 / temp)
+        do_topk = top_k is not None
+        top_k_n = int(top_k) if do_topk else 0
+        softmax = F.softmax
+        multinomial = torch.multinomial
+
+        try:
+            with _autocast_context(device, amp_dtype):
+                logits, _ = self(idx, cache=cache)
+
+                for t in range(max_new_tokens):
+                    # Decode steps return (B, 1, V); [-1] keeps the prefill case too.
+                    step_logits = logits[:, -1, :]
+                    if step_logits.dtype != torch.float32:
+                        step_logits = step_logits.float()
+                    if scale is not None:
+                        step_logits = step_logits * scale
+                    if do_topk:
+                        k = (
+                            top_k_n
+                            if top_k_n <= step_logits.size(-1)
+                            else step_logits.size(-1)
+                        )
+                        values, _ = torch.topk(step_logits, k)
+                        # Clone: step_logits may view into logits storage.
+                        step_logits = step_logits.clone()
+                        step_logits.masked_fill_(
+                            step_logits < values[:, -1:], float("-inf")
+                        )
+                    probs = softmax(step_logits, dim=-1)
+                    idx_next = multinomial(probs, num_samples=1)
+                    out[:, prompt_len + t] = idx_next[:, 0]
+                    logits, _ = self(idx_next, cache=cache)
+        finally:
+            self.attn._attn_impl_override = None
 
         if was_training:
             self.train()

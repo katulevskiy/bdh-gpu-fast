@@ -29,15 +29,32 @@ ImplName = Literal["eager", "fused"]
 _VALID = ("eager", "fused")
 
 
+# Env resolve cache: rope runs every layer/step in generate.
+_ROPE_IMPL_ENV: object | None = object()
+_ROPE_IMPL_RESOLVED: ImplName = "eager"
+
+
 def resolve_rope_impl(requested: str | None = None) -> ImplName:
     """Resolve BDH_ROPE_IMPL (or explicit override) to a concrete backend name."""
-    raw = requested if requested is not None else os.environ.get("BDH_ROPE_IMPL", "eager")
-    raw = (raw or "eager").strip().lower()
+    global _ROPE_IMPL_ENV, _ROPE_IMPL_RESOLVED
+    if requested is not None:
+        raw = (requested or "eager").strip().lower()
+        if raw not in _VALID:
+            raise ValueError(
+                f"BDH_ROPE_IMPL must be {'|'.join(_VALID)}, got {raw!r}"
+            )
+        return raw  # type: ignore[return-value]
+    env = os.environ.get("BDH_ROPE_IMPL", "eager")
+    if env is _ROPE_IMPL_ENV or env == _ROPE_IMPL_ENV:
+        return _ROPE_IMPL_RESOLVED
+    raw = (env or "eager").strip().lower()
     if raw not in _VALID:
         raise ValueError(
             f"BDH_ROPE_IMPL must be {'|'.join(_VALID)}, got {raw!r}"
         )
-    return raw  # type: ignore[return-value]
+    _ROPE_IMPL_ENV = env
+    _ROPE_IMPL_RESOLVED = raw  # type: ignore[assignment]
+    return _ROPE_IMPL_RESOLVED
 
 
 def bdh_rope_rotate(
