@@ -585,3 +585,71 @@ def test_dispatch_preserves_feature_strided_self_qk_analytic_autograd_storage_co
         got_q_storage_grad, ref_q_storage_grad, rtol=1e-9, atol=1e-9
     )
     assert torch.allclose(got_v_grad, ref_v_grad, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_batch_head_strided_distinct_qk_analytic_autograd_storage_contract(
+    impl, v_heads
+):
+    """Analytic score×V preserves gradients through batch/head-strided storage."""
+    B, H, T, N, D = 2, 3, 23, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1933)
+    Q_storage = torch.randn(
+        2 * B, 2 * H, T, N, generator=generator, dtype=torch.float64
+    )
+    K_storage = torch.randn(
+        2 * B, 2 * H, T, N, generator=generator, dtype=torch.float64
+    )
+    V_storage = torch.randn(
+        2 * B, 2 * v_heads, T, D, generator=generator, dtype=torch.float64
+    )
+    Q = Q_storage[::2, ::2]
+    K = K_storage[::2, ::2]
+    V = V_storage[::2, ::2]
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    assert not Q.is_contiguous()
+    assert not K.is_contiguous()
+    assert not V.is_contiguous()
+    assert Q.stride(0) == 2 * Q_storage.stride(0)
+    assert Q.stride(1) == 2 * Q_storage.stride(1)
+    assert K.stride(0) == 2 * K_storage.stride(0)
+    assert K.stride(1) == 2 * K_storage.stride(1)
+    assert V.stride(0) == 2 * V_storage.stride(0)
+    assert V.stride(1) == 2 * V_storage.stride(1)
+
+    def run(name, use_autograd_fn):
+        q_storage = Q_storage.detach().clone().requires_grad_(True)
+        k_storage = K_storage.detach().clone().requires_grad_(True)
+        v_storage = V_storage.detach().clone().requires_grad_(True)
+        q = q_storage[::2, ::2]
+        k = k_storage[::2, ::2]
+        v = v_storage[::2, ::2]
+        out = bdh_attn(
+            q, k, v, impl=name, use_autograd_fn=use_autograd_fn
+        )
+        out.backward(dO)
+        return (
+            out.detach(),
+            q_storage.grad.detach(),
+            k_storage.grad.detach(),
+            v_storage.grad.detach(),
+        )
+
+    ref, ref_q_grad, ref_k_grad, ref_v_grad = run(
+        "eager", use_autograd_fn=False
+    )
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_q_grad, got_k_grad, got_v_grad = run(
+        impl, use_autograd_fn=True
+    )
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in (
+        (got_q_grad, ref_q_grad),
+        (got_k_grad, ref_k_grad),
+        (got_v_grad, ref_v_grad),
+    ):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
