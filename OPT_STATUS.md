@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#125)
+# OPT status — landed work (#1–#128)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `f16115c` (`#125` docs-matrix-v29 / `#124` rope-gpu-scaffold / `#123` opt/sparse-v2 / `#121` profile-v12). The landed matrix below is aligned through #125; #125 is a docs-only refresh through #123 on top of the #124 code tip, and this v30 refresh records both. `OPT_NOTES.md` § `opt/rope-gpu-scaffold` records the paired T=1 Triton scaffold: `BDH_ROPE_IMPL=fused` now reaches a zero-stride cis-row launch without expanding the broadcast row, while eager remains the default. Profile-v11 source is `4963b0f` (`#110`), profile-v12 source is `f34adc0` (`#120`), and the current code/docs tip is `f16115c`. Default eager remains unchanged; #116 keeps the opt-in blocked/online shared-V T=1 inference epilogue cat-free, #117 keeps compile backward probing opt-in, #118–#123 are docs/AMP/AUTO/profile/sparse follow-ups, and #124 keeps the RoPE GPU path opt-in with CPU parity only. No GPU speedup or correctness evidence was added, so GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `45b4afe` (`#128` packed Triton decode KR/V strides, after `#127` profile-ci and `#126` docs update). The historical matrix below is aligned through #125; `OPT_NOTES.md` § `opt/profile-v13` records the CPU re-profile on this tip. CPU evidence remains operator-level only: no GPU timing, kernel win, correctness, or speedup claim was added; GPU validation remains the P0 blocker. Default eager attention and the strict raw-score × `tril(-1)` semantics remain unchanged.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
