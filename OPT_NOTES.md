@@ -7452,10 +7452,10 @@ Validation is CPU-only; the focused tests cover CPU, false availability, and
 availability-probe exceptions. No CUDA H2D correctness, overlap, timing, or
 speedup claim is made.
 
-## opt/profile-v20 — CPU re-profile after #247–#248 (2026-09-19)
+## opt/profile-v20 — CPU re-profile after #247–#249 (2026-09-19)
 
 **Branch:** `opt/profile-v20` on the private `katulevskiy/bdh-gpu-opt` repository
-only. **Base tip:** `0c7c2f1` (#248, including #247). This is CPU-only evidence;
+only. **Base tip:** `567c1bf` (#249, including #247–#248). This is CPU-only evidence;
 it makes no GPU performance claim.
 
 ### Method
@@ -7488,7 +7488,7 @@ Relative to profile-v19, every requested count is unchanged: attention
 
 ### Verdict / non-goals
 
-- The post-#247/#248 tip does not change these matched CPU operator counts or
+- The post-#247/#249 tip does not change these matched CPU operator counts or
 the default model behavior.
 - Attention remains raw scores × strict `tril(diagonal=-1)`.
 - No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
