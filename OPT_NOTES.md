@@ -5606,3 +5606,63 @@ available for this work, so no GPU compile, CUDA-graph, or speedup claim is made
 - No default attention/RoPE/autograd implementation change.
 - No attention math change: raw scores × strict `tril(diagonal=-1)` remains.
 - No GPU claims and no PRs to `pathwaycom/*` / no public PR.
+
+
+## opt/amp-train-v2 — harden AMP train configuration and benchmark matrix (2026-09-19)
+
+**Branch:** `opt/amp-train-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `c6c8dfd` (`#118` docs-v27, after `#117`).
+
+### Audit and deepen
+
+The opt-in `BDH_AMP_DTYPE` path now validates CPU autocast with a real matmul
+smoke even when a version capability probe exists. Unsupported CPU bf16/fp16
+requests raise an actionable error; the benchmark catches that error and records
+a visible `soft-skip` instead of aborting the matrix. AMP configuration is
+transactional, so a failed opt-in leaves the prior fp32 context intact.
+
+The train benchmark now measures the same matrix for each supported dtype:
+`full` autocast (the existing behavior) and `forward_only` (logits autocast,
+fp32 CE). It reports scaler state and vs-fp32 ratios, while retaining the CPU
+warning that these timings are not GPU throughput evidence.
+
+GradScaler activation is gated by all three conditions: resolved dtype
+`float16`, `device.type == "cuda"`, and a live `torch.cuda.is_available()`.
+Non-CUDA configurations construct a disabled CPU scaler for a stable inspection
+surface; `train_step` additionally requires `scaler.is_enabled()` before using
+the scaling path. bf16 and CPU remain unscaled.
+
+### Correctness and CPU-safe validation
+
+```text
+pytest -q tests/test_bf16_train.py
+# 18 passed
+
+OMP_NUM_THREADS=2 BDH_BENCH_COMPILE=0 BDH_BENCH_COMPILE_BLOCKED=0 \
+BDH_BENCH_COMPILE_MODE=0 BDH_BENCH_COMPILE_DROPOUT=0 \
+BDH_BENCH_COMPILE_FULLGRAPH=0 BDH_BENCH_AMP=1 \
+python benchmarks/bench_train_step.py
+```
+
+Observed on this CPU box (device-local medians; **not** GPU claims):
+
+```text
+                         median_ms  vs_fp32
+float32/full                 13.32     1.00x
+bfloat16/full                 9.07     0.68x
+bfloat16/forward_only         9.41     0.71x
+float16/full                11.04     0.83x
+float16/forward_only        10.87     0.82x
+amp_claim=none; scaler=False for all CPU rows
+```
+
+The numbers are local CPU noise/cast behavior only. There is no GPU in this
+runner, so no AMP speedup or Tensor Core claim is made. Defaults remain AMP off
+(`BDH_AMP_DTYPE=float32`), compile off, eager, and `tril(diagonal=-1)`.
+
+### Non-goals
+
+- No default AMP enablement or dtype change.
+- No attention math, compile, or optimizer-default changes.
+- No GPU claims from CPU medians; CUDA validation remains open.
+- No PRs to `pathwaycom/*`; private repo only.
