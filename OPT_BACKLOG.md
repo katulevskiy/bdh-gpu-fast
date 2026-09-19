@@ -22,6 +22,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 ## Already landed (main)
 
+- Train logging sync deepen: `TrainLossLogger` + CUDA deferred D2H (`opt/log-sync` #66); defaults LOG_FREQ=100 / ASYNC=1
+
 - Analytic attn train path (`BDH_ATTN_AUTOGRAD` / `StrictTrilAttnFn`) — **landed** `opt/attn-bwd-train` (#39): cold+multi-token wiring, `bench_attn_bwd.py`, grad parity @ dropout=0
 - Blocked/online + **tiled** analytic bwd train (`opt/blocked-autograd` #41): no full T×T in fwd or bwd; `online` alias; GPU train A/B still open
 

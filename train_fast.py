@@ -11,7 +11,8 @@
 #   1. Static input shapes (fixed B, T) — our train loop already uses fixed
 #      BATCH_SIZE × BLOCK_SIZE.
 #   2. No CPU↔GPU sync inside the step (no `.item()`, `.cpu()`, print on CUDA
-#      tensors) — logging uses `float(loss.detach())` only every LOG_FREQ.
+#      tensors) — logging via TrainLossLogger (on-device accumulate; `.item()` at LOG_FREQ,
+#      CUDA D2H deferred one window when BDH_LOG_ASYNC=1).
 #   3. `zero_grad(set_to_none=True)` plays nicer with graph capture than
 #      filling grads with zeros in-place.
 #   4. Fused AdamW (`fused=True`) keeps the optimizer on-device.
@@ -52,18 +53,7 @@ def main():
     x, y = loader.next()
     model = tr.maybe_compile(model, example_x=x, example_y=y)
     optimizer = tr.make_optimizer(model)
-    loss_acc = None
-    loss_steps = 0
-    for step in range(tr.MAX_ITERS):
-        loss = tr.train_step(model, optimizer, x, y)
-        x, y = loader.next()
-        det = loss.detach()
-        loss_acc = det if loss_acc is None else (loss_acc + det)
-        loss_steps += 1
-        if step % tr.LOG_FREQ == 0:
-            print(f"Step: {step}/{tr.MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
-            loss_acc = None
-            loss_steps = 0
+    tr.run_train_loop(model, optimizer, loader, x, y, max_iters=tr.MAX_ITERS)
     print("Training done, now generating a sample ")
     model.eval()
     prompt = torch.tensor(
