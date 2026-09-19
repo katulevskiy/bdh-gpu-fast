@@ -699,6 +699,21 @@ def test_dataloader_close_shuts_down_cpu_workers_idempotently(tr, monkeypatch):
     src.close()
 
 
+def test_dataloader_close_after_batch_shuts_down_cpu_workers(tr, monkeypatch):
+    """Shutdown stops persistent workers after they have prefetched batches."""
+    monkeypatch.setattr(tr, "NUM_WORKERS", 2)
+    src = tr.DataLoaderBatchSource("train")
+    iterator = src._it
+    workers = tuple(iterator._workers)
+    x, y = src.next()
+    assert x.device.type == "cpu" and y.device.type == "cpu"
+
+    src.close()
+
+    assert src._it is None
+    assert all(not worker.is_alive() for worker in workers)
+
+
 def test_dataloader_close_zero_workers_is_idempotent(tr, monkeypatch):
     """Explicit CPU shutdown also clears a synchronous iterator without workers."""
     monkeypatch.setattr(tr, "NUM_WORKERS", 0)
