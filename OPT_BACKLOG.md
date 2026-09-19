@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile-v9 source tip `8e7a4d2` / current documented code tip `1363794` (post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #96 attn-bwd scaffold; #97 docs-v18; #98 profile-v9; #99 docs-v19; #100 scorev-fuse-v2; #101 docs-v20; #102 gen-copy-tax-v1; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile-v10 source tip `1363794` / rebased documented code tip `234de2a` (profile-v9 source tip `8e7a4d2`; post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #96 attn-bwd scaffold; #97 docs-v18; #98 profile-v9; #99 docs-v19; #100 scorev-fuse-v2; #101 docs-v20; #102 gen-copy-tax-v1; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -16,6 +16,8 @@ Post-#95 re-profile (`opt/profile-v9`, source `8e7a4d2`; current docs tip `13637
 Post-#100 score×V deepen (`opt/scorev-fuse-v2`, source `90b609f`): CPU inference/no-grad blocked/online tiles use direct `baddbmm(..., out=target)` score×V epilogues, T=1 decode reuses the flattened output view, and the broadcast-V oneshot budget is 1024 score elements. Cold/decode CPU behavior remains shape-dependent; this is lower-peak/epilogue evidence, not GPU timing. Default eager remains unchanged; **GPU still the blocker.** See `OPT_NOTES.md` § opt/scorev-fuse-v2.
 
 Post-#102 generate copy-tax cut (`opt/gen-copy-tax-v1`, source `1363794`): fp32 RoPE pair stores use a complex-view copy, and generate samples into the preallocated output via `idx_out`/`out.narrow`. CPU generate `aten::copy_` falls ~558→~398 while `aten::cat` stays 0; defaults remain unchanged. This is CPU call-count evidence only, not GPU timing; **GPU still the blocker.**
+
+Post-#102 re-profile (`opt/profile-v10`, source `1363794`, rebased onto `234de2a`): attention `bmm` 30.87% / `mul` 30.19% / `copy_` 19.04%; forward `bmm` 36.00% / `mul` 21.86% / `mm` 19.15% / `copy_` 11.27% with isolated forward `copy_`=18; generate `mm` 14.76% / `bmm` 12.80% / `matmul` 7.33%, with `copy_` 1,194 over three active calls (398/call). Forward and generate remain `aten::cat=0` and `aten::contiguous=0`; CPU-only evidence, **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v10.
 
 Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU, #93 is an opt-in cold path at T≥256, and #95 adds only CPU copy-call evidence (forward `copy_` 24→18; QR contig copies 8→0). No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
 
