@@ -822,3 +822,31 @@ def test_sequence_strided_self_attn_alias_preserves_backward_contract(impl):
         Q_base.grad[:, :, 1::2, :], torch.zeros_like(Q_base.grad[:, :, 1::2, :])
     )
     assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_self_attn_alias_with_broadcast_upstream_preserves_backward_contract(impl):
+    """Aliased Q/K must reduce duplicate paths with broadcast upstream gradients."""
+    generator = torch.Generator().manual_seed(2048)
+    Q = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        2, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO_base = torch.randn(1, 1, 5, 6, generator=generator, dtype=torch.float64)
+    dO = dO_base.expand(2, 3, 5, 6)
+
+    out = strict_tril_attn(Q, Q, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, Q_ref, V_ref)
+
+    assert dO.stride(0) == 0 and dO.stride(1) == 0
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO.contiguous())
+
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.equal(V.grad[:, :, -1, :], torch.zeros_like(V.grad[:, :, -1, :]))
