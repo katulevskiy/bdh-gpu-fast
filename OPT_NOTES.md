@@ -1098,5 +1098,66 @@ No GPU on this box. Do not claim end-to-end train speedup from table cache alone
 - No softmax / diagonal / SDPA
 - No change to weight-layout or `BDH_ATTN_IMPL` defaults
 
-- No default weight tying (would change published param semantics)
-- No attention / cache / compile changes in this branch
+## opt/dropout-fuse — compile-friendly dropout + residual path (2026-09-19)
+
+**Branch:** `opt/dropout-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `28b5c45` (main after embed-tie #16 + rope-cache #18).
+
+### Goal
+
+Make the sparse-product dropout → decoder → residual-LN path friendlier to
+`torch.compile` / `BDH_COMPILE`, without changing attention math or layouts.
+
+### What changed (`bdh.py`)
+
+1. **`nn.Dropout` → float `dropout_p` + `_dropout()`** — uses `F.dropout`
+   (ATen / **torch RNG only**). No Python `random` / NumPy RNG side paths that
+   graph-break Dynamo.
+2. **`dropout_p == 0` is a true identity** — early return, **no** dropout RNG
+   op in the compiled graph. Bit-identical to baseline `nn.Dropout(0)` (train
+   and eval), matching `tests/test_vs_baseline.py`.
+3. **Decoder merge uses `.view`** — after identity dropout the activation stays
+   contiguous `(B,T,nh,N)`; active `F.dropout` also returns contiguous. Avoids
+   defensive `.reshape` that could hide a layout copy.
+4. **Residual path unchanged** — still `_residual_ln` (inner LN buffer reuse
+   from `opt/ln-fuse`).
+
+Preserved: `tril(diagonal=-1)`, `CacheManager`, `BDH_ATTN_IMPL`, weight-layout
+encoder `(B,T,nh,N)` / decoder view + `F.linear`, embed-tie vocab path, rope-cache.
+
+### `BDH_COMPILE` interactions
+
+| Setting | Dropout behavior under compile |
+|---------|--------------------------------|
+| `BDH_COMPILE=1`, `dropout=0` (benches / parity tests) | Identity; **no** `aten::dropout` / RNG in graph. Preferred for bit-exact compare. |
+| `BDH_COMPILE=1`, `dropout>0`, `model.train()` | `F.dropout` → torch generator RNG (not Python). Dynamo-friendly single op. |
+| `BDH_COMPILE=1`, `model.eval()` | Dropout identity regardless of `p` (`training=False`). |
+| `BDH_COMPILE=0` | Same eager semantics; default train entrypoint. |
+
+`train.py` still compiles only the module (`maybe_compile`); batch fetch /
+logging / `.item()` stay outside. `train_fast.py` defaults `BDH_COMPILE=1`.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# (see CI / local run after rebase onto embed-tie + rope-cache)
+# dropout=0: train/eval logits + grads match bdh_baseline (bit-identical / atol 1e-5)
+```
+
+### Honest limits
+
+- No GPU here — compile graph cleanliness matters more on CUDA inductor than in
+  CPU wall time; dropout=0 path is mainly for parity + smaller FX graph.
+- Does not fuse dropout into a custom CUDA kernel; still ATen `native_dropout`
+  when `p>0`.
+- `torch.is_grad_enabled()` train/infer product branching unchanged (autograd
+  vs inplace ReLU-buffer reuse).
+- Still no softmax / no scale / no SDPA.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- No change to CE loss / tril(-1) / train=first 90% val=last 10%
+- No change to `BDH_ATTN_IMPL` / `CacheManager` / Parameter layout migration
+- No default weight tying (embed-tie remains opt-in)
