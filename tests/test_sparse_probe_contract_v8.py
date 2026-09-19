@@ -56,6 +56,26 @@ def test_enforced_guardrail_without_samples_returns_distinct_exit(monkeypatch, c
     assert "exit_code=3 reason=guardrail_no_samples" in captured.err
 
 
+def test_enforced_guardrail_empty_history_returns_distinct_exit(monkeypatch, capsys):
+    """An empty training result must be treated as missing samples."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(probe, "short_train_density", lambda **_: [])
+
+    def unexpected_crossover(**_):
+        raise AssertionError("empty history must not run crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(["--enforce-density-guardrail"])
+        == probe.EXIT_GUARDRAIL_NO_SAMPLES
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=unavailable" in captured.err
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=3 reason=guardrail_no_samples" in captured.err
+
+
 def test_enforced_guardrail_failure_returns_distinct_exit(monkeypatch, capsys):
     """A failing sample must stop before CPU crossover work."""
     monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")

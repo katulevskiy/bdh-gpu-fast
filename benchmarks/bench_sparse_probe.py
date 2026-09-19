@@ -336,18 +336,19 @@ def main(argv: list[str] | None = None) -> int:
             T=args.block,
             seed=args.seed,
         )
-        init = history[0]
-        final = history[-1]
-        print(
-            f"  Δ density init→final: "
-            f"x {init['x']:.4f}→{final['x']:.4f}  "
-            f"y {init['y']:.4f}→{final['y']:.4f}  "
-            f"xy {init['xy']:.4f}→{final['xy']:.4f}"
-        )
-        print(
-            "  note: paper cites ~5% after full training; short CPU probes "
-            "show x/xy density falling but still >>5% at this scale."
-        )
+        if history:
+            init = history[0]
+            final = history[-1]
+            print(
+                f"  Δ density init→final: "
+                f"x {init['x']:.4f}→{final['x']:.4f}  "
+                f"y {init['y']:.4f}→{final['y']:.4f}  "
+                f"xy {init['xy']:.4f}→{final['xy']:.4f}"
+            )
+            print(
+                "  note: paper cites ~5% after full training; short CPU probes "
+                "show x/xy density falling but still >>5% at this scale."
+            )
 
     if history:
         ok, detail = density_guardrail(
