@@ -6364,3 +6364,33 @@ speedup claim is made. Defaults and attention semantics remain unchanged.
 - No PRs to `pathwaycom/*`; private repo only; no public PR.
 - No softmax, scale, diagonal inclusion, or SDPA substitution.
 - No GPU claims from CPU profiler percentages or copy counts.
+
+## opt/sparse-v3 — make sparse probe outcomes scriptable (2026-09-19)
+
+**Branch:** `opt/sparse-v3` (private `katulevskiy/bdh-gpu-opt` only; no public
+PR and no PRs to `pathwaycom/*`).
+**Base tip:** `ca353f2` (`main`, after #144 profile-v14 / merged #123 follow-on).
+
+### Audit / deepen
+
+The sparse harness remains explicitly gated by `BDH_SPARSE_PROBE=1`, and the
+production `bdh.py` path remains dense. This follow-on gives the probe a stable
+script contract: the default-off no-op returns exit `0`, a successful optional
+run returns exit `0`, and an enforced density guardrail failure returns exit
+`2` with a concise stderr diagnostic. This makes CI or shell callers able to
+distinguish “not requested” from a failed guardrail without changing defaults.
+
+Attention remains raw scores × strict `tril(diagonal=-1)`; no softmax, scale,
+diagonal inclusion, GPU timing, or GPU correctness claim is added.
+
+### CPU-safe validation
+
+```text
+python -m pytest tests/test_sparse.py -q
+# 14 passed
+
+BDH_SPARSE_PROBE=0 python benchmarks/bench_sparse_probe.py --skip-train --skip-crossover
+# exit 0; SPARSE PROBE DISABLED (default)
+```
+
+Density stays OFF by default; no GPU claim is made from this CPU-only change.

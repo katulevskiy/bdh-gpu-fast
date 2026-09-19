@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 import bdh
 import bdh_sparse as sp
+from benchmarks import bench_sparse_probe as probe
 
 
 def _rand_latent(*shape, seed: int = 0):
@@ -38,6 +39,32 @@ def test_sparse_probe_gate_defaults_off(monkeypatch):
     assert sp.sparse_probe_enabled()
     probed = sp.encoder_relu_matmul(x, weight, use_sparse=True)
     assert torch.equal(probed, dense)
+
+
+def test_sparse_probe_exit_codes(monkeypatch, capsys):
+    """The default-off no-op and enforced guardrail are scriptable outcomes."""
+    monkeypatch.delenv(sp.SPARSE_PROBE_ENV, raising=False)
+    assert probe.main(["--skip-train", "--skip-crossover"]) == probe.EXIT_OK
+    assert "DISABLED" in capsys.readouterr().out
+
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.01, "y": 0.01, "xy": 0.01}],
+    )
+    assert (
+        probe.main(
+            [
+                "--enforce-density-guardrail",
+                "--skip-crossover",
+            ]
+        )
+        == probe.EXIT_DENSITY_GUARDRAIL
+    )
+    captured = capsys.readouterr()
+    assert "density_guardrail=fail" in captured.out
+    assert "density re-smoke guardrail failed" in captured.err
 
 
 def test_relu_density_random_approx_half():
