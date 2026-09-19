@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import bdh
+import kernels.attention as attention_impl
 from bdh_cache import CacheManager
 from kernels.attention import (
     DEFAULT_BLOCK_DECODE,
@@ -112,9 +113,9 @@ def test_decode_s0_returns_zeros():
     assert torch.all(out == 0)
 
 
-@pytest.mark.parametrize("impl", ["blocked", "online"])
-def test_optin_decode_pos0_is_zero(impl):
-    """Opt-in blocked/online decode keeps position zero at exact zero."""
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_decode_dispatch_pos0_is_zero(impl):
+    """Every decode backend keeps position zero at exact zero."""
     Q = torch.randn(2, 4, 1, 8)
     K = torch.empty(2, 4, 0, 8)
     V = torch.empty(2, 1, 0, 16)
@@ -168,6 +169,35 @@ def test_cachemanager_tokenwise_matches_full(impl, monkeypatch):
     assert torch.allclose(full, got, rtol=1e-5, atol=1e-5), (
         f"impl={impl} max abs={ (full - got).abs().max().item() }"
     )
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "triton", "cuda"])
+def test_padded_cache_t1_decode_views_match_eager(impl, monkeypatch):
+    """T=1 decode stays parity-safe with capacity-padded packed KR/V views."""
+    cfg = _small_cfg()
+    model = _model(cfg, seed=420)
+    x = torch.randint(0, cfg.vocab_size, (2, 12))
+    split = 7
+
+    # Establish the reference and cache prefix with default eager semantics.
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    with torch.inference_mode():
+        full, _ = model(x)
+        cm = CacheManager.from_config(cfg, x.size(0), max_seq=32, device=x.device)
+        model(x[:, :split], cache=cm)
+
+        for level in range(cfg.n_layer):
+            past_kr, past_v = cm.get_past(level)
+            assert past_kr is not None and past_v is not None
+            assert not past_kr.is_contiguous()
+            assert not past_v.is_contiguous()
+
+        monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+        got, _ = model(x[:, split : split + 1], cache=cm)
+
+    assert torch.allclose(
+        full[:, split : split + 1], got, rtol=1e-5, atol=1e-5
+    ), f"impl={impl} max abs={(full[:, split : split + 1] - got).abs().max().item()}"
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "triton"])
@@ -614,3 +644,44 @@ def test_cuda_tiled_ref_blocked_parity_inc():
         atol=1e-4,
     )
 
+@pytest.mark.skipif(not _HAS_TRITON, reason="Triton launcher unavailable")
+def test_triton_decode_launcher_preserves_packed_strides(monkeypatch):
+    """Host launcher passes capacity-padded packed views without staging copies."""
+    B, H, S, N, D = 2, 4, 7, 8, 16
+    cm = CacheManager(
+        n_layer=1,
+        max_seq=32,
+        batch_size=B,
+        n_head=H,
+        n_latent=N,
+        n_embd=D,
+        device="cpu",
+    )
+    cm._kr_buf[0].normal_()
+    cm._v_buf[0].normal_()
+    cm.seq_len = S
+    K, V = cm.get_past(0)
+    assert K is not None and V is not None
+    Q = cm._kr_buf[0].narrow(2, S, 1)
+    captured = {}
+
+    class _FakeKernel:
+        def __getitem__(self, grid):
+            def launch(qf, kf, vptr, out, *args, **kwargs):
+                captured.update(
+                    qf=qf, kf=kf, vptr=vptr, out=out, args=args, kwargs=kwargs
+                )
+                out.copy_(eager_decode_attn(Q, K, V).reshape_as(out))
+
+            return launch
+
+    monkeypatch.setattr(attention_impl, "_can_use_triton", lambda _: True)
+    monkeypatch.setattr(attention_impl, "_bdh_decode_fwd_kernel", _FakeKernel())
+    got = attention_impl.triton_decode_attn(Q, K, V)
+    ref = eager_decode_attn(Q, K, V)
+
+    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+    assert captured["kf"].data_ptr() == K.data_ptr()
+    assert captured["vptr"].data_ptr() == V.squeeze(1).data_ptr()
+    assert captured["kf"].stride() == K.reshape(B * H, S, N).stride()
+    assert captured["vptr"].stride() == V.squeeze(1).stride()
