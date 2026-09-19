@@ -414,6 +414,39 @@ def test_fused_paired_t1_mixed_dtype_out_preserves_parity():
     assert torch.equal(got, ref)
 
 
+def test_fused_paired_t1_mixed_dtype_strided_out_preserves_parity():
+    """Paired decode preserves mixed-dtype parity in a strided cache slot."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 6
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(284)
+    v = torch.randn(2, cfg.n_head, 1, N, dtype=torch.float16)
+
+    sentinel = torch.tensor(-123.0, dtype=torch.float32)
+
+    def make_out():
+        backing = torch.full((*v.shape[:-1], N * 2), sentinel.item())
+        return backing, backing[..., ::2]
+
+    ref_backing, ref_out = make_out()
+    ref = eager_rope_rotate(v, cos, sin, out=ref_out)
+    fused_backing, fused_out = make_out()
+    got = fused_rope_rotate_paired(
+        v, paired[0], paired[1], out=fused_out
+    )
+
+    assert ref is ref_out and got is fused_out
+    assert got.dtype == torch.float32 and not got.is_contiguous()
+    assert torch.equal(got, ref)
+    assert torch.equal(fused_backing[..., 1::2], ref_backing[..., 1::2])
+
+
 def test_fused_paired_t1_strided_out_preserves_parity():
     """Paired decode writes only the requested non-contiguous cache slot."""
     cfg = _small_cfg()
