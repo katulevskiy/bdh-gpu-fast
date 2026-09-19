@@ -124,6 +124,27 @@ def test_multi_query_decode_keeps_signed_raw_scores_per_head():
         )
 
 
+def test_decode_dispatch_multi_query_keeps_signed_raw_scores_with_shared_v():
+    """Tiled multi-query dispatch keeps raw scores with broadcast V heads."""
+    Q = torch.tensor(
+        [[[[2.0, -1.0], [-1.0, 2.0]], [[1.0, 2.0], [2.0, -1.0]]]]
+    )
+    K_past = torch.tensor(
+        [[[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+          [[1.0, 0.0], [0.0, 1.0], [-1.0, 1.0]]]]
+    )
+    V_past = torch.tensor([[[[2.0], [3.0], [5.0]]]])
+    expected = torch.tensor(
+        [[[[6.0], [9.0]], [[13.0], [-14.0]]]]
+    )
+
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K_past, V_past, impl=impl, block_size=1)
+        assert torch.equal(got, expected), (
+            f"impl={impl} maxdiff={(got - expected).abs().max().item()}"
+        )
+
+
 def test_online_decode_tiled_multi_query_keeps_raw_signed_scores():
     """Direct online decode keeps signed score×V semantics after tiling."""
     S = 513
