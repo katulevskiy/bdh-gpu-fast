@@ -363,6 +363,8 @@ def run_auto_ab_sweep(args, device: torch.device) -> int:
             if args.auto_cold_threshold is None
             else args.auto_cold_threshold
         )
+        # Materialize the per-child fallback so each run carries both gates.
+        sweep_args.auto_cold_threshold = cold
         print(
             f"=== sweep {index}/{len(thresholds)}: "
             f"decode_thr={threshold} cold_thr={cold} ==="
