@@ -29,11 +29,19 @@ export BDH_ATTN_IMPL=cuda
 # train with fused/blocked forward + analytic bwd (tiled for non-eager)
 export BDH_ATTN_AUTOGRAD=1
 export BDH_ATTN_IMPL=blocked
+
+# opt-in: long-S T=1 decode → blocked (cold/prefill still BDH_ATTN_IMPL)
+# threshold from #55 CPU benches (mid-S stay eager; S≫512 prefer blocked)
+export BDH_ATTN_AUTO=1
+export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when past_len > thr
 ```
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` for **all**
-impls including eager (`_two_gemm_decode`). Blocked/online/triton share
+impls including eager (`_two_gemm_decode`). With `BDH_ATTN_AUTO=1` and
+default eager, decode switches to blocked when `past_len` exceeds
+`BDH_ATTN_AUTO_THRESHOLD` (default 512; #55 long-S). Cold/prefill is
+unchanged. Blocked/online/triton share
 `_tiled_score_v` (broadcast-V tight `_DECODE_ONESHOT_ELEMS`, `out.add_`
 tiles, peak ~Tq×tile on long S); Triton decode uses `V_BROADCAST` on CUDA
 (blocked fallback on CPU); CUDA decode uses `DECODE_TILE_N` + a dedicated
@@ -44,7 +52,7 @@ tiles, peak ~Tq×tile on long S); Triton decode uses `V_BROADCAST` on CUDA
 | Path | Role |
 |------|------|
 | `attention.py` | cold tril + decode: `_two_gemm_decode`, `blocked_*` / `online_*`, `triton_*`, `_tiled_score_v` |
-| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
+| `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()`; opt-in `BDH_ATTN_AUTO` long-S decode |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`); dense M-recompute for eager, **tiled** analytic for blocked/online/triton/cuda (no full T×T) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |
 | `rope.py` | RoPE rotate: eager / fused PyTorch / optional Triton |

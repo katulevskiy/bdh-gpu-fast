@@ -11,6 +11,17 @@ Backends (``BDH_ATTN_IMPL``)::
                                    # blocked|online|triton|cuda → tiled analytic bwd
                                    # (no full T×T); eager → dense M recompute
 
+Opt-in long-S decode auto-select (does **not** change default)::
+
+    export BDH_ATTN_AUTO=1                 # off unless set
+    export BDH_ATTN_AUTO_THRESHOLD=512     # default 512; past_len > thr → blocked
+
+When ``BDH_ATTN_AUTO`` is truthy and ``BDH_ATTN_IMPL`` resolves to ``eager``,
+T=1 decode switches to ``blocked`` once ``past_len`` exceeds the threshold
+(CPU-honest crossover from #55 decode-online-v2 benches). Cold / prefill
+always follows ``BDH_ATTN_IMPL`` only. Explicit non-eager ``IMPL`` is never
+overridden. Default (AUTO unset) remains eager for all paths.
+
 Backends: eager, blocked (=online), triton, or cuda.
 
 Wire-up in ``bdh.Attention.forward``:
@@ -18,7 +29,8 @@ Wire-up in ``bdh.Attention.forward``:
 - Cold path (``past_kr is None``): ``bdh_attn`` respects ``BDH_ATTN_IMPL``.
   With ``BDH_ATTN_AUTOGRAD=1``, wraps in ``StrictTrilAttnFn`` (analytic train).
 - Multi-token + past under AUTOGRAD: also ``bdh_attn`` → ``strict_tril_attn``.
-- T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM;
+- T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM by
+  default; with ``BDH_ATTN_AUTO=1`` and long past, eager→blocked; else
   blocked/triton/cuda use their decode paths (cuda → ``kernels.cuda_attn.tril_decode``).
   Decode stays outside StrictTrilAttnFn (generate is no_grad / CacheManager-safe).
 """
@@ -48,11 +60,22 @@ _VALID = ("eager", "blocked", "triton", "cuda")
 # "online" is accepted as an alias of blocked (fuse-scorev / OPT notes name).
 _ALIASES = {"online": "blocked"}
 
+# CPU-honest default from #55 benches: mid-S ~parity / slightly slower blocked
+# on generate; long-S decode (S=4096 ~4.4×) and generate prompt=1024 (~1.56×)
+# favor blocked. 512 sits between the stay-eager and prefer-blocked regimes.
+DEFAULT_ATTN_AUTO_THRESHOLD = 512
+_TRUTHY = ("1", "true", "yes", "on")
+
 
 # Env resolve cache: generate hits this every layer/step; skip strip/lower
 # when the raw env string is unchanged. Explicit ``requested=`` bypasses cache.
 _ATTN_IMPL_ENV: object | None = object()
 _ATTN_IMPL_RESOLVED: ImplName = "eager"
+
+_ATTN_AUTO_ENV: object | None = object()
+_ATTN_AUTO_ENABLED: bool = False
+_ATTN_AUTO_THR_ENV: object | None = object()
+_ATTN_AUTO_THR: int = DEFAULT_ATTN_AUTO_THRESHOLD
 
 
 def resolve_attn_impl(requested: str | None = None) -> ImplName:
@@ -84,6 +107,64 @@ def resolve_attn_impl(requested: str | None = None) -> ImplName:
     return _ATTN_IMPL_RESOLVED
 
 
+def attn_auto_enabled() -> bool:
+    """True when ``BDH_ATTN_AUTO`` is truthy (``1|true|yes|on``). Default off."""
+    global _ATTN_AUTO_ENV, _ATTN_AUTO_ENABLED
+    env = os.environ.get("BDH_ATTN_AUTO", "")
+    if env is _ATTN_AUTO_ENV or env == _ATTN_AUTO_ENV:
+        return _ATTN_AUTO_ENABLED
+    raw = (env or "").strip().lower()
+    _ATTN_AUTO_ENABLED = raw in _TRUTHY
+    _ATTN_AUTO_ENV = env
+    return _ATTN_AUTO_ENABLED
+
+
+def attn_auto_threshold() -> int:
+    """Past-length threshold for AUTO eager→blocked decode (default 512)."""
+    global _ATTN_AUTO_THR_ENV, _ATTN_AUTO_THR
+    env = os.environ.get("BDH_ATTN_AUTO_THRESHOLD", "")
+    if env is _ATTN_AUTO_THR_ENV or env == _ATTN_AUTO_THR_ENV:
+        return _ATTN_AUTO_THR
+    raw = (env or "").strip()
+    if not raw:
+        thr = DEFAULT_ATTN_AUTO_THRESHOLD
+    else:
+        try:
+            thr = int(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"BDH_ATTN_AUTO_THRESHOLD must be an int, got {raw!r}"
+            ) from exc
+        if thr < 0:
+            raise ValueError(
+                f"BDH_ATTN_AUTO_THRESHOLD must be >= 0, got {thr}"
+            )
+    _ATTN_AUTO_THR_ENV = env
+    _ATTN_AUTO_THR = thr
+    return _ATTN_AUTO_THR
+
+
+def resolve_decode_impl(
+    past_len: int,
+    requested: str | None = None,
+) -> ImplName:
+    """Resolve T=1 decode backend, applying optional long-S AUTO switch.
+
+    Cold/prefill must keep using ``resolve_attn_impl`` / ``bdh_attn`` (AUTO
+    does not apply there). When AUTO is off, or ``BDH_ATTN_IMPL`` is already
+    non-eager, this matches ``resolve_attn_impl``. When AUTO is on and the
+    base impl is eager, returns ``blocked`` iff ``past_len > threshold``.
+    """
+    name = resolve_attn_impl(requested)
+    if name != "eager":
+        return name
+    if not attn_auto_enabled():
+        return "eager"
+    if int(past_len) > attn_auto_threshold():
+        return "blocked"
+    return "eager"
+
+
 def bdh_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -106,6 +187,8 @@ def bdh_attn(
     analytic bwd is **tiled** (no full T×T); eager still uses dense M
     recompute. Default is False / env-off so the eager training path is
     unchanged.
+
+    ``BDH_ATTN_AUTO`` does **not** affect this cold/prefill path.
     """
     name = resolve_attn_impl(impl)
     if use_autograd_fn is None:
@@ -124,7 +207,6 @@ def bdh_attn(
     from .cuda_attn import tril_score_v
 
     return tril_score_v(Q, K, V)
-
 
 
 def bdh_attn_decode(
@@ -146,8 +228,13 @@ def bdh_attn_decode(
       long-S peak ~Tq×tile; larger default tile)
     - triton:  fused decode + V_BROADCAST on CUDA; blocked fallback on CPU
     - cuda:    ``tril_decode`` (Tq=1 + DECODE_TILE_N CUDA ext if built, else ref)
+
+    With ``BDH_ATTN_AUTO=1`` and base ``eager``, switches to ``blocked`` when
+    ``K_past.size(2) > BDH_ATTN_AUTO_THRESHOLD`` (default 512). Explicit
+    non-eager ``impl`` / ``BDH_ATTN_IMPL`` is never overridden.
     """
-    name = resolve_attn_impl(impl)
+    past_len = int(K_past.size(2))
+    name = resolve_decode_impl(past_len, requested=impl)
     if name == "eager":
         return eager_decode_attn(Q, K_past, V_past)
     if name == "blocked":
@@ -184,6 +271,8 @@ def backend_info() -> dict:
     return {
         "BDH_ATTN_IMPL": impl,
         "BDH_ATTN_AUTOGRAD": _env_autograd_enabled(),
+        "BDH_ATTN_AUTO": attn_auto_enabled(),
+        "BDH_ATTN_AUTO_THRESHOLD": attn_auto_threshold(),
         "has_triton": _HAS_TRITON,
         "has_cuda_ext": has_cuda_ext(),
         "has_cuda_kernel": has_cuda_kernel(),
