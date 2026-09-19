@@ -4,11 +4,13 @@
 import dataclasses
 import os
 import math
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+
+from bdh_cache import CacheManager
 
 
 @dataclasses.dataclass
@@ -178,9 +180,15 @@ class BDH(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, cache: Optional[list] = None):
+    def forward(
+        self,
+        idx,
+        targets=None,
+        cache: Optional[Union[list, CacheManager]] = None,
+    ):
         """
-        cache: optional list len n_layer of None | {'kr', 'v'}. Mutated in place.
+        cache: optional packed ``CacheManager`` (preferred) or legacy list of
+        length n_layer with None | {'kr', 'v'} (cat every step). Mutated in place.
         When cache is provided, idx is the new token block; RoPE continues from
         cached length.
         """
@@ -194,8 +202,11 @@ class BDH(nn.Module):
         x = self.embed(idx).unsqueeze(1)
         x = self.ln(x)
 
+        packed = isinstance(cache, CacheManager)
         rope_start = 0
-        if cache is not None and cache[0] is not None:
+        if packed:
+            rope_start = cache.seq_len
+        elif cache is not None and cache[0] is not None:
             rope_start = cache[0]["kr"].size(2)
 
         for level in range(C.n_layer):
@@ -203,7 +214,9 @@ class BDH(nn.Module):
             x_sparse = F.relu(x_latent)
 
             past_kr = past_v = None
-            if cache is not None and cache[level] is not None:
+            if packed:
+                past_kr, past_v = cache.get_past(level)
+            elif cache is not None and cache[level] is not None:
                 past_kr = cache[level]["kr"]
                 past_v = cache[level]["v"]
 
@@ -215,7 +228,9 @@ class BDH(nn.Module):
                 past_kr=past_kr,
                 past_v=past_v,
             )
-            if cache is not None:
+            if packed:
+                cache.append(level, new_kr, new_v)
+            elif cache is not None:
                 if cache[level] is None:
                     cache[level] = {"kr": new_kr, "v": new_v}
                 else:
@@ -237,6 +252,9 @@ class BDH(nn.Module):
             y = self.ln(yMLP)
             x = self.ln(x + y)
 
+        if packed:
+            cache.commit()
+
         logits = x.view(B, T, D) @ self.lm_head
         loss = None
         if targets is not None:
@@ -251,11 +269,27 @@ class BDH(nn.Module):
         max_new_tokens: int,
         temperature: float = 1.0,
         top_k: int | None = None,
+        *,
+        cache_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
+        """Autoregressive decode with packed KR/V cache (preallocated max_seq).
+
+        cache_dtype: optional storage dtype for the cache (e.g. torch.float16).
+        Compute stays fp32 for RoPE score GEMMs when storage is narrower.
+        """
         was_training = self.training
         self.eval()
 
-        cache: list = [None] * self.config.n_layer
+        B, prompt_len = idx.size()
+        max_seq = prompt_len + max_new_tokens
+        cache = CacheManager.from_config(
+            self.config,
+            batch_size=B,
+            max_seq=max_seq,
+            device=idx.device,
+            compute_dtype=torch.float32,
+            storage_dtype=cache_dtype,
+        )
         logits, _ = self(idx, cache=cache)
 
         for _ in range(max_new_tokens):

@@ -312,3 +312,42 @@ Use **percentages**, not absolute ms (profiler inflates wall time heavily).
 | Attention | `mul` ~28%, `copy_` ~20%, `bmm` ~12%, RoPE trig ~20%, `tril_` ~6% | Full TxT `bmm` then mask; RoPE + copies expensive on CPU |
 | Forward | `copy_` ~23%, `mul` ~16%, `bmm` ~13%, LN ~9%, `mm` ~7%, ReLU ~7% | Matmul + memory movement; compile/fuse candidates |
 | Generate | `bmm` ~42%, `mm` ~28%, LN ~11%, `cat` ~10% | Incremental GEMM dominates; **cache `cat` is the memory tax** |
+
+## opt/cache-pack — packed KR/V cache (2026-09-19)
+
+### Change
+- New `bdh_cache.CacheManager`: preallocate `(B, nh, max_seq, N)` / `(B, 1, max_seq, D)`
+  per layer; `append` writes slices; `commit` advances `seq_len` once after all layers.
+- `bdh.BDH.forward` accepts `CacheManager` **or** legacy `list` of `{'kr','v'}` (cat path kept).
+- `generate()` uses packed cache with `max_seq = prompt + max_new_tokens`.
+  Optional `cache_dtype=torch.float16` stores half; `get_past` casts to fp32 for RoPE score GEMMs.
+
+### Correctness
+```text
+.venv/bin/python -m pytest tests/test_cache_pack.py tests/test_correctness.py \
+  tests/test_attention_mask.py tests/test_vs_baseline.py -q
+# cache_pack: 9 passed; core suite green
+```
+Packed prefill/tokenwise matches full forward and legacy cat cache (atol 1e-5 / exact where applicable).
+
+### fp16 storage numerics
+- Prefill + short decode logits: **within 1e-4** vs fp32 storage (fp32 compute).
+- 16-step tokenwise accumulation measured **~1.3e-4** max abs logit diff → allow 2e-4 in test; still ~1e-4 order.
+- Default `generate()` keeps fp32 storage (exact). Pass `cache_dtype=torch.float16` for half.
+
+### Benchmark (`benchmarks/bench_cache_mem.py`, CPU)
+```text
+decode prompt=64 + new=128, layers=4 d=128
+legacy cat-cache median:  179.27 ms
+packed fp32 median:       225.29 ms  (0.80× — slower on CPU this size)
+packed fp16 storage:      204.15 ms  (0.88×)
+legacy final cache bytes: 12_976_128
+packed fp32 prealloc:     12_976_128  (same final footprint; no per-step realloc growth)
+packed fp16 prealloc:      6_488_064  (2.00× smaller)
+```
+**Merge rationale:** prealloc correctness landed; eliminates O(steps) `torch.cat` realloc/copy
+of growing KR/V; fp16 option halves cache RAM. CPU wall time not improved here (copy_ +
+Python overhead vs amortized cat); expect better locality/bandwidth behavior on GPU.
+
+### Non-goals
+- Still no softmax / no diagonal / no SDPA substitution.
