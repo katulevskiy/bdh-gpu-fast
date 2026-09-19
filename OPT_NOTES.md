@@ -6308,7 +6308,6 @@ or speedup claim is made.
 - No default AMP, optimizer, attention, or mask behavior change.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
 
-
 ## opt/profile-v14 — CPU re-profile after #141/#142 (2026-09-19)
 
 **Branch:** `opt/profile-v14` (private `katulevskiy/bdh-gpu-opt` only; no
@@ -6394,3 +6393,42 @@ BDH_SPARSE_PROBE=0 python benchmarks/bench_sparse_probe.py --skip-train --skip-c
 ```
 
 Density stays OFF by default; no GPU claim is made from this CPU-only change.
+
+## opt/online-decode-v3 — reuse shared-V views for online T=1 (2026-09-19)
+
+**Branch:** `opt/online-decode-v3` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR).
+**Base tip:** `2a2b1fb` (main after #145 sparse-v3; rebased before publishing).
+
+### Audit / deepen
+
+The default eager path remains unchanged. The opt-in blocked/online T=1 path
+now takes one reused `(B,S,D)` view of CacheManager's shared
+`V=(B,1,S,D)` layout before scanning past tiles, instead of rebuilding a
+four-dimensional slice on every tile. It never expands that view to `B*H`.
+
+For B=1, the existing zero-stride `baddbmm(..., out=target)` epilogue remains
+the no-product-buffer fast path. For B>1, the shared-V epilogue now uses one
+broadcast matmul over `(B,H,1,*)` and adds the small output tile, removing the
+per-sample Python loop while retaining the same raw score×V accumulation.
+The #128 Triton launcher continues to consume view-compatible packed KR/V
+strides without host staging; unsupported layouts retain the existing reshape
+fallback.
+
+Attention math is unchanged: raw scores × strict `tril(diagonal=-1)`, no
+softmax, no scale, and no self-attention for a packed decode prefix. Default
+eager dispatch remains unchanged. This CPU-only validation makes no GPU claim.
+
+### Tests
+
+Focused coverage exercises eager-vs-blocked/online decode parity, exact
+`pos0 == 0`, the B=1 direct output epilogue, the B>1 shared-V path, padded
+non-contiguous cache views, and cat-free generate parity.
+
+No GPU is available on this box; CUDA/Triton hardware tests remain skip-gated.
+
+### Non-goals
+
+- No default eager, cache, generate, or attention math change.
+- No softmax, scaling, diagonal inclusion, or full-score materialization.
+- No GPU timing, kernel-on-hardware, GPU correctness, or speedup claim.

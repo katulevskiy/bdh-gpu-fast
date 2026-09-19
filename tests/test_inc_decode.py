@@ -98,6 +98,30 @@ def test_t1_shared_v_b1_direct_epilogue_matches_eager(monkeypatch):
     assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
 
 
+def test_t1_shared_v_batched_epilogue_matches_eager(monkeypatch):
+    """B>1 shared-V tiles use one broadcast matmul without staging heads."""
+    B, H, S, N, D = 2, 4, _DECODE_ONESHOT_ELEMS * 2 + 1, 8, 16
+    Q, K, V = _make_decode_qkv(B=B, H=H, S=S, N=N, D=D, seed=102)
+    ref = eager_decode_attn(Q, K, V)
+    seen = []
+    orig = torch.matmul
+
+    def spy(input, other, *, out=None):
+        if input.dim() == 4 and other.dim() == 4 and input.size(0) == B:
+            seen.append((input.shape, other.shape, out is not None))
+        if out is None:
+            return orig(input, other)
+        return orig(input, other, out=out)
+
+    monkeypatch.setattr(torch, "matmul", spy)
+    got = blocked_decode_attn(Q, K, V, block_size=64)
+
+    assert seen
+    assert all(input_shape[:2] == (B, H) for input_shape, _, _ in seen)
+    assert all(other_shape[:2] == (B, 1) for _, other_shape, _ in seen)
+    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+
+
 def test_triton_decode_cpu_fallback_matches_eager():
     Q, K, V = _make_decode_qkv(S=24)
     got = triton_decode_attn(Q, K, V, block_size=8)
