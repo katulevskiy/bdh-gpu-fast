@@ -482,6 +482,59 @@ def test_unscaled_amp_train_step_updates_and_clears_grads(monkeypatch):
     assert model.weight.grad is None
 
 
+def test_injected_scaler_path_orders_hooks_and_clears_grads(monkeypatch):
+    """A CPU-safe scaler probe preserves scale/backward/step/update ordering."""
+    events = []
+
+    class _ScaledLoss:
+        def __init__(self, loss):
+            self.loss = loss
+
+        def backward(self):
+            events.append("backward")
+            self.loss.backward()
+
+    class _ProbeScaler:
+        def is_enabled(self):
+            return True
+
+        def scale(self, loss):
+            events.append("scale")
+            return _ScaledLoss(loss)
+
+        def step(self, optimizer):
+            events.append("step")
+            optimizer.step()
+
+        def update(self):
+            events.append("update")
+
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", True)
+    monkeypatch.setattr(tr, "scaler", _ProbeScaler())
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, 1))
+
+        def forward(self, x, y=None):
+            logits = x @ self.weight
+            return logits, logits.square().mean()
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    initial_weight = model.weight.detach().clone()
+
+    loss = tr.train_step(model, optimizer, torch.tensor([[2.0]]), torch.tensor([[0]]))
+
+    assert loss.ndim == 0
+    assert events == ["scale", "backward", "step", "update"]
+    assert not torch.equal(model.weight.detach(), initial_weight)
+    assert model.weight.grad is None
+
+
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
     """A live CUDA runtime is the only positive throughput claim surface."""
     with monkeypatch.context() as mp:
