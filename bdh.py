@@ -283,7 +283,9 @@ class BDH(nn.Module):
         self._ln_shape = (D,)
         self._ln_eps = 1e-5
         self.embed = nn.Embedding(config.vocab_size, D)
-        self.drop = nn.Dropout(config.dropout)
+        # Float p + F.dropout (not nn.Dropout): torch RNG only, compile-friendly.
+        # p==0 is a true identity (no RNG op) — bit-identical to baseline Dropout(0).
+        self.dropout_p = float(config.dropout)
         self.encoder_v = nn.Parameter(torch.zeros((nh, D, N)).normal_(std=0.02))
 
         # Vocab projection: baseline stores untied lm_head (D, V). Optional
@@ -366,6 +368,19 @@ class BDH(nn.Module):
         y = F.layer_norm(y_mlp, self._ln_shape, eps=self._ln_eps)
         y.add_(x)
         return F.layer_norm(y, self._ln_shape, eps=self._ln_eps)
+
+    def _dropout(self, x: torch.Tensor) -> torch.Tensor:
+        """Compile-friendly dropout via ``F.dropout`` (ATen / torch RNG only).
+
+        Never uses Python ``random`` / NumPy RNG (those graph-break ``torch.compile``).
+        When ``dropout_p == 0`` (common under ``BDH_COMPILE`` benches / baseline
+        parity tests), returns ``x`` unchanged so the compiled graph has **no**
+        dropout RNG ops — bit-identical to ``nn.Dropout(0)``.
+        """
+        p = self.dropout_p
+        if p == 0.0:
+            return x
+        return F.dropout(x, p=p, training=self.training)
 
     @staticmethod
     def _linear(x: torch.Tensor, weight_in_out: torch.Tensor, bias=None) -> torch.Tensor:
@@ -482,11 +497,12 @@ class BDH(nn.Module):
                 # Reuse x_bthn storage; ReLU outputs are not needed for backward.
                 x_bthn.mul_(y_bthn)
                 xy_bthn = x_bthn
-            xy_bthn = self.drop(xy_bthn)
+            # Dropout then decoder: F.dropout keeps (or restores) contiguity;
+            # p==0 is identity so (B,T,nh,N) stays a free view into nh*N.
+            xy_bthn = self._dropout(xy_bthn)
 
-            # Free view when contiguous (B,T,nh,N); reshape safe if dropout flips layout.
             yMLP = self._linear(
-                xy_bthn.reshape(B, T, nh * N), self.decoder, self.decoder_bias
+                xy_bthn.view(B, T, nh * N), self.decoder, self.decoder_bias
             )
             # Residual + double LN: reuse inner LN buffer for (x + LN(yMLP)).
             x = self._residual_ln(x, yMLP)
