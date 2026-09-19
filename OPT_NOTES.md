@@ -7256,19 +7256,47 @@ does not enter the CUDA setup. Defaults and raw score × strict
 
 Validation is CPU-only; no CUDA compiler, hardware execution, compile timing, or
 speedup is claimed.
-## opt/prefetch-v4 — explicit unavailable-CUDA skip gate (2026-09-19)
 
-**Branch:** `opt/prefetch-v4` from `c25aa9f` (`main`, private repository
-only).
 
-The opt-in H2D path now exposes `prefetch_h2d_skip_reason()` before any CUDA
-stream or event construction. CPU devices report `device-not-cuda: cpu`; a
-requested CUDA device without a live runtime reports
-`CUDA unavailable: torch.cuda.is_available() is false`. `BatchPrefetcher` uses
-that gate so a stale or mocked CUDA device cannot create a stream/event or keep
-a device lookahead on a CPU-only run. Defaults remain
-`BDH_PREFETCH_ASYNC=1` and `BDH_PREFETCH_H2D=1`.
 
-Validation is CPU-only; the focused prefetch tests cover the CPU identity path
-and the unavailable-runtime gate. No CUDA H2D correctness, overlap, timing, or
-speedup claim is made.
+## opt/profile-v18 — CPU re-profile after #199–#201 (2026-09-19)
+
+**Branch:** `opt/profile-v18` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `c25aa9f` (#201), including #199 decode-gemm and #200. This
+profile is CPU-only and makes no GPU claim.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+/workspace/bdh-gpu-opt/.venv/bin/python benchmarks/profile_forward.py \
+  --device cpu --mode all --warmup 2 --wait 1 --active 3
+# torch 2.14.0+cu130 cuda=False device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The run used two warmups, one wait, and three active steps, matching
+profile-v17. Counts below are aggregate counts followed by the per-active-call
+count; profiler timings are deliberately not used as a performance claim.
+
+### CPU profile counts
+
+| Mode | `aten::copy_` | `aten::cat` | `aten::contiguous` |
+|---|---:|---:|---:|
+| Attention | **6 / 3 = 2 per call** | **0** | **0** |
+| Forward | **36 / 3 = 12 per call** | **0** | **0** |
+| Generate | **1,182 / 3 = 394 per call** | **0** | **0** |
+
+Relative to profile-v17, all copy/cat/contiguous counts are unchanged:
+attention `copy_`=2/call, forward `copy_`=12/call, and generate
+`copy_`=394/call, with `cat=0` and `contiguous=0`. The honest result is
+**flat versus v17**; no timing or speedup conclusion is drawn.
+
+### Verdict / non-goals
+
+- This is matched CPU operator evidence after #199–#201; no model or default
+  behavior changed.
+- Attention remains raw scores × strict `tril(diagonal=-1)`.
+- No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
+  claimed; real GPU measurement remains open.
