@@ -927,6 +927,55 @@ def test_compile_first_probe_failure_reports_retry_guidance(monkeypatch, capsys)
     assert "check the probe inputs and backend" in captured
 
 
+def test_compile_failed_backward_probe_clears_fallback_grads(monkeypatch, capsys):
+    """A failed train_bwd probe must not leak partial grads into eager fallback."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    class FailingBackward(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, value):
+            return value.detach()
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            raise RuntimeError("synthetic backward probe failure")
+
+    class ProbeFailure(torch.nn.Module):
+        def __init__(self, target):
+            super().__init__()
+            self.target = target
+
+        def forward(self, *args, **kwargs):
+            param = next(self.target.parameters())
+            # Simulate a partial gradient from work completed before failure.
+            param.grad = torch.ones_like(param)
+            return torch.zeros(1), FailingBackward.apply(param.sum())
+
+    monkeypatch.setattr(tr.torch, "compile", lambda model, **kwargs: ProbeFailure(model))
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert out is model
+    assert model.training
+    assert "first probe failed" in captured
+    assert all(param.grad is None for param in model.parameters())
+
+
 @pytest.mark.parametrize("autograd", [False, True])
 def test_compile_fullgraph_forward_matches_eager(autograd, monkeypatch):
     """fullgraph=True cold forward matches eager @ dropout=0 (eager × AUTOGRAD).

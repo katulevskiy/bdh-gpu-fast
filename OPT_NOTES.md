@@ -7359,3 +7359,19 @@ CUDA, the CUDA-unavailable path preserves its exact actionable CPU-safe marker,
 and an available import/device pair returns `None`. This deepens skip-reason
 contract coverage without allocating CUDA tensors, launching kernels, changing
 strict raw `tril(diagonal=-1)` attention math, or making GPU claims.
+
+## opt/compile-v6 — clean failed backward-probe fallback (2026-09-19)
+
+**Branch:** `opt/compile-v6` from `75ce6c2` (#223) on private
+`katulevskiy/bdh-gpu-opt`.
+
+The `train_bwd` probe already soft-falls back when compilation or its first
+call fails. This follow-on closes the remaining cleanup gap: if a failed probe
+has written partial parameter gradients, the original eager module now clears
+those probe gradients before returning and still restores the caller's train
+mode. A synthetic failing-backward contract test covers the fallback without
+requiring an inductor or C++ toolchain.
+
+Validation is CPU-only; no CUDA-graph, GPU timing, or GPU compile claim is
+made. Defaults and raw scores × strict `tril(diagonal=-1)` attention semantics
+remain unchanged.
