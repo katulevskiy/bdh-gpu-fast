@@ -235,10 +235,11 @@ def test_compile_failure_without_probe_preserves_caller_state(
 
 
 @pytest.mark.parametrize("caller_training", [False, True])
+@pytest.mark.parametrize("preexisting_grads", [False, True])
 def test_successful_backward_probe_returns_clean_wrapper(
-    monkeypatch, capsys, caller_training
+    monkeypatch, capsys, caller_training, preexisting_grads
 ):
-    """A successful backward probe clears grads and restores caller mode."""
+    """A successful backward probe clears all grads and restores caller mode."""
     import train as tr
 
     monkeypatch.setenv("BDH_COMPILE", "1")
@@ -250,6 +251,9 @@ def test_successful_backward_probe_returns_clean_wrapper(
     compile_kwargs = {}
 
     model = bdh.BDH(_small_cfg()).train(caller_training)
+    if preexisting_grads:
+        for index, param in enumerate(model.parameters(), start=1):
+            param.grad = torch.full_like(param, float(index))
 
     class ProbedWrapper(torch.nn.Module):
         def __init__(self, module):
