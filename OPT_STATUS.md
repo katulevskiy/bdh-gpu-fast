@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#72+)
+# OPT status — landed work (#1–#73)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `962a3b6` (`#71` docs matrix on `main`; `#70` dropout-compile / `#69` rope-decode). Profile source: tip of `#68` (post-#64–#66). This branch adds long-S generate AUTO A/B harness (`opt/gen-long-bench`).
+Tip documented here: `0215ca8` (`#73` attn-mem-probe on `main`; `#72` gen-long-bench / `#71` docs matrix / `#70` dropout-compile). Profile source: tip of `#68` (`b126d77`, post-#64–#66); #69–#73 are documented updates after that profile.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -146,7 +146,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#69)
+## Landed opts (#1–#73)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
