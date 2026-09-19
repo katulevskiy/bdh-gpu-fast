@@ -826,6 +826,43 @@ def test_maybe_compile_fullgraph_env_and_soft_fallback(monkeypatch):
     assert loss is not None and torch.isfinite(loss)
 
 
+def test_compile_failure_reports_requested_probe_and_fullgraph(monkeypatch, capsys):
+    """Compile construction failure names the requested train probe and fallback."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "1")
+    importlib.reload(tr)
+
+    def _fail_compile(model, **kwargs):
+        assert kwargs == {"mode": "default", "fullgraph": True}
+        raise RuntimeError("synthetic compile construction failure")
+
+    monkeypatch.setattr(tr.torch, "compile", _fail_compile)
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+        monkeypatch.setenv("BDH_ATTN_AUTOGRAD", "0")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert out is model
+    assert "soft-fallback to original eager module" in captured
+    assert "probe=train_bwd" in captured
+    assert "fullgraph=True" in captured
+
+
 @pytest.mark.parametrize("autograd", [False, True])
 def test_compile_fullgraph_forward_matches_eager(autograd, monkeypatch):
     """fullgraph=True cold forward matches eager @ dropout=0 (eager × AUTOGRAD).

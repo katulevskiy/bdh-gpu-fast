@@ -6118,3 +6118,42 @@ kernel-on-hardware, correctness-on-GPU, or speedup claim is made.
 - No default eager, attention math, or generate behavior change.
 - No softmax, scale, diagonal inclusion, or full score materialization.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+## opt/compile-train-v3 — clarify CPU-safe compile fallback (2026-09-19)
+
+**Branch:** `opt/compile-train-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `cc62e0b` (`#135` scorev-fuse-v3, after #134). No public PR.
+
+### Audit / deepen
+
+`train.maybe_compile()` now labels every compile/probe soft-fallback with the
+requested device, mode, probe, and `fullgraph` setting, explicitly naming the
+original eager module as the returned fallback. This makes construction failure,
+missing `example_y` for `train_bwd`, and first-probe failure distinguishable
+without changing the safe behavior.
+
+The `maybe_compile()` contract also spells out the FULLGRAPH/AUTOGRAD
+interaction: `FULLGRAPH=1` constrains the module probe, `AUTOGRAD=1` plus
+`train_bwd` exercises the analytic attention backward path, and optimizer step /
+gradient clearing remain eager. A graph break or unsupported backward remains a
+soft fallback, not a hard failure. Defaults remain `BDH_COMPILE=0`,
+`BDH_COMPILE_PROBE=train_bwd`, and `BDH_COMPILE_FULLGRAPH=0`.
+
+### CPU-safe validation
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/test_compile.py -q
+# 36 passed, 1 skipped, 1 warning in 56.36s
+
+OMP_NUM_THREADS=2 BDH_BENCH_COMPILE=0 BDH_BENCH_COMPILE_BLOCKED=0 \
+  BDH_BENCH_COMPILE_MODE=0 BDH_BENCH_COMPILE_DROPOUT=0 \
+  BDH_BENCH_COMPILE_FULLGRAPH=0 BDH_BENCH_AMP=0 \
+  /workspace/bdh-gpu-opt/.venv/bin/python benchmarks/bench_train_step.py
+# CPU baseline smoke completed; compile/matrix/AMP sections explicitly skipped
+
+OMP_NUM_THREADS=2 /workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/ -q
+# 533 passed, 19 skipped, 4 warnings in 164.89s
+```
+
+No GPU or CUDA-graph measurement was available or added. Attention remains raw
+scores × strict `tril(diagonal=-1)`.
