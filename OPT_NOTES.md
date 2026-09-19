@@ -14,7 +14,7 @@ Push only to `https://github.com/katulevskiy/bdh-gpu-opt` (private).
 ## P3 profiler CI scaffold (2026-09-19)
 
 - `benchmarks/profile_smoke.py` runs one tiny, CPU-only `torch.profiler` forward pass and writes a Chrome trace under `benchmarks/traces/`.
-- `.github/workflows/profile-smoke.yml` is manual/nightly-only, installs the CPU PyTorch wheel, verifies the smoke exits 0, and uploads the trace for seven days. It does not run on pull requests or make GPU performance claims.
+- The smoke is suitable for a manual/nightly CPU job: install the CPU PyTorch wheel, run `python benchmarks/profile_smoke.py`, then optionally upload `benchmarks/traces/*.json` with `actions/upload-artifact@v4` (seven-day retention is sufficient). Keep the job off pull requests; it makes no GPU performance claims.
 - Traces remain gitignored; local check: `python benchmarks/profile_smoke.py`.
 
 ## Inefficiencies found (upstream / baseline)
