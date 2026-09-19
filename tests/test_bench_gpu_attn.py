@@ -120,6 +120,47 @@ def test_cuda_runtime_diagnostics_survives_device_probe_failure(monkeypatch):
     assert result["cuda_runtime_state"] == "runtime_unavailable"
 
 
+def test_no_cuda_skip_stays_structured_when_device_probe_fails(
+    monkeypatch, tmp_path, capsys
+):
+    """The run-level skip keeps the failed driver probe diagnostics-only."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+
+    def fail_device_probe():
+        raise RuntimeError("driver query failed")
+
+    monkeypatch.setattr(torch.cuda, "device_count", fail_device_probe)
+    summary_path = tmp_path / "runtime-failure-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--json-out", str(summary_path)],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    output = capsys.readouterr().out
+
+    assert summary["status"] == "skip"
+    assert summary["reason"] == "cuda_unavailable"
+    assert summary["timing_scope"] == "none"
+    assert summary["cuda_built"] is True
+    assert summary["cuda_device_count"] == 0
+    assert summary["cuda_runtime_state"] == "runtime_unavailable"
+    assert summary["skips"][0]["cuda_runtime_state"] == "runtime_unavailable"
+    assert "results" not in summary
+    assert "GPU_ATTN_SKIP status=skip reason=cuda_unavailable" in output
+    assert "timing_scope=none" in output
+    assert "median ms" not in output
+
+
 def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
     """Forced smoke timings are explicitly marked as CPU-only."""
     summary_path = tmp_path / "cpu-summary.json"
