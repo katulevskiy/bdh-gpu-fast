@@ -966,6 +966,42 @@ def test_cpu_fused_fresh_output_is_contiguous_for_strided_input(
     assert torch.equal(got, ref), name
 
 
+@pytest.mark.parametrize(
+    ("name", "rotate", "paired", "kwargs"),
+    [
+        ("pytorch", fused_rope_rotate_pytorch, False, {}),
+        ("blocked", fused_rope_rotate_blocked, False, {"block": 3}),
+        ("triton-cpu-fallback", fused_rope_rotate_triton, False, {}),
+        ("paired", fused_rope_rotate_paired, True, {}),
+    ],
+)
+def test_cpu_fused_t1_fresh_output_is_contiguous_for_strided_input(
+    name, rotate, paired, kwargs
+):
+    """CPU-safe T=1 fused paths keep fresh outputs dense for strided inputs."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 6
+    attn.ensure_rope_table(16, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    cis = attn.t1_cis_pairs(rope_start, device)
+    assert cis is not None
+
+    torch.manual_seed(297)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    v_nc = v.transpose(0, 1)
+    assert not v_nc.is_contiguous()
+    ref = eager_rope_rotate(v_nc, cos, sin)
+
+    args = (v_nc, cis[0], cis[1]) if paired else (v_nc, cos, sin)
+    got = rotate(*args, **kwargs)
+
+    assert got.is_contiguous(), name
+    assert torch.equal(got, ref), name
+
+
 def test_generate_cache_continuity_fused_and_eager(monkeypatch):
     """Generate tokens match baseline under both rope impls (cache phases)."""
     cfg = _small_cfg(n_layer=2)
