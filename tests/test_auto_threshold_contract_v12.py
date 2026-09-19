@@ -64,6 +64,24 @@ def test_invalid_cold_threshold_recovers_to_shared_fallback(monkeypatch):
     assert resolve_decode_impl(7) == "eager"
 
 
+def test_empty_cold_threshold_mirrors_live_shared_threshold(monkeypatch):
+    """An empty cold override follows the live shared threshold."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "")
+
+    assert resolve_cold_impl(4) == "eager"
+    assert resolve_cold_impl(5) != "eager"
+    assert resolve_decode_impl(4) == "eager"
+    assert resolve_decode_impl(5) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "7")
+    assert resolve_cold_impl(7) == "eager"
+    assert resolve_cold_impl(8) != "eager"
+    assert resolve_decode_impl(7) == "eager"
+
+
 @pytest.mark.parametrize(
     ("impl", "expected"),
     [
