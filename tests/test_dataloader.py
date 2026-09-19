@@ -687,6 +687,18 @@ def test_dataloader_close_shuts_down_cpu_workers_idempotently(tr, monkeypatch):
     src.close()
 
 
+def test_dataloader_close_zero_workers_is_idempotent(tr, monkeypatch):
+    """Explicit CPU shutdown also clears a synchronous iterator without workers."""
+    monkeypatch.setattr(tr, "NUM_WORKERS", 0)
+    src = tr.DataLoaderBatchSource("train")
+    assert not hasattr(src._it, "_shutdown_workers")
+
+    src.close()
+
+    assert src._it is None
+    src.close()
+
+
 def test_make_batch_source_default_is_prefetcher(tr, monkeypatch):
     monkeypatch.setattr(tr, "USE_DATALOADER", False)
     src = tr.make_batch_source("train")
