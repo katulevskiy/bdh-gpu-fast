@@ -449,6 +449,57 @@ def test_cpu_flattened_bmm_padded_qk_views_preserve_layout_contract(impl):
 
 @pytest.mark.parametrize("impl", ["blocked", "online"])
 @pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_long_head_strided_views_preserve_autograd_contract(
+    impl, value_heads
+):
+    """Long CPU tiles preserve parity through non-contiguous head views."""
+    T, B, H, N, D = 257, 2, 2, 5, 4
+    g = torch.Generator().manual_seed(38 + value_heads)
+    Q_storage0 = torch.randn(
+        B, H * 2, T, N, dtype=torch.float64, generator=g
+    )
+    K_storage0 = torch.randn(
+        B, H * 2, T, N, dtype=torch.float64, generator=g
+    )
+    V_storage0 = torch.randn(
+        B, value_heads * 2, T, D, dtype=torch.float64, generator=g
+    )
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q_storage = Q_storage0.clone().requires_grad_()
+        K_storage = K_storage0.clone().requires_grad_()
+        V_storage = V_storage0.clone().requires_grad_()
+        Q = Q_storage[:, ::2, :, :]
+        K = K_storage[:, ::2, :, :]
+        V = V_storage[:, ::2, :, :]
+        assert not Q.is_contiguous()
+        assert not K.is_contiguous()
+        assert not V.is_contiguous()
+        assert Q.stride(1) == 2 * T * N
+        assert K.stride(1) == 2 * T * N
+        assert V.stride(1) == 2 * T * D
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad(
+            (out * weight).sum(), (Q_storage, K_storage, V_storage)
+        )
+        return out, grads
+
+    ref, ref_grads = run(eager_tril_attn)
+    tiled = blocked_tril_attn if impl == "blocked" else online_tril_attn
+    got, got_grads = run(lambda Q, K, V: tiled(Q, K, V, block_size=128))
+
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+    assert torch.count_nonzero(got_grads[0][:, 1::2, :, :]) == 0
+    assert torch.count_nonzero(got_grads[1][:, 1::2, :, :]) == 0
+    assert torch.count_nonzero(got_grads[2][:, 1::2, :, :]) == 0
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("value_heads", [1, 2])
 def test_cpu_long_padded_qk_autograd_matches_eager(impl, value_heads):
     """Long CPU tiles preserve gradients through padded Q/K views."""
     T, B, H, N, D = 257, 2, 2, 5, 4
