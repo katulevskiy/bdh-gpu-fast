@@ -52,3 +52,17 @@ def test_b3_long_s_packed_shared_v_decode_parity():
         assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
             f"impl={impl} maxdiff={(got - ref).abs().max().item()}"
         )
+
+
+def test_decode_uses_raw_scores_without_softmax_or_scale():
+    """Decode keeps raw QK scores: no softmax, scale, or fused attention op."""
+    Q = torch.tensor([[[[2.0, 0.0]]]])
+    K_past = torch.tensor([[[[1.0, 0.0], [0.5, 0.0]]]])
+    V_past = torch.tensor([[[[3.0], [4.0]]]])
+    expected = torch.tensor([[[[10.0]]]])
+
+    for impl in ("blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K_past, V_past, impl=impl)
+        assert torch.allclose(got, expected, atol=0, rtol=0), (
+            f"impl={impl} maxdiff={(got - expected).abs().max().item()}"
+        )
