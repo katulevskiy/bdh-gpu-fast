@@ -409,3 +409,62 @@ def test_successful_backward_probe_returns_clean_wrapper(
     assert all(param.grad is None for param in model.parameters())
     assert "torch.compile enabled (mode=default, probe=train_bwd" in captured
     assert "first probe failed" not in captured
+
+
+@pytest.mark.parametrize("caller_training", [False, True])
+def test_eval_probe_is_no_grad_and_restores_caller_state(
+    monkeypatch, capsys, caller_training
+):
+    """The eval probe uses no-grad and restores the caller's mode."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "eval")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    class EvalProbe(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.calls = 0
+            self.training_at_call = []
+            self.grad_enabled_at_call = []
+
+        def forward(self, x):
+            self.calls += 1
+            self.training_at_call.append(self.training)
+            self.grad_enabled_at_call.append(torch.is_grad_enabled())
+            return self.module(x)
+
+    model = bdh.BDH(_small_cfg()).train(caller_training)
+    wrapper = EvalProbe(model)
+
+    def compile_spy(compiled_model, **kwargs):
+        assert compiled_model is model
+        compile_kwargs.update(kwargs)
+        return wrapper
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    x = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert wrapper.calls == 1
+    assert wrapper.training_at_call == [False]
+    assert wrapper.grad_enabled_at_call == [False]
+    assert out is wrapper
+    assert out.training is caller_training
+    assert model.training is caller_training
+    assert "torch.compile enabled (mode=default, probe=eval" in captured
+    assert "first probe failed" not in captured
