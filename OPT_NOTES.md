@@ -468,3 +468,77 @@ BDH_MAX_ITERS=50 python train_fast.py  # aggressive defaults
 python benchmarks/bench_train_step.py
 BDH_BENCH_COMPILE=1 python benchmarks/bench_train_step.py
 ```
+
+## opt/attn-bwd — analytic autograd for strict-tril attention (2026-09-19)
+
+**Branch:** `opt/attn-bwd` (private `katulevskiy/bdh-gpu-opt` only).
+
+### Goal
+Give custom forward kernels (blocked / Triton / CUDA) a correct training path:
+`O = tril(Q @ K.T, diagonal=-1) @ V` with **analytic** `dQ, dK, dV` — still
+**no softmax / no scale / diagonal excluded**.
+
+### What landed
+| Path | Role |
+|------|------|
+| `kernels/attention_bwd.py` | `StrictTrilAttnFn`, `analytic_tril_attn_backward`, `strict_tril_attn` |
+| `kernels/attention_dispatch.py` | `BDH_ATTN_AUTOGRAD=1` / `use_autograd_fn=` opt-in |
+| `bdh.py` | Cold path: default eager unchanged; env enables Function |
+| `tests/test_attn_bwd.py` | gradcheck, finite-diff, vs eager + baseline Attention |
+
+### Math (backward)
+```text
+M  = tril(Q @ K.T, -1)
+O  = M @ V                    # V may be (B,1,T,D) broadcast over H
+dM = dO @ V_eff.T
+dS = tril(dM, -1)
+dQ = dS @ K
+dK = dS.T @ Q
+dV_eff = M.T @ dO
+dV = sum_H(dV_eff) if V was head-broadcast else dV_eff
+```
+
+### Wire-up (optional)
+```bash
+# default — identical to previous eager cold path (PyTorch autograd through GEMMs)
+unset BDH_ATTN_AUTOGRAD
+
+# opt-in Function + analytic bwd (works with BDH_ATTN_IMPL=eager|blocked|triton)
+export BDH_ATTN_AUTOGRAD=1
+export BDH_ATTN_IMPL=blocked   # example
+```
+
+Or call directly:
+```python
+from kernels.attention_bwd import strict_tril_attn
+out = strict_tril_attn(Q, K, V, impl="eager", use_fn=True)
+```
+
+### Correctness (this box, CPU-only)
+```text
+.venv/bin/python -m pytest tests/test_attn_bwd.py -v
+# 11 passed
+#   analytic == eager autograd (fp64, exact within 1e-8)
+#   StrictTrilAttnFn grads == eager for impl=eager and impl=blocked
+#   torch.autograd.gradcheck passed (eager + blocked, small shapes)
+#   finite-diff spot-check on Q coordinate
+#   Attention + BDH_ATTN_AUTOGRAD=1 grads match bdh_baseline.Attention
+#   default path (env unset) still bit-identical eager
+
+.venv/bin/python -m pytest tests/ -q
+# 65 passed, 4 skipped
+```
+
+### Honest status
+- **Positive:** analytic bwd proven; Function wraps eager/blocked (and Triton when
+  CUDA available) so training no longer depends on differentiating the forward
+  kernel graph.
+- **Default unchanged:** `BDH_ATTN_AUTOGRAD` unset → bdh.py still uses inlined
+  `scores.tril_ @ V` with native PyTorch autograd.
+- **This machine:** CPU-only; Triton CUDA bwd not executed here (forward falls
+  back to blocked under the Function).
+- Still **do not** use `F.scaled_dot_product_attention`.
+
+### Non-goals
+- No PRs to `pathwaycom/bdh`
+- No fused CUDA/Triton backward kernel yet (analytic PyTorch recompute of M)
