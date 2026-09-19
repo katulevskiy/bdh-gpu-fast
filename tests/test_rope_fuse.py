@@ -67,6 +67,15 @@ def test_resolve_rope_impl_default_eager(monkeypatch):
         resolve_rope_impl()
 
 
+@pytest.mark.parametrize("entrypoint", [bdh_rope_rotate, bdh_rope_rotate_paired])
+def test_public_dispatch_rejects_invalid_explicit_impl_before_input_validation(
+    entrypoint,
+):
+    """Explicit backend overrides fail before touching malformed tensor inputs."""
+    with pytest.raises(ValueError, match="BDH_ROPE_IMPL"):
+        entrypoint(None, None, None, impl="triton")
+
+
 def test_fused_pytorch_bit_identical_to_eager():
     _, _, cos, sin, v, _ = _cis_and_v()
     a = eager_rope_rotate(v, cos, sin)
