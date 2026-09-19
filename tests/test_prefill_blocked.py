@@ -63,6 +63,25 @@ def test_strict_tril_raw_score_contract_at_tile_boundary():
         assert torch.equal(got, expected)
 
 
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_batched_strict_tril_raw_score_contract_partial_tile(value_heads):
+    """Batched and head-matched tiles keep exact raw-score masking."""
+    B, H, T, N, D = 2, 2, 7, 2, 2
+    Q = torch.arange(-20, -20 + B * H * T * N, dtype=torch.float64).view(
+        B, H, T, N
+    )
+    K = torch.arange(11, 11 + B * H * T * N, dtype=torch.float64).view(
+        B, H, T, N
+    )
+    V = torch.arange(-7, -7 + B * value_heads * T * D, dtype=torch.float64).view(
+        B, value_heads, T, D
+    )
+    expected = torch.tril(Q @ K.transpose(-2, -1), diagonal=-1) @ V
+
+    got = blocked_tril_attn(Q, K, V, block_size=3)
+    assert torch.equal(got, expected)
+
+
 @pytest.mark.parametrize("T", [256, 512, 1024])
 def test_blocked_online_parity_long_t(T):
     Q, K, V = _qkv(T, seed=T)
