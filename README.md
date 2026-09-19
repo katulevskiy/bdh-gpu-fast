@@ -1,7 +1,7 @@
 # BDH (Dragon Hatchling)
 
 > **Private GPU-opt sandbox** (`katulevskiy/bdh-gpu-opt` only — **not** `pathwaycom/bdh`).
-> Landed opts **#1–#33**, env flags (`BDH_ATTN_IMPL`, `BDH_ROPE_IMPL`, `BDH_COMPILE`, `BDH_AMP_DTYPE`),
+> Landed opts **#1–#40**, env flags (`BDH_ATTN_IMPL`, `BDH_ATTN_AUTOGRAD`, `BDH_ROPE_IMPL`, `BDH_COMPILE`, `BDH_AMP_DTYPE`),
 > and honest CPU vs GPU status: **[`OPT_STATUS.md`](OPT_STATUS.md)**.
 > Detail: [`OPT_NOTES.md`](OPT_NOTES.md) · backlog: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
