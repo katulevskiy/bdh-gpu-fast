@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import subprocess
@@ -720,12 +721,16 @@ def test_forced_cpu_ext_has_no_cuda_compile_metadata(tmp_path):
     )
 
     output = _setup_name(env)
-    kwargs = kwargs_trace.read_text(encoding="utf-8")
+    kwargs = ast.literal_eval(kwargs_trace.read_text(encoding="utf-8"))
 
-    assert "extra_compile_args': {'cxx': ['-O3', '-std=c++20']}" in kwargs
-    assert "nvcc" not in kwargs
-    assert "WITH_CUDA" not in kwargs
-    assert "define_macros" not in kwargs
+    assert set(kwargs) == {"name", "sources", "include_dirs", "extra_compile_args"}
+    assert kwargs["name"] == "bdh_cuda_ext"
+    assert kwargs["sources"] == [
+        str(ROOT / "csrc" / "tril_attn_cpu.cpp"),
+        str(ROOT / "csrc" / "tril_attn_bind.cpp"),
+    ]
+    assert kwargs["include_dirs"] == [str(ROOT / "csrc")]
+    assert kwargs["extra_compile_args"] == {"cxx": ["-O3", "-std=c++20"]}
     assert "Building bdh_cuda_ext CPU-only" in output
     assert "Building bdh_cuda_ext WITH CUDA" not in output
     assert "skipping CUDA extension build" not in output
