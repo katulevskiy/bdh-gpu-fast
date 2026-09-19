@@ -145,6 +145,19 @@ def test_run_auto_ab_rejects_invalid_inputs_before_model_setup(
         assert expected in capsys.readouterr().out
 
 
+def test_count_torch_cat_restores_hook_after_exception():
+    """An interrupted cat probe must not leak its temporary torch.cat hook."""
+    original_cat = bench_generate.torch.cat
+
+    def fail_probe():
+        raise RuntimeError("stop cat probe")
+
+    with pytest.raises(RuntimeError, match="stop cat probe"):
+        bench_generate.count_torch_cat(fail_probe)
+
+    assert bench_generate.torch.cat is original_cat
+
+
 def test_attn_impl_restores_environment_after_exception(monkeypatch):
     """An interrupted impl run must not leak its dispatch override."""
     monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
