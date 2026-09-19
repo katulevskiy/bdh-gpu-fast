@@ -4,21 +4,116 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 
-// Naive CUDA scaffold: one thread per (b,h,i,d_v).
-// Computes out[b,h,i,d] = sum_{j < i} (sum_e Q[b,h,i,e]*K[b,h,j,e]) * V[b,hv,j,d]
-// Ready to replace with tiled/shared-mem / flash-style later.
-// Semantics: strict lower-triangular (diagonal excluded), NO softmax, NO 1/sqrt(d).
+// Cold-path CUDA: tiled online strict-tril score×V (no global T×T scores).
+// Semantics: out[i] = sum_{j < i} (Q[i]·K[j]) * V[j]  — NO softmax, NO 1/sqrt(d).
+//
+// Grid:  (ceil(T / TILE_M), B*H, ceil(Dv / TILE_D))
+// Block: (TILE_D, TILE_M)  — thread (tx,ty) owns query row i0+ty and Dv lane d0+tx
+// Shared: Q tile [TILE_M, Dk], K tile [TILE_N, Dk], V tile [TILE_N, TILE_D]
+// Online: for each key tile, ephemeral BM×BN scores stay in registers; ×V accumulates
+// into Out. Never allocates or writes a T×T score matrix.
+//
+// Decode kernel below remains a separate packed-past scaffold (see opt/cuda-decode).
+
+namespace {
+constexpr int TILE_M = 16;  // query rows per block
+constexpr int TILE_N = 16;  // key cols per online tile
+constexpr int TILE_D = 32;  // Dv columns per block (blockDim.x)
+// Soft cap: fall back to naive if dynamic smem would exceed this.
+constexpr size_t SMEM_CAP = 48 * 1024;
+}  // namespace
 
 template <typename scalar_t>
-__global__ void tril_score_v_kernel(
+__global__ void tril_score_v_tiled_kernel(
     const scalar_t* __restrict__ Q,
     const scalar_t* __restrict__ K,
     const scalar_t* __restrict__ V,
     scalar_t* __restrict__ Out,
     int B, int H, int T, int Dk, int Dv, int Hv) {
-  // Linear index over (B, H, T, Dv)
+  extern __shared__ char smem_raw[];
+  scalar_t* Qs = reinterpret_cast<scalar_t*>(smem_raw);
+  scalar_t* Ks = Qs + TILE_M * Dk;
+  scalar_t* Vs = Ks + TILE_N * Dk;
+
+  const int bh = static_cast<int>(blockIdx.y);
+  const int b = bh / H;
+  const int h = bh % H;
+  const int hv = (Hv == 1) ? 0 : h;
+
+  const int i0 = static_cast<int>(blockIdx.x) * TILE_M;
+  const int d0 = static_cast<int>(blockIdx.z) * TILE_D;
+  const int ty = static_cast<int>(threadIdx.y);
+  const int tx = static_cast<int>(threadIdx.x);
+  const int i = i0 + ty;
+  const int d = d0 + tx;
+
+  const int64_t q_head = (static_cast<int64_t>(b) * H + h) * T;
+  const int64_t v_head = (static_cast<int64_t>(b) * Hv + hv) * T;
+
+  // Cooperative load of Q tile (all Dk) for rows [i0, i0+TILE_M).
+  for (int e = tx; e < Dk; e += TILE_D) {
+    if (i < T) {
+      Qs[ty * Dk + e] = Q[(q_head + i) * Dk + e];
+    } else {
+      Qs[ty * Dk + e] = scalar_t(0);
+    }
+  }
+  __syncthreads();
+
+  float acc = 0.f;
+  // Key tiles that can contribute to any row in this query tile: j < i0+TILE_M.
+  const int j_lim = (i0 + TILE_M < T) ? (i0 + TILE_M) : T;
+  for (int j0 = 0; j0 < j_lim; j0 += TILE_N) {
+    // Load K[j0:j0+TILE_N, :] and V[j0:j0+TILE_N, d0:d0+TILE_D) into shared.
+    for (int idx = ty * TILE_D + tx; idx < TILE_N * Dk; idx += TILE_M * TILE_D) {
+      const int jl = idx / Dk;
+      const int e = idx % Dk;
+      const int j = j0 + jl;
+      Ks[jl * Dk + e] =
+          (j < T) ? K[(q_head + j) * Dk + e] : scalar_t(0);
+    }
+    for (int idx = ty * TILE_D + tx; idx < TILE_N * TILE_D; idx += TILE_M * TILE_D) {
+      const int jl = idx / TILE_D;
+      const int dc = idx % TILE_D;
+      const int j = j0 + jl;
+      const int dd = d0 + dc;
+      Vs[jl * TILE_D + dc] =
+          (j < T && dd < Dv) ? V[(v_head + j) * Dv + dd] : scalar_t(0);
+    }
+    __syncthreads();
+
+    if (i < T && d < Dv && i > 0) {
+      for (int jl = 0; jl < TILE_N; ++jl) {
+        const int j = j0 + jl;
+        if (j >= i) {
+          continue;  // strict lower-triangular: j < i only
+        }
+        float score = 0.f;
+        for (int e = 0; e < Dk; ++e) {
+          score += static_cast<float>(Qs[ty * Dk + e]) *
+                   static_cast<float>(Ks[jl * Dk + e]);
+        }
+        acc += score * static_cast<float>(Vs[jl * TILE_D + tx]);
+      }
+    }
+    __syncthreads();
+  }
+
+  if (i < T && d < Dv) {
+    Out[(q_head + i) * Dv + d] = static_cast<scalar_t>(acc);
+  }
+}
+
+// Naive fallback: one thread per (b,h,i,d). Used when tiled smem would be too large.
+template <typename scalar_t>
+__global__ void tril_score_v_naive_kernel(
+    const scalar_t* __restrict__ Q,
+    const scalar_t* __restrict__ K,
+    const scalar_t* __restrict__ V,
+    scalar_t* __restrict__ Out,
+    int B, int H, int T, int Dk, int Dv, int Hv) {
   const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const int64_t n = (int64_t)B * H * T * Dv;
+  const int64_t n = static_cast<int64_t>(B) * H * T * Dv;
   if (idx >= n) return;
 
   const int d = idx % Dv;
@@ -28,26 +123,25 @@ __global__ void tril_score_v_kernel(
   const int h = tmp % H;
   const int b = tmp / H;
 
-  // Position 0 (and any i with no prior keys) → zero
   if (i == 0) {
     Out[idx] = scalar_t(0);
     return;
   }
 
   const int hv = (Hv == 1) ? 0 : h;
-  scalar_t acc = scalar_t(0);
-
+  float acc = 0.f;
+  const int64_t q_base = (((static_cast<int64_t>(b) * H + h) * T + i) * Dk);
   for (int j = 0; j < i; ++j) {
-    scalar_t score = scalar_t(0);
-    const int64_t q_base = (((int64_t)b * H + h) * T + i) * Dk;
-    const int64_t k_base = (((int64_t)b * H + h) * T + j) * Dk;
+    float score = 0.f;
+    const int64_t k_base = (((static_cast<int64_t>(b) * H + h) * T + j) * Dk);
     for (int e = 0; e < Dk; ++e) {
-      score += Q[q_base + e] * K[k_base + e];
+      score += static_cast<float>(Q[q_base + e]) *
+               static_cast<float>(K[k_base + e]);
     }
-    const int64_t v_base = (((int64_t)b * Hv + hv) * T + j) * Dv;
-    acc += score * V[v_base + d];
+    const int64_t v_base = (((static_cast<int64_t>(b) * Hv + hv) * T + j) * Dv);
+    acc += score * static_cast<float>(V[v_base + d]);
   }
-  Out[idx] = acc;
+  Out[idx] = static_cast<scalar_t>(acc);
 }
 
 torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor v) {
@@ -68,9 +162,9 @@ torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor 
   auto vc = v.contiguous();
   auto out = torch::empty({B, H, T, Dv}, qc.options());
 
-  const int64_t n = B * H * T * Dv;
-  const int threads = 256;
-  const int blocks = static_cast<int>((n + threads - 1) / threads);
+  if (T == 0 || B == 0 || H == 0) {
+    return out;
+  }
 
   const at::cuda::CUDAGuard guard(qc.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -79,12 +173,35 @@ torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor 
       at::ScalarType::Half, at::ScalarType::BFloat16, qc.scalar_type(),
       "tril_score_v_cuda",
       [&] {
-        tril_score_v_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
-            qc.data_ptr<scalar_t>(),
-            kc.data_ptr<scalar_t>(),
-            vc.data_ptr<scalar_t>(),
-            out.data_ptr<scalar_t>(),
-            (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+        const size_t smem = sizeof(scalar_t) *
+            (static_cast<size_t>(TILE_M) * static_cast<size_t>(Dk) +
+             static_cast<size_t>(TILE_N) * static_cast<size_t>(Dk) +
+             static_cast<size_t>(TILE_N) * static_cast<size_t>(TILE_D));
+
+        if (smem <= SMEM_CAP) {
+          dim3 block(TILE_D, TILE_M);
+          dim3 grid(
+              static_cast<unsigned>((T + TILE_M - 1) / TILE_M),
+              static_cast<unsigned>(B * H),
+              static_cast<unsigned>((Dv + TILE_D - 1) / TILE_D));
+          tril_score_v_tiled_kernel<scalar_t><<<grid, block, smem, stream>>>(
+              qc.data_ptr<scalar_t>(),
+              kc.data_ptr<scalar_t>(),
+              vc.data_ptr<scalar_t>(),
+              out.data_ptr<scalar_t>(),
+              (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+        } else {
+          // Huge Dk: keep fused online math (no T×T) via naive per-element loop.
+          const int64_t n = B * H * T * Dv;
+          const int threads = 256;
+          const int blocks = static_cast<int>((n + threads - 1) / threads);
+          tril_score_v_naive_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+              qc.data_ptr<scalar_t>(),
+              kc.data_ptr<scalar_t>(),
+              vc.data_ptr<scalar_t>(),
+              out.data_ptr<scalar_t>(),
+              (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+        }
       });
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();

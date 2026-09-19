@@ -1583,3 +1583,65 @@ win (no `B×H×T×D` V expand copy) and larger tiles matter on GPU.
 - No softmax / diagonal inclusion / SDPA
 - No change to default `BDH_ATTN_IMPL=eager`
 - No fake GPU speedups from CPU medians
+
+## opt/cuda-cold — tiled online cold CUDA tril score×V (2026-09-19)
+
+**Branch:** `opt/cuda-cold` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `e5f8031` (main after triton-cold).
+
+### Goal
+
+Improve the `csrc/` **cold** CUDA `tril(diagonal=-1)` score×V scaffold from a
+naive per-element loop toward **tiled / online accumulation** — no global
+T×T score buffer. Keep CPU reference always tested; skip CUDA without a GPU.
+Wire remains `BDH_ATTN_IMPL=cuda` (already via `opt/attn-unify`); default
+**eager**.
+
+### What landed
+
+| Piece | Change |
+|-------|--------|
+| `csrc/tril_attn_cuda.cu` | Cold `tril_score_v_tiled_kernel`: grid `(⌈T/16⌉, B·H, ⌈Dv/32⌉)`, block `(32,16)`; shared Q/K/V tiles; register `score×V` accumulate; smem>48KiB → fused naive fallback (still no T×T) |
+| `kernels/cuda_attn.py` | Docs: tiled cold vs decode scaffold; `BDH_ATTN_IMPL=cuda` |
+| `kernels/README.md` | Cold kernel shape note |
+| `tests/test_cuda_attn.py` | Extra CPU ref @ T=33 (multi-tile span); CUDA multi-tile+broadcast skipped w/o GPU |
+
+Decode CUDA path unchanged (`opt/cuda-decode`). Cold dispatch already:
+`bdh_attn(..., impl=cuda)` → `kernels.cuda_attn.tril_score_v`.
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K.T).tril(diagonal=-1) @ V   # no softmax, no 1/√d, diagonal excluded
+```
+
+### Usage
+
+```bash
+export BDH_ATTN_IMPL=cuda   # cold + decode via kernels.cuda_attn
+# default eager unchanged
+BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 234 passed, 8 skipped (CUDA/native/Triton GPU paths)
+# test_cuda_attn: CPU ref always; multi-tile T=33; CUDA tiled skipped (no GPU)
+```
+
+### Honest limits
+
+- **No GPU on this box** — tiled CUDA kernel unexecuted; CPU ref + skip tests.
+- Native ext may be absent; `tril_score_v` falls back to pure PyTorch ref
+  (ref may materialize T×T; that is the golden path, not the GPU design).
+- Tile sizes fixed (16×16×32); further shared-mem / occupancy tuning = GPU work.
+- Still no softmax / no scale / no SDPA / no pathwaycom PRs.
+- Do **not** default `BDH_ATTN_IMPL=cuda`.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No fake GPU speedups from CPU medians

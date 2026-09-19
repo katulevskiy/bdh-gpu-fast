@@ -64,3 +64,12 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation  # force 
 
 On this CPU sandbox, native compile may fail (torch/g++ ABI); that is OK — tests
 skip CUDA paths and still validate the CPU reference.
+
+### Cold CUDA kernel shape (`opt/cuda-cold`)
+
+`tril_attn_cuda.cu` cold path is a **tiled online** scaffold:
+
+- Grid `(ceil(T/16), B·H, ceil(Dv/32))`, block `(32, 16)`
+- Shared Q/K/V tiles; accumulate `score×V` in registers — **no global T×T**
+- Falls back to a per-element fused loop if dynamic smem would exceed 48 KiB
+- Decode kernel unchanged (packed past; see `opt/cuda-decode`)

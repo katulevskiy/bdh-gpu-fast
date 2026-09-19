@@ -129,3 +129,35 @@ def test_cuda_broadcast_v():
     gold = tril_score_v_ref(q, k, v)
     assert out.shape == gold.shape
     assert torch.allclose(out, gold, rtol=1e-3, atol=1e-3)
+
+
+def test_cpu_ref_larger_t_no_diag(device):
+    """CPU golden still holds for T that would span multiple CUDA tiles (16)."""
+    torch.manual_seed(7)
+    B, H, T, Dk, Dv = 1, 2, 33, 8, 16
+    q = torch.randn(B, H, T, Dk, device=device)
+    k = torch.randn(B, H, T, Dk, device=device)
+    v = torch.randn(B, H, T, Dv, device=device)
+    out = tril_score_v_ref(q, k, v)
+    gold = _naive(q, k, v)
+    assert torch.allclose(out, gold, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
+
+
+@pytest.mark.skipif(
+    not (has_cuda_kernel() and torch.cuda.is_available()),
+    reason="CUDA kernel not built or no CUDA device",
+)
+def test_cuda_tiled_cold_matches_ref_multi_tile():
+    """Tiled cold kernel (TILE_M=16) vs ref across >1 query tile + V broadcast."""
+    torch.manual_seed(8)
+    device = torch.device("cuda")
+    B, H, T, Dk, Dv = 2, 4, 40, 32, 48
+    q = torch.randn(B, H, T, Dk, device=device)
+    k = torch.randn(B, H, T, Dk, device=device)
+    v = torch.randn(B, 1, T, Dv, device=device)
+    out = tril_score_v(q, k, v)
+    gold = tril_score_v_ref(q, k, v)
+    assert out.shape == gold.shape
+    assert torch.allclose(out, gold, rtol=1e-3, atol=1e-3)
+    assert torch.allclose(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
