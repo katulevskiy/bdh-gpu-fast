@@ -166,3 +166,22 @@ def test_requested_backend_overrides_conflicting_environment(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
     assert resolve_cold_impl(5, requested="cuda") == "cuda"
     assert resolve_decode_impl(5, requested="cuda") == "cuda"
+
+
+def test_auto_toggle_releases_and_reenables_both_gates(monkeypatch):
+    """Changing AUTO at runtime updates both cold and decode gates."""
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "4")
+
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    assert resolve_cold_impl(5) != "eager"
+    assert resolve_decode_impl(5) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO", "0")
+    assert resolve_cold_impl(5) == "eager"
+    assert resolve_decode_impl(5) == "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO", "true")
+    assert resolve_cold_impl(5) != "eager"
+    assert resolve_decode_impl(5) != "eager"
