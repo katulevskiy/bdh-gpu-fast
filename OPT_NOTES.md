@@ -2390,3 +2390,84 @@ blocked-vec from “next” — already on main.
 - No softmax / diagonal / SDPA
 - No GPU speedup claims from these CPU % figures
 - No defaulting `BDH_ATTN_IMPL=blocked` on CPU
+
+## opt/blocked-autograd — blocked/online + tiled analytic bwd train (2026-09-19)
+
+**Branch:** `opt/blocked-autograd` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `d3ff475` (main after profile-v3 #40).
+
+### Goal
+
+Train with `BDH_ATTN_IMPL=blocked|online` + `BDH_ATTN_AUTOGRAD=1` using fused /
+vectorized blocked forward **and** an analytic backward that does **not** force
+a full T×T score matrix (unlike #39 dense M-recompute).
+
+### Math / design
+
+`O = tril(Q@K.T, -1) @ V` is linear (no softmax). Gradients:
+
+- `dS = tril(dO @ V.T, -1)` → `dQ = dS @ K`, `dK = dS.T @ Q` (no need for M)
+- `dV = M.T @ dO` with `M = tril(Q@K.T, -1)` (recompute M tile-wise)
+
+Saving full M from forward would erase the blocked peak-memory win. Tile-wise
+recompute (same past / diagonal tiling as `blocked_tril_attn`) is exact for
+this op — no FlashAttention-style softmax stats required. Dense
+`analytic_tril_attn_backward` remains the eager+AUTOGRAD reference.
+
+### What changed
+
+| Path | Role |
+|------|------|
+| `kernels/attention_bwd.py` | `analytic_tril_attn_backward_blocked`; StrictTrilAttnFn uses tiled bwd for blocked/online/triton/cuda |
+| `kernels/attention_dispatch.py` | `online` → `blocked` alias; docs for tiled AUTOGRAD path |
+| `benchmarks/bench_attn_bwd.py` | A/B: AUTOGRAD 0/1 × IMPL eager|blocked|online |
+| `tests/test_attn_bwd.py` | blocked≡dense analytic; blocked/online FN grads; full-model parity; online env |
+| `kernels/README.md` | online alias + AUTOGRAD train snippet |
+
+### When to use
+
+```bash
+# default — unchanged (eager, AUTOGRAD off)
+unset BDH_ATTN_AUTOGRAD
+unset BDH_ATTN_IMPL   # or =eager
+
+# blocked/online train without full T×T in fwd or bwd
+export BDH_ATTN_AUTOGRAD=1
+export BDH_ATTN_IMPL=blocked   # or online
+```
+
+### Correctness (this box, CPU-only)
+
+```text
+.venv/bin/python -m pytest tests/test_attn_bwd.py -q
+# 23 passed — tiled≡dense; blocked|online FN grads; full BDH parity @ dropout=0;
+# pos0==0; online alias
+
+.venv/bin/python -m pytest tests/test_attn_unify.py tests/test_fuse_scorev.py \
+  tests/test_attention_mask.py -q
+# 55 passed
+```
+
+### Train-step microbench (CPU, Europe/Podgorica)
+
+Tiny cfg `layers=2 d=64 nh=2 B=4 T=64 dropout=0`, AdamW:
+
+```text
+AUTOGRAD=0 IMPL=eager    median ~7265 ms
+AUTOGRAD=1 IMPL=eager    median ~4872 ms  (~1.49× vs off)
+AUTOGRAD=1 IMPL=blocked  median ~3716 ms  (~1.95× vs off)
+AUTOGRAD=1 IMPL=online   median ~3838 ms  (~1.89× vs off)
+```
+
+**Honest:** CPU-only; absolute ms are box-noise / load-sensitive. Do **not**
+claim GPU speedups. Blocked+AUTOGRAD avoids full T×T in fwd **and** bwd (peak
+score tiles). On this CPU box wall-time happened to beat eager+AUTOGRAD for
+this tiny cfg — still typically expect blocked forward slower than eager for
+larger mid-T microbenches (see opt/blocked-vec). GPU unmeasured.
+
+### Non-goals
+
+- Default stays AUTOGRAD **off**, IMPL **eager**
+- No softmax / scale / SDPA
+- No PRs to `pathwaycom/*`
+- No fused CUDA/Triton backward kernel (tiled analytic is still PyTorch tiles)

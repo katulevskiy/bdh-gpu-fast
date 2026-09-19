@@ -1,12 +1,14 @@
-"""Microbench: train_step with BDH_ATTN_AUTOGRAD=0 vs 1 (analytic StrictTrilAttnFn).
+"""Microbench: train_step AUTOGRAD 0/1 × IMPL eager|blocked (analytic StrictTrilAttnFn).
 
-Compares a tiny BDH train step under the default eager path (PyTorch autograd
-through GEMMs) vs the opt-in analytic tril attention Function.
+Compares a tiny BDH train step under:
+  * eager forward + PyTorch autograd (AUTOGRAD=0)
+  * eager forward + dense analytic bwd (AUTOGRAD=1, IMPL=eager)
+  * blocked/online forward + tiled analytic bwd (AUTOGRAD=1, IMPL=blocked)
 
 CPU-honest: this sandbox has no CUDA. Absolute ms are CPU-only — do not claim
-GPU wins. Profile of AUTOGRAD=1 may still be dominated by eager T×T forward
-when BDH_ATTN_IMPL=eager (analytic bwd recomputes M; forward still materializes
-scores unless IMPL=blocked|triton|cuda).
+GPU wins. On CPU, blocked forward is often slower than eager (see
+opt/blocked-vec); the win for blocked+AUTOGRAD is peak score memory (no full
+T×T in fwd or bwd), not wall time on this box.
 """
 
 from __future__ import annotations
@@ -24,7 +26,6 @@ sys.path.insert(0, str(ROOT))
 
 # Keep compile off for a clean AUTOGRAD A/B.
 os.environ.setdefault("BDH_COMPILE", "0")
-os.environ.setdefault("BDH_ATTN_IMPL", "eager")
 
 import bdh  # noqa: E402
 
@@ -81,18 +82,16 @@ def make_train_step(model, device, fused: bool):
     return step, fused
 
 
-def bench_autograd_flag(cfg, device, *, flag: str, state_dict, fused: bool):
-    os.environ["BDH_ATTN_AUTOGRAD"] = flag
-    # Clear any sticky IMPL from prior runs in-process.
-    os.environ.setdefault("BDH_ATTN_IMPL", "eager")
+def bench_combo(cfg, device, *, autograd: str, impl: str, state_dict, fused: bool):
+    os.environ["BDH_ATTN_AUTOGRAD"] = autograd
+    os.environ["BDH_ATTN_IMPL"] = impl
     torch.manual_seed(0)
     model = bdh.BDH(cfg).to(device)
     model.load_state_dict(state_dict)
     model.train()
     step, fused_ok = make_train_step(model, device, fused=fused)
-    # One dry run to catch wiring errors before timing.
-    step()
-    t = timed(step, warmup=2, reps=10)
+    step()  # dry run
+    t = timed(step, warmup=2, reps=8)
     return t, fused_ok
 
 
@@ -101,7 +100,7 @@ def main():
     cfg = _cfg()
     print(
         f"device={device} layers={cfg.n_layer} d={cfg.n_embd} nh={cfg.n_head} "
-        f"B=4 T=64 dropout=0 IMPL={os.environ.get('BDH_ATTN_IMPL', 'eager')}"
+        f"B=4 T=64 dropout=0"
     )
     print(
         f"torch={torch.__version__} cuda={torch.cuda.is_available()} "
@@ -113,33 +112,40 @@ def main():
     state = {k: v.detach().clone() for k, v in ref.state_dict().items()}
 
     fused = device.type == "cuda"
-    t0, fused_ok = bench_autograd_flag(
-        cfg, device, flag="0", state_dict=state, fused=fused
-    )
-    t1, _ = bench_autograd_flag(
-        cfg, device, flag="1", state_dict=state, fused=fused
-    )
+    combos = [
+        ("0", "eager", "eager PyTorch bwd"),
+        ("1", "eager", "eager fwd + dense analytic bwd"),
+        ("1", "blocked", "blocked fwd + tiled analytic bwd"),
+        ("1", "online", "online(=blocked) fwd + tiled analytic bwd"),
+    ]
+    results = []
+    fused_ok = False
+    for flag, impl, label in combos:
+        t, fused_ok = bench_combo(
+            cfg, device, autograd=flag, impl=impl, state_dict=state, fused=fused
+        )
+        results.append((flag, impl, label, t))
+        print(
+            f"AUTOGRAD={flag} IMPL={impl:7s}  median {t * 1000:.2f} ms  ({label})"
+        )
 
-    ratio = t0 / t1 if t1 > 0 else float("inf")
-    print(
-        f"BDH_ATTN_AUTOGRAD=0 (eager PyTorch bwd) train_step median: "
-        f"{t0 * 1000:.2f} ms"
-    )
-    print(
-        f"BDH_ATTN_AUTOGRAD=1 (StrictTrilAttnFn analytic) train_step median: "
-        f"{t1 * 1000:.2f} ms  ({ratio:.2f}x vs off; >1 means analytic faster)"
-    )
+    t_ref = results[0][3]
     print(f"optimizer fused={fused_ok}")
+    if t_ref > 0:
+        for flag, impl, label, t in results[1:]:
+            print(f"  vs AUTOGRAD=0/eager: {t_ref / t:.2f}x  ({label})")
+
     if device.type != "cuda":
         print(
-            "honest: CPU medians only. With IMPL=eager, AUTOGRAD=1 still pays "
-            "full T×T forward + analytic M recompute — expect similar or "
-            "slightly slower than autograd-through-eager. GPU unmeasured."
+            "honest: CPU medians only. Blocked+AUTOGRAD avoids full T×T in fwd "
+            "and bwd (peak score tiles) but is typically slower wall-time than "
+            "eager on CPU. GPU unmeasured — re-run on A100/H100 before claiming "
+            "train wins."
         )
     else:
         print(
-            "GPU box: also try BDH_ATTN_IMPL=blocked|triton|cuda with "
-            "AUTOGRAD=1 (analytic bwd unlocks non-differentiable forwards)."
+            "GPU box: blocked|online + AUTOGRAD=1 is the intended fused-fwd + "
+            "tiled-analytic-bwd train path."
         )
 
 

@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `b160469` (`opt/attn-bwd-train` #39 on `main`; re-profiled in `opt/profile-v3`).
+Tip documented here: `d3ff475` (`opt/profile-v3` #40 on `main`). Blocked/online tiled analytic bwd: `opt/blocked-autograd` (this PR).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -41,7 +41,7 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 | `triton` | Triton fused on CUDA; else blocked | Triton decode + `V_BROADCAST`; else blocked | Needs CUDA + Triton to run kernel |
 | `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` tiled / ref | Scaffold; GPU measure open |
 
-Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7, first-class train path #34). Default **off**. Use when training with `BDH_ATTN_IMPL=blocked|triton|cuda`. T=1 CacheManager decode / `generate` stay on the decode path.
+Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7/#39). Default **off**. With `IMPL=blocked|online|triton|cuda`, bwd is **tiled** (no full T×T); eager keeps dense M-recompute. T=1 CacheManager decode / `generate` stay on the decode path.
 
 ```bash
 export BDH_ATTN_IMPL=eager     # default
@@ -154,7 +154,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | Knob | Production-safe default | When to flip |
 |------|-------------------------|--------------|
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
-| `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn forwards (#34) |
+| `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` | `0` | `1` after probe succeeds; prefer GPU for real win |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on CUDA train boxes |
