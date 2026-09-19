@@ -6539,3 +6539,37 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q
 - No softmax, scaling, diagonal inclusion, or change to raw score × strict
   `tril(diagonal=-1)` semantics.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+## opt/gen-copy-v2 — confirm post-#110 generate copy ceiling (2026-09-19)
+
+**Branch:** `opt/gen-copy-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `748a138` (`main` after #150 triton-cold-v4; current through #150).
+
+### Audit / verdict
+
+The post-#110 generate path was audited again with the default eager,
+`temperature=1.0`, `top_k=None` contract. No further default-safe cut was
+found, so this PR is a small CPU probe/documentation update; `bdh.py` is
+unchanged.
+
+| Remaining source | Current contract | Safe cut status |
+|---|---|---|
+| Packed V slot `dst_v.copy_(v_tok)` | Owns the `(B, 1, T, D)` cache snapshot before residual LN reuses/replaces `x`; about one write per layer and forward step | Required unless cache ownership/layout changes |
+| RoPE pair store | `_store_pairs` already writes one fp32 `copy_` per layer/step with no `cat`; T>1 prefill and T=1 decode share this path | Already at the safe eager floor |
+| Default `torch.multinomial(..., out=idx_out)` | `out=` removes the caller-side token assignment, but ATen still performs internal copy/conversion work (about four `copy_` events per B=1 sample on this CPU build) | Removing it requires a custom sampler or RNG/layout change |
+| Prompt seed copy | One initial `out[:, :prompt_len].copy_(idx)` establishes owned output storage | Required for the preallocated cat-free output contract |
+
+The tiny `test_remaining_generate_copy_ceiling_probe` probe checks both
+remaining classes directly: an owned V destination must retain its snapshot
+after the source is reused, and `torch.multinomial(out=...)` still emits
+internal `aten::copy_` work. The existing attribution probe continues to
+account for the warmed generate total at about **394 `copy_`/call** with
+`aten::cat=0`; the exact count is CPU-build evidence, not a GPU claim.
+
+### Validation / non-goals
+
+- Default eager dispatch, strict raw `tril(diagonal=-1)`, token parity, and
+  cat-free generate remain unchanged.
+- No custom sampler, cache-layout change, default RNG-stream change, or GPU
+  timing claim.
+- No public or `pathwaycom/*` PRs; private repository only.

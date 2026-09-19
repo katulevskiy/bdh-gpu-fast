@@ -279,6 +279,36 @@ def test_topk_gather_out_parity_and_one_fewer_copy():
     assert n_out < n_copy, f"gather out= {n_out} should be < gather+copy_ {n_copy}"
 
 
+def test_remaining_generate_copy_ceiling_probe():
+    """Probe the owned V snapshot and ATen sampler copies left after #110."""
+    cfg = _cfg(n_embd=16, n_head=4, mlp_internal_dim_multiplier=4)
+    cache = CacheManager.from_config(
+        cfg, batch_size=1, max_seq=1, device=torch.device("cpu")
+    )
+    source = torch.randn(1, 1, 1, cfg.n_embd)
+    _, dst_v = cache.reserve(0, 1)
+    with profile(activities=[ProfilerActivity.CPU]) as p_v:
+        for _ in range(8):
+            dst_v.copy_(source)
+    v_copy = next(e.count for e in p_v.key_averages() if e.key == "aten::copy_")
+    source.zero_()
+    # The packed cache must retain its own snapshot after residual x is reused.
+    assert not torch.equal(dst_v, source)
+    assert v_copy == 8
+
+    probs = torch.softmax(torch.randn(1, 64), dim=-1)
+    idx_out = torch.empty(1, 1, dtype=torch.long)
+    with profile(activities=[ProfilerActivity.CPU]) as p_multi:
+        for _ in range(8):
+            torch.multinomial(probs, num_samples=1, out=idx_out)
+    multi_copy = next(
+        e.count for e in p_multi.key_averages() if e.key == "aten::copy_"
+    )
+    # Even with out=, ATen's default multinomial implementation retains
+    # internal copy_ work; replacing it would change the default RNG contract.
+    assert multi_copy >= 8
+
+
 def test_vcopy_attribution_buckets_sum_near_total():
     """Probe: V + RoPE + multinomial explain ~all generate aten::copy_."""
     cfg = _cfg(n_layer=4, n_embd=128, n_head=4)
