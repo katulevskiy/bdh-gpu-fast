@@ -105,3 +105,34 @@ def test_enforced_guardrail_fails_when_only_xy_misses_floor(monkeypatch, capsys)
     assert "final_x=0.2100 final_xy=0.0700" in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=2 reason=guardrail_failed" in captured.err
+
+
+def test_enforced_guardrail_pass_allows_crossover(monkeypatch, capsys):
+    """A passing enforced sample must permit the optional crossover sweep."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.20, "y": 0.25, "xy": 0.08}],
+    )
+    calls = []
+
+    def fake_bench_matmul(M, K, N, density, seed=0):
+        calls.append((M, K, N, density, seed))
+        return {
+            "density_measured": density,
+            "dense_ms": 1.0,
+            "coo_ms": 2.0,
+            "csr_ms": 2.0,
+            "row_ms": 2.0,
+            "col_ms": 2.0,
+        }
+
+    monkeypatch.setattr(probe, "bench_matmul", fake_bench_matmul)
+    assert probe.main(["--enforce-density-guardrail"]) == probe.EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=pass" in captured.out
+    assert "CPU sparse vs dense crossover" in captured.out
+    assert len(calls) == 3 * 8
+    assert "exit_code=0 reason=probe_complete" in captured.out
