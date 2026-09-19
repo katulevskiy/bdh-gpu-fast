@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 9
+    assert summary["schema_version"] == 10
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -47,6 +47,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
             "cuda_runtime_state": summary["cuda_runtime_state"],
             "cuda_built": summary["cuda_built"],
             "cuda_device_count": summary["cuda_device_count"],
+            "cuda_device_probe_error": summary["cuda_device_probe_error"],
         }
     ]
     assert summary["timing_scope"] == "none"
@@ -117,6 +118,7 @@ def test_cuda_runtime_diagnostics_survives_device_probe_failure(monkeypatch):
 
     assert result["cuda_built"] is True
     assert result["cuda_device_count"] == 0
+    assert result["cuda_device_probe_error"] == "RuntimeError: driver query failed"
     assert result["cuda_runtime_state"] == "runtime_unavailable"
 
 
@@ -153,11 +155,14 @@ def test_no_cuda_skip_stays_structured_when_device_probe_fails(
     assert summary["timing_scope"] == "none"
     assert summary["cuda_built"] is True
     assert summary["cuda_device_count"] == 0
+    assert summary["cuda_device_probe_error"] == "RuntimeError: driver query failed"
     assert summary["cuda_runtime_state"] == "runtime_unavailable"
     assert summary["skips"][0]["cuda_runtime_state"] == "runtime_unavailable"
+    assert summary["skips"][0]["cuda_device_probe_error"] == "RuntimeError: driver query failed"
     assert "results" not in summary
     assert "GPU_ATTN_SKIP status=skip reason=cuda_unavailable" in output
     assert "timing_scope=none" in output
+    assert "cuda_device_probe_error=RuntimeError: driver query failed" in output
     assert "median ms" not in output
 
 
@@ -194,7 +199,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 9
+    assert summary["schema_version"] == 10
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
