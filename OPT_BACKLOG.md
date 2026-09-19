@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b160469` (documented tip `d3ff475` after docs-only #40; current main tip `8e2f5a0` after #41), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b160469` (documented tip `d3ff475` after docs-only #40; current main tip `94fa3b1` after #44), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -26,7 +26,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - KV-style cache + incremental `generate`
 - MLP `permute → contiguous → view`
 - Vectorized `train.get_batch` (+ pin/non_blocking CUDA; optional DataLoader workers #14)
-- BatchPrefetcher v2: host-thread queue double-buffer + numpy producer gather (`opt/prefetch-v2`); synthetic overlap ~1.6×; e2e CPU ~noise
+- BatchPrefetcher v2: host-thread queue double-buffer + numpy producer gather (`opt/prefetch-v2` #42); synthetic overlap ~1.7×; e2e CPU ~noise; GPU pin/H2D overlap open
 - Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked still < eager after `opt/blocked-vec`; GPU unmeasured
 - Experimental sparse ReLU matmul (default off); **short-train density + CPU crossover** (`opt/sparse-probe`) — keep OFF
 - CUDA extension scaffold for tril score×V (optional build)
@@ -50,6 +50,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - MLP fuse: bias+ReLU + merge without unconditional `.contiguous()` (`opt/mlp-fuse` #36); profile-v3: `aten::contiguous`=0
 - CUDA attn CPU refs + build smoke deepen (`opt/cuda-ref-v2` #37)
 - Profile-v3 docs refresh (`opt/profile-v3` #40) — documented tip `d3ff475`; profile source tip `b160469`; no code or GPU measurement
+- OPT status matrix refresh (`opt/docs-matrix-v2` #43) — docs-only through #40
+- Generate Python/host tax (`opt/gen-host` #44) — CPU ~1.31×, `arange` 33→1; remaining P1 is GPU decode GEMM
 
 ## Ranked next work
 
@@ -77,13 +79,15 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Re-profile post-mlp-fuse | **Landed** #40 `opt/profile-v3` — profile source tip `b160469`; documented tip `d3ff475`; cats=0; contiguous=0 |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
+| Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
+| OPT status docs refresh | **Landed** #43 `opt/docs-matrix-v2` — matrix through #40 |
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22; CPU 0-vs-1 train bench `opt/compile-bench`; remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
-| Generate Python/host tax | **Landed** `opt/gen-host` — RoPE table, hoist dispatch/sampling; CPU ~1.3×, arange 33→1 |
+| Generate Python/host tax | **Landed** #44 `opt/gen-host` — RoPE table, hoist dispatch/sampling; CPU ~1.3×, `arange` 33→1; GPU decode GEMM remains P1 |
 
 | **P2** | **Analytic attn train on GPU** | CPU blocked|online + tiled analytic bwd landed (`opt/blocked-autograd` #41). **GPU** train-step with `IMPL=blocked|triton|cuda` + AUTOGRAD=1 unmeasured. | A100/H100 `bench_attn_bwd.py` | Low |
 

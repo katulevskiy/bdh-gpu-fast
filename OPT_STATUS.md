@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#40)
+# OPT status — landed work (#1–#44)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `d3ff475` (`opt/profile-v3` #40 on `main`; profile captured at `b160469` after #39).
+Tip documented here: `94fa3b1` (`opt/gen-host` #44 on `main`; includes #41 blocked-autograd, #42 prefetch-v2, and #43 docs refresh).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -41,7 +41,7 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 | `triton` | Triton fused on CUDA; else blocked | Triton decode + `V_BROADCAST`; else blocked | Needs CUDA + Triton to run kernel |
 | `cuda` | Native ext if built (`BDH_BUILD_EXT=1`), else PyTorch ref | `tril_decode` tiled / ref | Scaffold; GPU measure open |
 
-Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7/#39). Default **off**. With `IMPL=blocked|online|triton|cuda`, bwd is **tiled** (no full T×T); eager keeps dense M-recompute. T=1 CacheManager decode / `generate` stay on the decode path.
+Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7/#39/#41). Default **off**. With `IMPL=blocked|online|triton|cuda`, bwd is **tiled** (no full T×T); eager keeps dense M-recompute. T=1 CacheManager decode / `generate` stay on the decode path.
 
 ```bash
 export BDH_ATTN_IMPL=eager     # default
@@ -80,6 +80,22 @@ BDH_COMPILE=0 python train.py
 BDH_COMPILE=1 BDH_COMPILE_PROBE=train python train.py
 ```
 
+### `BDH_PREFETCH_ASYNC` — host batch prefetch (default `1`)
+
+| Env | Default | Meaning |
+|-----|---------|---------|
+| `BDH_PREFETCH_ASYNC` | `1` | `BatchPrefetcher` uses a daemon host producer and depth-1 queue; set `0` for synchronous preload / A-B |
+
+Async mode overlaps the next numpy host gather (and CUDA pinning) with
+`train_step`; CUDA H2D is issued on the caller side stream. Public `get_batch`
+semantics are unchanged. Real gather is already ~0.07 ms on this CPU box, so
+e2e CPU gains are usually small/noisy; GPU pin/H2D overlap remains unmeasured.
+
+```bash
+BDH_PREFETCH_ASYNC=1 python train.py  # default
+BDH_PREFETCH_ASYNC=0 python train.py  # sync debug / A-B
+```
+
 ### `BDH_AMP_DTYPE` — train autocast (default `float32` / unset)
 
 | Value | Autocast | GradScaler |
@@ -98,7 +114,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 
 ---
 
-## Landed opts (#1–#40)
+## Landed opts (#1–#44)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -142,6 +158,10 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **38** | `opt/blocked-vec` | Vectorized CPU blocked/online tril tiles | ~18–36× vs old blocked wall; still < eager | Default eager unchanged |
 | **39** | `opt/attn-bwd-train` | Analytic `StrictTrilAttnFn` first-class train path (`BDH_ATTN_AUTOGRAD`); cold+multi-token wiring; `bench_attn_bwd.py` | Grad parity @ dropout=0; CPU tiny train_step ~noise | GPU train unmeasured |
 | **40** | `opt/profile-v3` | Re-profiled post-#36 through #39; refreshed `OPT_STATUS` / `OPT_BACKLOG` / `OPT_NOTES` | Docs/profile only; generate `aten::cat`=0, forward `aten::contiguous`=0 | No GPU measurements; defaults unchanged |
+| **41** | `opt/blocked-autograd` | Blocked/online forward + **tiled** analytic backward under `BDH_ATTN_AUTOGRAD=1`; `online` aliases to `blocked` | CPU grad parity; tiny train-step ~1.9× vs AUTOGRAD-off in one honest run | GPU train A/B open |
+| **42** | `opt/prefetch-v2` | Host-thread depth-1 batch prefetch, numpy producer gather, optional CUDA pin/H2D overlap; `BDH_PREFETCH_ASYNC=0` sync A/B | Synthetic overlap ~1.7×; real CPU e2e ~noise/modest | GPU pin/H2D overlap unmeasured |
+| **43** | `opt/docs-matrix-v2` | Refreshed `OPT_STATUS` / `OPT_BACKLOG` through #40 and README pointer | Docs only | — |
+| **44** | `opt/gen-host` | Warm full-span RoPE table; hoist dispatch/sampling; `inference_mode`; preserve cat-free generate and default eager math | CPU generate ~52.34→39.84 ms (~1.31×); `arange` 33→1; tokens match | No GPU measurement |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
@@ -158,6 +178,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` | `0` | `1` after probe succeeds; prefer GPU for real win |
+| `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on CUDA train boxes |
 | Sparse ReLU | OFF | Only if density + GPU sparse kernel win |
 
