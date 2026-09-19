@@ -2130,3 +2130,69 @@ biases unset / dropout=0).
 - No change to default `BDH_ATTN_IMPL=eager`
 - No softmax / diagonal inclusion / scale
 - No re-introducing `aten::cat` in generate / CacheManager
+
+## opt/cuda-ref-v2 — deepen CUDA attn CPU refs + build smoke (2026-09-19)
+
+**Branch:** `opt/cuda-ref-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f50837d` (main after mlp-fuse).
+
+### Goal
+
+Deepen CUDA/C++ attention scaffolds (`csrc/` + `kernels/cuda_attn.py`) for
+**correctness and CPU-ref quality** so a GPU `BDH_BUILD_EXT` build is drop-in
+ready: better tiled online cold+decode refs, clearer `BDH_BUILD_EXT` docs, and
+build smoke that soft-fails when the native ext is missing. **No GPU speedups
+claimed** (this box has no CUDA device).
+
+### What landed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/cuda_attn.py` | `tril_score_v_ref` golden eager (bit-identical); **`tril_score_v_tiled_ref`** CUDA-mirror TILE_M/N=16 online cold (no full T×T); **`tril_decode_tiled_ref`** + `tril_decode_ref` tiles large past; dispatch prefers tiled for large T when native missing (less T×T staging); soft import unchanged |
+| `csrc/tril_attn_cpu.cpp` | Eager vectorized for small T/S; tiled online (TILE_M/N=16) for large; `maybe_acc` — no float cast when already f32/f64; **no V expand** (matmul broadcast) |
+| `csrc/tril_attn.h` | Docs for CPU tiled / staging policy |
+| `setup.py` / `pyproject.toml` | Explicit `BDH_BUILD_EXT` / `BDH_BUILD_CUDA` / `BDH_FORCE_CPU_EXT` docs |
+| `kernels/README.md` | Honesty: CPU refs ≠ GPU wins; tiled ref API table |
+| `tests/test_cuda_attn.py` | Soft-import smoke; tiled≡eager; multi-tile + broadcast |
+| `tests/test_cuda_decode.py` | Soft-import smoke; tiled decode≡eager; long-past tile branch |
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K.T).tril(diagonal=-1) @ V   # cold — no softmax, no 1/√d
+out = (Q @ K_past.mT) @ V_past          # decode — past-only, no self
+```
+
+### Build
+
+```bash
+pip install -e .                                          # pure Python (default)
+BDH_BUILD_EXT=1 pip install -e . --no-build-isolation     # optional native
+BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+export BDH_ATTN_IMPL=cuda   # cold + decode via kernels.cuda_attn
+# default BDH_ATTN_IMPL=eager unchanged
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_cuda_attn.py tests/test_cuda_decode.py -q
+# CPU refs + tiled mirrors always; CUDA/native skipped without GPU/ext
+```
+
+### Honest limits
+
+- **No GPU on this box** — tiled `.cu` kernels unexecuted; CPU tiled refs validate
+  the online structure that the GPU build will run.
+- Native ext may be absent; `import kernels.cuda_attn` **never** raises
+  (`has_cuda_ext()==False`, `ext_status()` reports soft failure).
+- Tiled refs are **bit-close** to eager (same math; tile accumulation order may
+  differ in ulps on long T). Golden `tril_score_v_ref` stays bit-identical.
+- Still no softmax / no scale / no SDPA / no pathwaycom PRs.
+- Do **not** default `BDH_ATTN_IMPL=cuda`. Do **not** claim GPU speedups.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No fake GPU speedups from CPU medians

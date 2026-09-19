@@ -24,11 +24,13 @@ from bdh_cache import CacheManager
 from kernels.attention import eager_decode_attn, eager_tril_attn
 from kernels.attention_dispatch import bdh_attn_decode
 from kernels.cuda_attn import (
+    CUDA_TILE_N,
     ext_status,
     has_cuda_ext,
     has_cuda_kernel,
     tril_decode,
     tril_decode_ref,
+    tril_decode_tiled_ref,
 )
 
 
@@ -38,6 +40,18 @@ def _make_decode_qkv(B=2, H=4, S=32, N=16, D=64, Tq=1, seed=0):
     K = torch.randn(B, H, S, N, generator=g)
     V = torch.randn(B, 1, S, D, generator=g)
     return Q, K, V
+
+
+def test_import_fails_soft_decode():
+    """Build smoke: decode API usable when native ext missing."""
+    import kernels.cuda_attn as ca
+
+    assert isinstance(ca.ext_status(), str)
+    Q, K, V = _make_decode_qkv(S=8, seed=99)
+    out = ca.tril_decode(Q, K, V)
+    assert out.shape == (2, 4, 1, 64)
+    if not ca.has_cuda_ext():
+        assert "unavailable" in ca.ext_status()
 
 
 def test_ext_status_mentions_decode():
@@ -59,6 +73,45 @@ def test_decode_ref_broadcast_v_heads():
     assert torch.allclose(out, gold, rtol=1e-5, atol=1e-5)
 
 
+def test_decode_tiled_ref_matches_eager():
+    """CUDA-mirror tiled decode ≡ eager (bit-close / identical on modest S)."""
+    assert CUDA_TILE_N == 16
+    Q, K, V = _make_decode_qkv(S=48, Tq=1, seed=20)
+    tiled = tril_decode_tiled_ref(Q, K, V)
+    gold = eager_decode_attn(Q, K, V)
+    assert torch.allclose(tiled, gold, rtol=1e-5, atol=1e-5)
+    # Custom tile width
+    tiled4 = tril_decode_tiled_ref(Q, K, V, tile_n=4)
+    assert torch.allclose(tiled4, gold, rtol=1e-5, atol=1e-5)
+
+
+def test_decode_tiled_ref_multi_tile_and_broadcast():
+    """Past length spanning many TILE_N chunks + V=(B,1,...) ."""
+    g = torch.Generator().manual_seed(21)
+    B, H, S, N, D = 2, 4, 80, 8, 16  # S > 4 * TILE_N
+    Q = torch.randn(B, H, 1, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    V = torch.randn(B, 1, S, D, generator=g)
+    tiled = tril_decode_tiled_ref(Q, K, V)
+    gold = eager_decode_attn(Q, K, V)
+    assert tiled.shape == gold.shape
+    assert torch.allclose(tiled, gold, rtol=1e-5, atol=1e-5)
+
+
+def test_decode_ref_long_past_tiles():
+    """tril_decode_ref switches to tiled path for large Tq×S footprint."""
+    # Force tiled branch: Tq * S > 256*256
+    g = torch.Generator().manual_seed(22)
+    B, H, Tq, S, N, D = 1, 1, 64, 2048, 8, 8
+    Q = torch.randn(B, H, Tq, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    V = torch.randn(B, 1, S, D, generator=g)
+    out = tril_decode_ref(Q, K, V)
+    gold = eager_decode_attn(Q, K, V)
+    assert out.shape == gold.shape
+    assert torch.allclose(out, gold, rtol=1e-4, atol=1e-4)
+
+
 def test_decode_matches_full_tril_last_row():
     """Concat Q into K/V + tril(-1); last query row must match decode."""
     B, H, S, N, D = 2, 4, 16, 8, 32
@@ -77,6 +130,10 @@ def test_decode_matches_full_tril_last_row():
     V_all2 = torch.cat([past_v, torch.randn_like(V_new)], dim=2)
     full2 = eager_tril_attn(K_all, K_all, V_all2)
     assert torch.allclose(full[:, :, -1:, :], full2[:, :, -1:, :], atol=0)
+    # Tiled decode agrees with last row too
+    assert torch.allclose(
+        tril_decode_tiled_ref(q, past_k, past_v), last, rtol=1e-5, atol=1e-5
+    )
 
 
 def test_decode_s0_zeros():
@@ -86,6 +143,7 @@ def test_decode_s0_zeros():
     out = tril_decode_ref(Q, K, V)
     assert out.shape == (1, 2, 1, 16)
     assert torch.all(out == 0)
+    assert torch.all(tril_decode_tiled_ref(Q, K, V) == 0)
 
 
 def test_tril_decode_dispatch_cpu():

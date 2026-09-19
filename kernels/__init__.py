@@ -8,12 +8,17 @@ from .rope_dispatch import (
 )
 from .attention_bwd import StrictTrilAttnFn, analytic_tril_attn_backward, strict_tril_attn
 from .cuda_attn import (
+    CUDA_TILE_M,
+    CUDA_TILE_N,
+    ext_status,
     has_cuda_ext,
     has_cuda_kernel,
     tril_decode,
     tril_decode_ref,
+    tril_decode_tiled_ref,
     tril_score_v,
     tril_score_v_ref,
+    tril_score_v_tiled_ref,
 )
 
 __all__ = [
@@ -26,10 +31,15 @@ __all__ = [
     "analytic_tril_attn_backward",
     "tril_score_v",
     "tril_score_v_ref",
+    "tril_score_v_tiled_ref",
     "tril_decode",
     "tril_decode_ref",
+    "tril_decode_tiled_ref",
     "has_cuda_ext",
     "has_cuda_kernel",
+    "ext_status",
+    "CUDA_TILE_M",
+    "CUDA_TILE_N",
     "bdh_rope_rotate",
     "resolve_rope_impl",
     "rope_backend_info",

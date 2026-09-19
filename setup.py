@@ -1,19 +1,30 @@
 """Optional build for bdh_cuda_ext (strict tril score×V).
 
-Pure-Python path (always)::
+Pure-Python path (always — **default**, no compiler required)::
 
-    # no install required — kernels/cuda_attn.py CPU ref works as-is
-    python -m pytest tests/test_cuda_attn.py -v
+    pip install -e .
+    # or just run against the checkout — kernels/cuda_attn.py CPU refs work as-is
+    python -m pytest tests/test_cuda_attn.py tests/test_cuda_decode.py -v
 
 Optional native scaffold (needs working torch C++ ABI + compiler; CUDA for .cu)::
 
     BDH_BUILD_EXT=1 pip install -e . --no-build-isolation
-    # or with CUDA objects even without a device:
+    # force compile of .cu even without a visible CUDA device (needs nvcc):
     BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
+    # force CPU-only ext even if torch.cuda.is_available():
+    BDH_BUILD_EXT=1 BDH_FORCE_CPU_EXT=1 pip install -e . --no-build-isolation
+
+Env flags
+---------
+BDH_BUILD_EXT=1     Opt-in: compile ``csrc/`` into ``bdh_cuda_ext``.
+                    Absent / any other value → pure-Python install (no compile).
+BDH_BUILD_CUDA=1    With BDH_BUILD_EXT: force CUDAExtension + ``tril_attn_cuda.cu``.
+BDH_FORCE_CPU_EXT=1 With BDH_BUILD_EXT: skip CUDA objects even if a GPU is present.
 
 If the native build fails (common on mismatched g++/torch), training and tests
-still use kernels.cuda_attn.tril_score_v_ref — the CUDA .cu scaffold remains
-ready for a GPU box with a matching toolchain.
+still use ``kernels.cuda_attn`` CPU refs — soft import, never hard-fail at
+import time. The CUDA ``.cu`` scaffold remains ready for a GPU box with a
+matching toolchain. Do **not** claim GPU speedups from CPU-only boxes.
 """
 
 from __future__ import annotations
@@ -27,7 +38,7 @@ ROOT = Path(__file__).parent
 
 
 def _extensions():
-    """Build C++/CUDA only when explicitly requested."""
+    """Build C++/CUDA only when explicitly requested via BDH_BUILD_EXT=1."""
     if os.environ.get("BDH_BUILD_EXT", "") != "1":
         print(
             "bdh-gpu-opt: pure-Python install "
