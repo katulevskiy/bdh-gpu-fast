@@ -412,10 +412,11 @@ def test_successful_backward_probe_returns_clean_wrapper(
 
 
 @pytest.mark.parametrize("caller_training", [False, True])
+@pytest.mark.parametrize("with_targets", [False, True])
 def test_eval_probe_is_no_grad_and_restores_caller_state(
-    monkeypatch, capsys, caller_training
+    monkeypatch, capsys, caller_training, with_targets
 ):
-    """The eval probe uses no-grad and restores the caller's mode."""
+    """The eval probe uses no-grad with or without targets and restores mode."""
     import train as tr
 
     monkeypatch.setenv("BDH_COMPILE", "1")
@@ -433,12 +434,14 @@ def test_eval_probe_is_no_grad_and_restores_caller_state(
             self.calls = 0
             self.training_at_call = []
             self.grad_enabled_at_call = []
+            self.targets_at_call = []
 
-        def forward(self, x):
+        def forward(self, x, y=None):
             self.calls += 1
             self.training_at_call.append(self.training)
             self.grad_enabled_at_call.append(torch.is_grad_enabled())
-            return self.module(x)
+            self.targets_at_call.append(y)
+            return self.module(x, y) if y is not None else self.module(x)
 
     model = bdh.BDH(_small_cfg()).train(caller_training)
     wrapper = EvalProbe(model)
@@ -451,8 +454,9 @@ def test_eval_probe_is_no_grad_and_restores_caller_state(
     monkeypatch.setattr(tr.torch, "compile", compile_spy)
 
     x = torch.randint(0, 256, (2, 8))
+    y = torch.randint(0, 256, (2, 8)) if with_targets else None
     try:
-        out = tr.maybe_compile(model, example_x=x)
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
     finally:
         monkeypatch.setenv("BDH_COMPILE", "0")
         monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
@@ -463,6 +467,7 @@ def test_eval_probe_is_no_grad_and_restores_caller_state(
     assert wrapper.calls == 1
     assert wrapper.training_at_call == [False]
     assert wrapper.grad_enabled_at_call == [False]
+    assert (wrapper.targets_at_call[0] is not None) is with_targets
     assert out is wrapper
     assert out.training is caller_training
     assert model.training is caller_training
