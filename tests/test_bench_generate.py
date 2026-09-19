@@ -168,6 +168,22 @@ def test_run_auto_ab_sweep_continues_after_failed_threshold(monkeypatch):
     assert calls == [256, 512]
 
 
+def test_run_auto_ab_sweep_without_sweep_delegates_unchanged(monkeypatch):
+    """No sweep keeps the single-run path and its original arguments."""
+    calls = []
+    args = argparse.Namespace(auto_threshold_sweep=None)
+    device = object()
+
+    def fake_run_auto_ab(got_args, got_device):
+        calls.append((got_args, got_device))
+        return 7
+
+    monkeypatch.setattr(bench_generate, "run_auto_ab", fake_run_auto_ab)
+
+    assert bench_generate.run_auto_ab_sweep(args, device) == 7
+    assert calls == [(args, device)]
+
+
 def test_run_auto_ab_sweep_rejects_invalid_values_before_model_setup(
     monkeypatch, capsys
 ):
