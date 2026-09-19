@@ -153,6 +153,35 @@ def test_prefetch_h2d_opt_out_does_not_probe_cuda(tr, monkeypatch):
         loader.close()
 
 
+def test_prefetch_h2d_global_opt_out_does_not_probe_cuda(tr, monkeypatch):
+    """The default H2D flag opt-out skips CUDA probing and allocation."""
+    monkeypatch.setattr(tr, "device", torch.device("cuda"))
+    monkeypatch.setattr(tr, "USE_PREFETCH_H2D", False)
+
+    def fail_cuda_probe():
+        pytest.fail("global H2D opt-out must not query CUDA availability")
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("global H2D opt-out must not construct CUDA stream/event objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "is_available", fail_cuda_probe)
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    monkeypatch.setattr(
+        tr.BatchPrefetcher,
+        "_gather_pinned_host",
+        lambda self: (torch.zeros(1, 1, dtype=torch.int64),) * 2,
+    )
+    loader = tr.BatchPrefetcher("train", async_host=False)
+    try:
+        assert tr.USE_PREFETCH_H2D is False
+        assert loader._cuda_staging is False
+        assert loader._stream is None
+        assert loader._device_next is None
+    finally:
+        loader.close()
+
+
 def test_prefetch_h2d_skip_reason_is_cpu_safe(tr, monkeypatch):
     """The H2D gate reports CPU/runtime skips without CUDA construction."""
     assert tr.prefetch_h2d_skip_reason() == "device-not-cuda: cpu"
