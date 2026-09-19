@@ -4965,3 +4965,38 @@ cuts the **avoidable** QR layout tax. `aten::contiguous` remains 0; generate
 - No default `BDH_ATTN_IMPL` / `BDH_ROPE_IMPL` change
 - No softmax / scale / SDPA / diagonal inclusion
 - No fake GPU wins from CPU copy_ counts
+
+
+## opt/attn-bwd-gpu-scaffold — CUDA analytic-train harness (2026-09-19)
+
+**Branch:** `opt/attn-bwd-gpu-scaffold` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `8e7a4d2` (`main`, copy-tax-v1 / #95).
+**Base tip:** `3cac6d7` (`main`, docs-v17 / #94).
+
+### Audit and scaffold
+
+- `bdh.Attention.forward` already routes cold and multi-token-with-past train
+  work through `bdh_attn` when `BDH_ATTN_AUTOGRAD=1`; T=1 decode remains the
+  no-grad CacheManager path. No default train wiring change was needed.
+- `benchmarks/bench_attn_bwd.py` now gates on `torch.cuda.is_available()` before
+  allocation and exits 0 with `SKIP` on CPU. On CUDA it runs the full
+  `IMPL=eager|blocked|triton|cuda` × `AUTOGRAD=0|1` matrix, reports effective
+  fallbacks, and parity-checks loss and every parameter gradient before timing.
+- `--dtype` / `BDH_ATTN_BWD_DTYPE` (float32 default; bf16/fp16 supported),
+  batch/tokens, warmup, and repetitions are explicit. Default B=4/T=64 remains
+  a smoke case; use B=8/T=256+ for occupancy and T>=512 for memory studies.
+  Native Triton/CUDA forward paths without an autograd graph are reported as
+  skipped for AUTOGRAD=0, never as speed wins.
+
+### Validation
+
+```text
+python benchmarks/bench_attn_bwd.py
+# SKIP: CUDA unavailable; bench_attn_bwd requires a real CUDA device
+# exit 0
+python -m pytest tests/test_attn_bwd.py tests/test_attn_bwd_bench.py -q
+# CPU parity matrix passes; CUDA-only harness skip contract passes
+```
+
+No GPU timing or speedup is claimed from this CPU-only box. Defaults remain
+`BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTOGRAD=0`, and no attention math changes.
