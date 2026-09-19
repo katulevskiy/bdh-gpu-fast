@@ -648,6 +648,12 @@ def maybe_compile(
     - CUDA graphs (``mode='reduce-overhead'``) need a real GPU + static shapes;
       on CPU this mode is accepted but is **not useful** (no CUDA graphs) —
       prefer ``default``; soft-fallback still applies if compile/probe fails.
+
+    ``BDH_COMPILE_FULLGRAPH=1`` applies to the module probe, not the Python
+    optimizer step. With ``BDH_ATTN_AUTOGRAD=1`` and ``train_bwd`` the probe
+    also exercises the analytic attention backward path; a graph-break or
+    unsupported backward still soft-falls back to the original eager module.
+    The optimizer step and gradient clearing remain eager in either case.
     """
     if not USE_COMPILE:
         print("torch.compile disabled (set BDH_COMPILE=1 to enable)")
@@ -686,10 +692,11 @@ def maybe_compile(
     try:
         compiled = torch.compile(model, **compile_kwargs)
     except Exception as e:
-        fg_note = f" fullgraph={COMPILE_FULLGRAPH}" if COMPILE_FULLGRAPH else ""
         print(
-            f"torch.compile failed ({type(e).__name__}: {e}); using eager "
-            f"[device={device_tag} mode={COMPILE_MODE}{fg_note}]"
+            f"torch.compile failed ({type(e).__name__}: {e}); "
+            "soft-fallback to original eager module "
+            f"[device={device_tag} mode={COMPILE_MODE} probe={probe} "
+            f"fullgraph={COMPILE_FULLGRAPH}]"
         )
         return model
 
@@ -706,7 +713,9 @@ def maybe_compile(
         # module is a soft fallback and avoids a first-step surprise.
         print(
             "torch.compile probe skipped: BDH_COMPILE_PROBE=train_bwd requires "
-            f"example_y; using eager [device={device_tag} mode={COMPILE_MODE}]"
+            f"example_y; soft-fallback to original eager module "
+            f"[device={device_tag} mode={COMPILE_MODE} probe={probe} "
+            f"fullgraph={COMPILE_FULLGRAPH}]"
         )
         return model
 
@@ -741,10 +750,11 @@ def maybe_compile(
             f"fullgraph={COMPILE_FULLGRAPH}, device={device_tag})"
         )
     except Exception as e:
-        fg_note = f" fullgraph={COMPILE_FULLGRAPH}" if COMPILE_FULLGRAPH else ""
         print(
-            f"torch.compile probe failed ({type(e).__name__}: {e}); using eager "
-            f"[probe={probe} device={device_tag} mode={COMPILE_MODE}{fg_note}]"
+            f"torch.compile probe failed ({type(e).__name__}: {e}); "
+            "soft-fallback to original eager module "
+            f"[probe={probe} device={device_tag} mode={COMPILE_MODE} "
+            f"fullgraph={COMPILE_FULLGRAPH}]"
             + (
                 " — FULLGRAPH=1 requires a single Dynamo graph (graph breaks "
                 "unsupported); soft-fallback to eager"
