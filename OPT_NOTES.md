@@ -183,3 +183,64 @@ custom sparse×dense decoder). Do not wire into `BDH.forward` yet.
 python -m pytest tests/test_sparse.py -v
 python benchmarks/bench_sparse.py
 ```
+
+## opt/triton-attn — strict-tril score@V kernel (Triton + PyTorch)
+
+**Branch:** `opt/triton-attn` (private `katulevskiy/bdh-gpu-opt` only).
+
+### Semantics (unchanged)
+
+```text
+out = tril(Q @ K.T, diagonal=-1) @ V
+```
+
+- **No** softmax, **no** `1/sqrt(d)`, diagonal **excluded**.
+- Not interchangeable with `F.scaled_dot_product_attention`.
+
+### What landed
+
+| Path | Role |
+|------|------|
+| `kernels/attention.py` | `eager_tril_attn` (reference), `blocked_tril_attn` (tiled, no full upper Δ), `triton_tril_attn` (CUDA Triton fused; CPU→blocked) |
+| `kernels/attention_dispatch.py` | `BDH_ATTN_IMPL=eager\|triton\|blocked` + `bdh_attn()` |
+| `bdh.py` | Thin cold-path hook; default **eager** (zero behavior change) |
+| `tests/test_triton_attn.py` | Correctness vs eager tril(-1); CUDA kernel test skipped without GPU |
+| `benchmarks/bench_triton_attn.py` | Microbench + honest CPU notes |
+
+### Wire-up
+
+```bash
+export BDH_ATTN_IMPL=eager    # default — full T×T then tril_
+export BDH_ATTN_IMPL=blocked  # tiled pure PyTorch (lower peak score memory)
+export BDH_ATTN_IMPL=triton   # Triton on CUDA; blocked fallback on CPU
+```
+
+If `bdh.py` is contended: keep calling `kernels.attention_dispatch.bdh_attn` from a one-line cold-path swap (documented in that module).
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/test_triton_attn.py -v
+# 22 passed, 1 skipped (CUDA Triton) on CPU-only box
+# blocked / triton-fallback match eager within rtol=1e-5 / atol=1e-5
+# pos0 output exactly zero; V (B,1,T,D) head broadcast preserved
+```
+
+### Benchmarks (CPU — honest)
+
+```text
+.venv/bin/python benchmarks/bench_triton_attn.py
+# device=cpu  B=2 H=4 T=128 N=64 D=128
+# correctness max|blocked-eager|≈1e-4  (fp accumulation over tiles)
+# eager   median: ~74 ms
+# blocked median: ~425 ms  (0.17× — Python tile loop slower on CPU)
+# triton  median: ~same as blocked (no CUDA → blocked fallback)
+```
+
+**No GPU on this box** — Triton kernel compiled in-tree but not executed; CUDA pytest is `skipif`. Expect the fused kernel to win on GPU by never writing the upper triangle and fusing score×V. On CPU, prefer `eager` (default); `blocked` is for lower peak score memory / parity testing.
+
+### Non-goals
+
+- No Cursor cloud agents
+- No PRs to `pathwaycom/bdh`
+- No softmax / diagonal inclusion

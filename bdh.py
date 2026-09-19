@@ -2,6 +2,7 @@
 # Optimized fork (private): see OPT_NOTES.md
 
 import dataclasses
+import os
 import math
 from typing import Optional
 
@@ -98,10 +99,17 @@ class Attention(torch.nn.Module):
         QR = self.rope(r_phases, Q)
 
         if past_kr is None:
-            # Training / cold prefill: full TxT then strict lower-triangular.
-            scores = QR @ QR.transpose(-2, -1)
-            scores.tril_(diagonal=-1)
-            out = scores @ V
+            # Training / cold prefill: strict lower-triangular score@V.
+            # BDH_ATTN_IMPL=eager|triton|blocked (default eager). See kernels/.
+            impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
+            if impl == "eager":
+                scores = QR @ QR.transpose(-2, -1)
+                scores.tril_(diagonal=-1)
+                out = scores @ V
+            else:
+                from kernels.attention_dispatch import bdh_attn
+
+                out = bdh_attn(QR, QR, V, impl=impl)
             return out, QR, V
 
         # Incremental: queries attend to all past positions + earlier positions
