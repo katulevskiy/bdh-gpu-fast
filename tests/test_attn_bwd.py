@@ -16,6 +16,7 @@ import bdh_baseline as baseline  # noqa: E402
 from kernels.attention import blocked_tril_attn, eager_tril_attn  # noqa: E402
 from kernels.attention_bwd import (  # noqa: E402
     StrictTrilAttnFn,
+    StrictTrilSelfAttnFn,
     analytic_tril_attn_backward,
     strict_tril_attn,
 )
@@ -397,3 +398,41 @@ def test_dispatch_online_autograd_env(monkeypatch):
     assert torch.allclose(Q.grad, Q2.grad, rtol=1e-4, atol=1e-4)
     assert torch.allclose(K.grad, K2.grad, rtol=1e-4, atol=1e-4)
     assert torch.allclose(V.grad, V2.grad, rtol=1e-4, atol=1e-4)
+
+
+def test_self_attn_fn_grads_match_duplicate_q():
+    """StrictTrilSelfAttnFn (Q is K) grads == StrictTrilAttnFn with distinct clones.
+
+    BDH cold path passes QR twice; SelfAttnFn sums dQ+dK. Distinct-Q/K Function
+    on equal clones must match after summing reference grads onto Q.
+    """
+    g = torch.Generator().manual_seed(99)
+    Q = torch.randn(1, 2, 6, 4, generator=g, dtype=torch.float64)
+    V = torch.randn(1, 1, 6, 5, generator=g, dtype=torch.float64)
+
+    # Reference: distinct clones through three-arg Function, then sum dQ+dK
+    Qc = Q.clone().requires_grad_(True)
+    Kc = Q.clone().requires_grad_(True)
+    Vc = V.clone().requires_grad_(True)
+    Or = StrictTrilAttnFn.apply(Qc, Kc, Vc, "blocked")
+    dO = torch.randn_like(Or)
+    Or.backward(dO)
+    dQ_ref = Qc.grad + Kc.grad
+
+    Qs = Q.clone().requires_grad_(True)
+    Vs = V.clone().requires_grad_(True)
+    Os = StrictTrilSelfAttnFn.apply(Qs, Vs, "blocked")
+    assert torch.allclose(Os, Or.detach(), rtol=1e-8, atol=1e-8)
+    Os.backward(dO.clone())
+    assert torch.allclose(Qs.grad, dQ_ref, rtol=1e-6, atol=1e-6)
+    assert torch.allclose(Vs.grad, Vc.grad, rtol=1e-6, atol=1e-6)
+
+
+def test_strict_tril_attn_routes_self_when_q_is_k():
+    """strict_tril_attn(Q, Q, V, use_fn=True) uses SelfAttnFn path (no raise)."""
+    Q = torch.randn(1, 1, 4, 3, dtype=torch.float64, requires_grad=True)
+    V = torch.randn(1, 1, 4, 2, dtype=torch.float64, requires_grad=True)
+    O = strict_tril_attn(Q, Q, V, impl="eager", use_fn=True)
+    O.sum().backward()
+    assert Q.grad is not None and V.grad is not None
+    assert torch.isfinite(Q.grad).all()

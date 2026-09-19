@@ -2605,3 +2605,82 @@ python benchmarks/bench_generate.py --warmup 2 --iters 5 --impls eager
 - No default `BDH_ATTN_IMPL` change
 - No re-introducing `aten::cat` in generate / CacheManager
 - No softmax / diagonal inclusion / scale
+
+## opt/compile-blocked — compile × blocked × autograd train matrix (2026-09-19)
+
+**Branch:** `opt/compile-blocked` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f7c69bf` (main after #45 docs refresh through #44).
+
+### Goal
+
+Prove or harden the **CPU-honest** train path for
+`torch.compile` × `BDH_ATTN_IMPL=blocked` × optional `BDH_ATTN_AUTOGRAD=1`.
+Extend the train-step harness with a full matrix; fix cheap Dynamo graph
+breaks on AUTOGRAD self-attn; smoke-test compile+blocked @ dropout=0.
+**Do not claim GPU.** Defaults stay `COMPILE=0` / `IMPL=eager` / AUTOGRAD off.
+
+### Dynamo fix (cheap)
+
+`bdh_attn(QR, QR, V)` passed the **same** tensor twice into
+`StrictTrilAttnFn.apply`, which Dynamo rejects (`gb6297` duplicate tensor
+input) → ~9 graph breaks per cold train forward under `AUTOGRAD=1`.
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention_bwd.py` | `StrictTrilSelfAttnFn(Q, V, impl)` when `Q is K`; bwd returns `dQ+dK` |
+| `strict_tril_attn` | Routes `Q is K` → SelfAttnFn; distinct Q/K keep three-arg Fn |
+| `kernels/__init__.py` | Export `StrictTrilSelfAttnFn` |
+
+After fix: `torch._dynamo.explain` cold train @ dropout=0 → **0 breaks** for
+eager|blocked × AUTOGRAD 0|1.
+
+### Harness
+
+`benchmarks/bench_train_step.py` → `bench_compile_blocked_matrix`:
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `BDH_BENCH_COMPILE_BLOCKED` | `1` | Run COMPILE×IMPL×AUTOGRAD matrix (`0` = skip) |
+| Cells | 8 | `COMPILE∈{0,1}` × `IMPL∈{eager,blocked}` × `AUTOGRAD∈{0,1}` |
+
+Soft-skip per cell if inductor/probe falls back. Tiny cfg
+`layers=2 d=64 nh=2 B=4 T=64 dropout=0`. Restores env after the matrix.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica, CPU-only)
+
+`torch 2.14.0+cu130`, `cuda=False`, AdamW fused, sequential cells (same process):
+
+```text
+ COMPILE     IMPL AUTOGRAD    median_ms
+       0    eager        0         7.76
+       0    eager        1         9.50
+       0  blocked        0         8.50
+       0  blocked        1        10.19
+       1    eager        0         5.25   (~1.48× vs eager/0)
+       1    eager        1         6.42
+       1  blocked        0       576.90   << slower — not a win
+       1  blocked        1       870.08   << slower — not a win
+```
+
+**Honest read:** On this CPU box, `COMPILE=1` + default **eager** still shows
+a small warm-ish win vs eager (same ballpark as `opt/compile-bench`).
+`COMPILE=1` + **blocked** is **~70–100× slower** than eager compile — inductor
+does not rescue the tiled Python block loop; keep blocked for peak-score
+memory / parity, not default train. Absolute ms are load-sensitive (a later
+warm re-run under multi-agent load inflated all compile cells into hundreds
+of ms); use **ratios**, not absolute ms, and never as GPU claims.
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/test_attn_bwd.py tests/test_compile.py -q
+# SelfAttnFn grad parity; compile×blocked forward parity @ dropout=0;
+# train_step smoke; 0 Dynamo breaks under AUTOGRAD=1
+```
+
+### Non-goals
+
+- No default `BDH_COMPILE=1` / `BDH_ATTN_IMPL=blocked` / `BDH_ATTN_AUTOGRAD=1`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No PRs to `pathwaycom/*`
+- No GPU / CUDA-graph claims from this CPU matrix
