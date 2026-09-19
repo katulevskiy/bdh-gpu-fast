@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#77)
+# OPT status — landed work (#1–#80)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `ca5038f` (`#77` auto-tune / `#76` docs matrix through #75 / `#75` prefill-blocked / `#74` docs / `#73` attn-mem / `#72` gen-long). Profile source: tip of `#68` (`b126d77`, post-#64–#66); #69–#77 are documented updates after that profile.
+Tip documented here: `19c1a59` (`#79` cuda-cold-v2 / `#78` docs matrix through #77; `#77` auto-tune / `#76` docs / `#75` prefill-blocked / `#74` docs / `#73` attn-mem). Profile source: `ca5038f` (post-#75–#77; default eager unchanged by #69–#79 on short window; re-profiled in `opt/profile-v7`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -154,7 +154,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#77)
+## Landed opts (#1–#80)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -231,11 +231,13 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **71** | `opt/docs-matrix` (through #69) | Refresh optimization matrix through #69 (`962a3b6`) | Docs only | — |
 | **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e then deepened by #75 | GPU thr re-tune open |
 | **73** | `opt/attn-mem-probe` | CPU peak-mem probe eager vs blocked vs online (`bench_attn_mem.py`) | Mid-T: peak↓ wall↑; long-T both; default eager | No GPU claims |
+| **74** | `opt/docs-matrix` (through #73) | Refresh optimization matrix through #73 (`5d63bc2`) | Docs only | — |
 | **75** | `opt/prefill-blocked` | Deepen blocked/online cold (adaptive BS@T≥256); AUTO long-T cold+decode | AUTO e2e 1.26×@1024 / 1.39×@2048; cats=0; default eager | GPU thr re-tune open |
 | **76** | `opt/docs-matrix-v10` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #75; update documented tip metadata | Docs only | — |
 | **77** | `opt/auto-tune` | Keep shared thr=512; add `BDH_ATTN_AUTO_COLD_THRESHOLD`; operator recs from #72/#73/#75 | short AUTO A/B 1.25×@1024; default AUTO off | GPU thr re-check open |
 | **78** | `opt/docs-matrix-v11` | Refresh optimization matrix through #77 | Docs only | — |
-| **…** | `opt/cuda-cold-v2` | Deepen CUDA cold tiles (adaptive TILE_M/N long-T; pair #75); CPU refs ≡ blocked/eager | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
+| **79** | `opt/cuda-cold-v2` | Deepen CUDA cold tiles (adaptive TILE_M/N long-T; pair #75); CPU refs ≡ blocked/eager | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
+| **80** | `opt/profile-v7` | Re-profile tip after #75–#77 (+ #79 on tip); refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #69–#79 off short default window | No GPU measurements; defaults unchanged |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

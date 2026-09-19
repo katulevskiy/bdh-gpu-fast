@@ -4351,3 +4351,56 @@ out = (Q @ K.T).tril(diagonal=-1) @ V   # no softmax, no 1/√d, diagonal exclud
 - No re-introducing `aten::cat` in generate / CacheManager
 - No softmax / scale / SDPA
 - No fake GPU speedups from CPU medians
+
+## opt/profile-v7 — re-profile tip after #75–#77 (2026-09-19)
+
+**Branch:** `opt/profile-v7` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `19c1a59` (`#79` cuda-cold-v2 on main; after `#78` docs / `#77` auto-tune / `#75` prefill-blocked).
+Profile windows captured at `ca5038f` (docs tip `68195dd` = #78; code tip `19c1a59` = #79 cuda-cold-v2 on top — default-eager-identical for profiling; #79 is CUDA cold opt-in only).
+Default **eager** attn unchanged by #69–#79 for the short default window:
+AUTO off, `IMPL=eager`, T=128 / prompt=16 do **not** exercise long-S AUTO,
+cold thr, CUDA/Triton decode tiles, or train log async. #74 / #76 / #78 were docs-only; #79 does not change default eager.
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+Absolute ms are **profiler-inflated** (noisy on short active windows).
+Rank by **% self CPU** and call counts. Chrome traces under `benchmarks/traces/`
+(gitignored). Compare to § opt/profile-v6 (profile source `b126d77`).
+
+### New % breakdown (self CPU)
+
+Representative midpoints on this box. Default `BDH_ATTN_IMPL=eager` throughout
+(`BDH_ATTN_AUTO` off; `cache_page_size=None`):
+
+| Mode | Top self-CPU ops | vs profile-v6 / post-#75–#77 note |
+|------|------------------|-----------------------------------|
+| Attention | `mul` ~29%, `bmm` ~23%, `copy_` ~22%, `sub` ~11%, `tril` ~0.9% | Same eager T×T shape as v6. Mix wobbles (`mul`↑ / `copy_`↑ / `sub`↑ vs v6 midpoints); **no structural default-attn change** from #69–#79. |
+| Forward | `copy_` ~26%, `mm` ~23%, `bmm` ~23%, `mul` ~13%, LN ~2%, `tril` ~0.6% | Same GEMM+copies shape. **`aten::contiguous` = 0** still (#36). Train path still einsum-led (#58 eval cache). |
+| Generate | `BDH.generate` self ~33% (noisy host attribution), `mm` ~17%, `bmm` ~11%, `mul` ~4%, LN ~3%, `einsum` ~2%; `linear` present (~0.6%) | **`aten::cat` = 0** still (#20+#57). **#58 layout-v2 still visible** (`mm`/`linear`). Short prompt=16 does **not** exercise #69 T=1 RoPE deepen, #75/#77 AUTO cold/decode, or CUDA decode tiles. |
+
+### Confirmed landed (profile-visible / structural)
+
+- **#20 / #57 cache-page:** generate still **zero `aten::cat`** (0 calls in traces).
+- **#36 mlp-fuse:** forward still **zero `aten::contiguous`**.
+- **#58 layout-v2:** generate/eval still shows cached `F.linear`/`mm` path.
+- **#69–#79** (rope-decode, dropout-compile, gen-long, attn-mem, prefill-blocked, auto-tune, cuda-cold-v2) **+ #74/#76/#78 docs:** default eager generate/forward profile unchanged; long-S AUTO / cold thr / CUDA cold+decode tiles are off the short default window.
+
+### Ranked follow-ups
+
+Unchanged honesty vs backlog: **P0** = GPU measure fused score×V (CPU % above
+are not GPU wins). **P1** = GPU compile train-step + generate/decode GEMM /
+AUTO threshold re-check on CUDA (+ CUDA-graph `reduce-overhead`). #75–#77 already
+on main — strike from “next.”
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal / SDPA
+- No GPU speedup claims from these CPU % figures
+- No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1` on CPU
