@@ -240,6 +240,70 @@ def test_forward_probe_without_targets_returns_wrapper_and_restores_state(
     assert "first probe failed" not in captured
 
 
+@pytest.mark.parametrize("caller_training", [False, True])
+def test_failed_backward_probe_falls_back_cleanly(
+    monkeypatch, capsys, caller_training
+):
+    """A failed backward probe discards the wrapper and clears probe grads."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    class FailingProbe(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.calls = 0
+
+        def forward(self, x, y):
+            self.calls += 1
+            logits, loss = self.module(x, y)
+
+            def fail_backward(_grad):
+                raise RuntimeError("synthetic backward probe failure")
+
+            assert loss is not None
+            loss.register_hook(fail_backward)
+            return logits, loss
+
+    model = bdh.BDH(_small_cfg()).train(caller_training)
+    for index, param in enumerate(model.parameters(), start=1):
+        param.grad = torch.full_like(param, float(index))
+    wrapper = FailingProbe(model)
+
+    def compile_spy(compiled_model, **kwargs):
+        assert compiled_model is model
+        compile_kwargs.update(kwargs)
+        return wrapper
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    x = torch.randint(0, 256, (2, 8))
+    y = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert wrapper.calls == 1
+    assert out is model
+    assert out.training is caller_training
+    assert all(param.grad is None for param in model.parameters())
+    assert "torch.compile first probe failed" in captured
+    assert "synthetic backward probe failure" in captured
+    assert "the compiled wrapper is discarded" in captured
+
+
 def test_compile_failure_without_probe_preserves_caller_state(
     monkeypatch, capsys
 ):
