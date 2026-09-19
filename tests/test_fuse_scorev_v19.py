@@ -359,3 +359,62 @@ def test_dispatch_preserves_feature_strided_qk_storage_gradients(impl, v_heads):
     assert torch.allclose(
         got_k_storage_grad, ref_k_storage_grad, rtol=1e-9, atol=1e-9
     )
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_composed_feature_strided_storage_gradients(
+    impl, v_heads
+):
+    """Dispatch aliases preserve gradients when every Q/K/V view is strided."""
+    B, H, T, N, D = 2, 3, 29, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1928)
+    Q_storage = torch.randn(
+        B, H, T, 2 * N + 1, generator=generator, dtype=torch.float64
+    )
+    K_storage = torch.randn(
+        B, H, T, 2 * N + 1, generator=generator, dtype=torch.float64
+    )
+    V_storage = torch.randn(
+        B, v_heads, T, 2 * D + 1, generator=generator, dtype=torch.float64
+    )
+    Q = Q_storage[..., 1 : 2 * N : 2]
+    K = K_storage[..., 1 : 2 * N : 2]
+    V = V_storage[..., 1 : 2 * D : 2]
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    assert not Q.is_contiguous()
+    assert not K.is_contiguous()
+    assert not V.is_contiguous()
+    assert Q.stride(-1) == 2
+    assert K.stride(-1) == 2
+    assert V.stride(-1) == 2
+
+    def run(name):
+        q_storage = Q_storage.detach().clone().requires_grad_(True)
+        k_storage = K_storage.detach().clone().requires_grad_(True)
+        v_storage = V_storage.detach().clone().requires_grad_(True)
+        q = q_storage[..., 1 : 2 * N : 2]
+        k = k_storage[..., 1 : 2 * N : 2]
+        v = v_storage[..., 1 : 2 * D : 2]
+        out = bdh_attn(q, k, v, impl=name)
+        out.backward(dO)
+        return (
+            out.detach(),
+            q_storage.grad.detach(),
+            k_storage.grad.detach(),
+            v_storage.grad.detach(),
+        )
+
+    ref, ref_q_grad, ref_k_grad, ref_v_grad = run("eager")
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_q_grad, got_k_grad, got_v_grad = run(impl)
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in (
+        (got_q_grad, ref_q_grad),
+        (got_k_grad, ref_k_grad),
+        (got_v_grad, ref_v_grad),
+    ):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
