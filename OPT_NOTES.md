@@ -20,7 +20,8 @@ prints the cold, T=1 decode, dtype, and optional native-extension commands from
 `OPT_BACKLOG.md`; `--json-out PATH` saves the same schema for a CUDA-box
 collection pass. On CUDA, cold and decode both compare eager, blocked, online,
 Triton, and CUDA against eager with bit-identical / `allclose@1e-4`, max-abs
-delta, and median-ms fields.
+delta, and median-ms fields. Schema version 2 marks `--force-cpu` output as
+`cpu_smoke` with `timing_scope=cpu`; those medians are never GPU measurements.
 
 This CPU box still has `cuda=False`: no GPU timings or wins are claimed, and
 P0 remains environment-blocked pending real CUDA/Triton cold validation.

@@ -65,6 +65,9 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
+SUMMARY_SCHEMA_VERSION = 2
+
+
 # Keep these commands in sync with the GPU microbench runbook in
 # OPT_BACKLOG.md. They are printed on CPU so a skipped run is still an
 # actionable handoff to a CUDA box; no CPU timings are substituted.
@@ -95,10 +98,11 @@ def _summary_path(path: str | None, summary: dict[str, Any]) -> None:
 
 def _skip_summary() -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": "skip",
         "reason": "cuda_unavailable",
         "device": "cpu",
+        "timing_scope": "none",
         "cuda_available": False,
         "gpu_name": None,
         "torch_version": torch.__version__,
@@ -269,14 +273,16 @@ def main() -> int:
         print(f"  {name:7s} {t:8.3f} ms  ({speedup:.2f}× vs eager)")
 
     summary = {
-        "schema_version": 1,
-        "status": "ok",
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "status": "ok" if device.type == "cuda" else "cpu_smoke",
+        "reason": None if device.type == "cuda" else "force_cpu",
         "mode": mode,
-        "device": "cuda",
-        "gpu_name": gpu_name,
+        "device": device.type,
+        "timing_scope": "gpu" if device.type == "cuda" else "cpu",
+        "gpu_name": gpu_name if device.type == "cuda" else None,
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
-        "cuda_available": True,
+        "cuda_available": cuda_ok,
         "backend_info": info,
         "shape": {"B": B, "H": H, "T": T, "N": N, "D": D},
         "dtype": args.dtype,
