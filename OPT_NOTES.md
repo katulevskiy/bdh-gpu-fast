@@ -7223,3 +7223,20 @@ finite gradients. Defaults remain eager, and attention remains raw scores ×
 strict `tril(diagonal=-1)`.
 
 Validation is CPU-only; no timing, GPU correctness, or speedup claim is made.
+
+## opt/compile-v5 — sharpen soft-fallback probe diagnostics (2026-09-19)
+
+**Branch:** `opt/compile-v5` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `4bd410a` / #193, after `39fe7f7` / #191.
+
+The optional `torch.compile` behavior and defaults are unchanged. The missing-
+target path now says explicitly that a requested `train_bwd` probe did not
+run, while the first-probe failure path states that the compiled wrapper is
+discarded and the original eager module is retained. A CPU eval-probe smoke
+also checks that the caller's training mode is restored after either a real
+probe or a soft fallback.
+
+Validation is CPU-only; no CUDA-graph, GPU timing, or GPU inductor win is
+claimed. Raw scores × strict `tril(diagonal=-1)` attention semantics remain
+unchanged. Defaults remain `BDH_COMPILE=0`, `BDH_COMPILE_PROBE=train_bwd`,
+and eager attention.
