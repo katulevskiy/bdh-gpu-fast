@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 11
+SUMMARY_SCHEMA_VERSION = 12
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -125,7 +125,13 @@ def _cuda_runtime_diagnostics(
     cuda_available_probe_error: str | None = None,
 ) -> dict[str, Any]:
     """Return CPU-safe CUDA build/device diagnostics for skip handoffs."""
-    cuda_built = bool(torch.backends.cuda.is_built())
+    cuda_built_probe_error: str | None = None
+    try:
+        cuda_built = bool(torch.backends.cuda.is_built())
+    except Exception as exc:
+        # A failing build probe must remain a structured CPU-safe skip.
+        cuda_built = False
+        cuda_built_probe_error = f"{type(exc).__name__}: {exc}"
     device_probe_ok = True
     cuda_device_probe_error: str | None = None
     try:
@@ -135,7 +141,9 @@ def _cuda_runtime_diagnostics(
         device_probe_ok = False
         cuda_device_count = 0
         cuda_device_probe_error = f"{type(exc).__name__}: {exc}"
-    if not cuda_built:
+    if cuda_built_probe_error is not None:
+        runtime_state = "build_probe_failed"
+    elif not cuda_built:
         runtime_state = "not_built"
     elif not device_probe_ok:
         runtime_state = "runtime_unavailable"
@@ -147,6 +155,7 @@ def _cuda_runtime_diagnostics(
         runtime_state = "available"
     return {
         "cuda_built": cuda_built,
+        "cuda_built_probe_error": cuda_built_probe_error,
         "cuda_device_count": cuda_device_count,
         "cuda_device_probe_error": cuda_device_probe_error,
         "cuda_available_probe_error": cuda_available_probe_error,
@@ -202,6 +211,7 @@ def _skip_summary(
                 "cuda_available": False,
                 "cuda_runtime_state": cuda_runtime["cuda_runtime_state"],
                 "cuda_built": cuda_runtime["cuda_built"],
+                "cuda_built_probe_error": cuda_runtime["cuda_built_probe_error"],
                 "cuda_device_count": cuda_runtime["cuda_device_count"],
                 "cuda_device_probe_error": cuda_runtime["cuda_device_probe_error"],
                 "cuda_available_probe_error": cuda_runtime[
@@ -346,6 +356,7 @@ def main() -> int:
             f"  torch={summary['torch_version']}  cuda_available=false "
             f"cuda_version={summary['cuda_version']}  "
             f"cuda_built={summary['cuda_built']}  "
+            f"cuda_built_probe_error={summary['cuda_built_probe_error']}  "
             f"cuda_device_count={summary['cuda_device_count']}  "
             f"cuda_device_probe_error={summary['cuda_device_probe_error']}  "
             f"cuda_available_probe_error={summary['cuda_available_probe_error']}  "

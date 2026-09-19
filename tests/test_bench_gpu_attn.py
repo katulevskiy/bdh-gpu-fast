@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 11
+    assert summary["schema_version"] == 12
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -46,6 +46,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
             "cuda_available": False,
             "cuda_runtime_state": summary["cuda_runtime_state"],
             "cuda_built": summary["cuda_built"],
+            "cuda_built_probe_error": summary["cuda_built_probe_error"],
             "cuda_device_count": summary["cuda_device_count"],
             "cuda_device_probe_error": summary["cuda_device_probe_error"],
             "cuda_available_probe_error": summary["cuda_available_probe_error"],
@@ -121,6 +122,31 @@ def test_cuda_runtime_diagnostics_survives_device_probe_failure(monkeypatch):
     assert result["cuda_device_count"] == 0
     assert result["cuda_device_probe_error"] == "RuntimeError: driver query failed"
     assert result["cuda_runtime_state"] == "runtime_unavailable"
+
+
+def test_cuda_runtime_diagnostics_survives_build_probe_failure(monkeypatch):
+    """A failing CUDA build probe remains an honest runtime skip."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    diagnostics = namespace["_cuda_runtime_diagnostics"]
+
+    def fail_build_probe():
+        raise RuntimeError("CUDA build query failed")
+
+    monkeypatch.setattr(torch.backends.cuda, "is_built", fail_build_probe)
+    result = diagnostics(cuda_available=False)
+
+    assert result["cuda_built"] is False
+    assert result["cuda_built_probe_error"] == (
+        "RuntimeError: CUDA build query failed"
+    )
+    assert result["cuda_device_count"] == 0
+    assert result["cuda_device_probe_error"] is None
+    assert result["cuda_runtime_state"] == "build_probe_failed"
 
 
 def test_no_cuda_skip_stays_structured_when_availability_probe_fails(
@@ -251,7 +277,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 11
+    assert summary["schema_version"] == 12
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
@@ -687,6 +713,7 @@ def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
         "not_built",
         "no_visible_device",
         "runtime_unavailable",
+        "build_probe_failed",
     }
     assert summary["torch_version"]
     assert summary["cuda_version"] is None or isinstance(summary["cuda_version"], str)
