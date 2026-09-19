@@ -25,9 +25,9 @@ import bdh  # noqa: E402
 TRACES = Path(__file__).resolve().parent / "traces"
 
 
-def _activities() -> list:
+def _activities(device: torch.device) -> list:
     acts = [ProfilerActivity.CPU]
-    if torch.cuda.is_available():
+    if device.type == "cuda" and torch.cuda.is_available():
         acts.append(ProfilerActivity.CUDA)
     return acts
 
@@ -47,7 +47,7 @@ def _default_cfg() -> bdh.BDHConfig:
     )
 
 
-def profile_attention(device, B, T, warmup, wait, active):
+def profile_attention(device, B, T, warmup, wait, active, trace_dir=TRACES):
     cfg = _default_cfg()
     m = _make_model(cfg, device)
     nh, D = cfg.n_head, cfg.n_embd
@@ -60,10 +60,10 @@ def profile_attention(device, B, T, warmup, wait, active):
             with record_function("Attention.forward"):
                 m.attn(Q=Q, K=Q, V=V)
 
-    return _run_profiler(run, "attn", device, warmup, wait, active)
+    return _run_profiler(run, "attn", device, warmup, wait, active, trace_dir)
 
 
-def profile_forward(device, B, T, warmup, wait, active):
+def profile_forward(device, B, T, warmup, wait, active, trace_dir=TRACES):
     cfg = _default_cfg()
     m = _make_model(cfg, device)
     x = torch.randint(0, cfg.vocab_size, (B, T), device=device)
@@ -73,10 +73,10 @@ def profile_forward(device, B, T, warmup, wait, active):
             with record_function("BDH.forward"):
                 m(x)
 
-    return _run_profiler(run, "forward", device, warmup, wait, active)
+    return _run_profiler(run, "forward", device, warmup, wait, active, trace_dir)
 
 
-def profile_generate(device, prompt_len, new_tokens, warmup, wait, active):
+def profile_generate(device, prompt_len, new_tokens, warmup, wait, active, trace_dir=TRACES):
     cfg = _default_cfg()
     m = _make_model(cfg, device)
     prompt = torch.randint(0, cfg.vocab_size, (1, prompt_len), device=device)
@@ -87,15 +87,16 @@ def profile_generate(device, prompt_len, new_tokens, warmup, wait, active):
                 torch.manual_seed(0)
                 m.generate(prompt.clone(), max_new_tokens=new_tokens)
 
-    return _run_profiler(run, "generate", device, warmup, wait, active)
+    return _run_profiler(run, "generate", device, warmup, wait, active, trace_dir)
 
 
-def _run_profiler(fn, label, device, warmup, wait, active):
-    TRACES.mkdir(parents=True, exist_ok=True)
+def _run_profiler(fn, label, device, warmup, wait, active, trace_dir=TRACES):
+    trace_dir = Path(trace_dir)
+    trace_dir.mkdir(parents=True, exist_ok=True)
     schedule = torch.profiler.schedule(wait=wait, warmup=warmup, active=active, repeat=1)
-    trace_path = TRACES / f"bdh_{label}_{device.type}.json"
+    trace_path = trace_dir / f"bdh_{label}_{device.type}.json"
     with profile(
-        activities=_activities(),
+        activities=_activities(device),
         schedule=schedule,
         record_shapes=True,
         profile_memory=True,
@@ -125,17 +126,23 @@ def main():
     p.add_argument("--warmup", type=int, default=2)
     p.add_argument("--wait", type=int, default=1)
     p.add_argument("--active", type=int, default=3)
+    p.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    p.add_argument("--trace-dir", type=Path, default=TRACES)
     args = p.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.device == "cuda" and not torch.cuda.is_available():
+        p.error("--device cuda requested, but CUDA is unavailable")
+    device = torch.device(
+        "cuda" if args.device == "cuda" or (args.device == "auto" and torch.cuda.is_available()) else "cpu"
+    )
     print(f"torch={torch.__version__} cuda={torch.cuda.is_available()} device={device}")
     modes = ("attn", "forward", "generate") if args.mode == "all" else (args.mode,)
     for mode in modes:
         if mode == "attn":
-            profile_attention(device, args.B, args.T, args.warmup, args.wait, args.active)
+            profile_attention(device, args.B, args.T, args.warmup, args.wait, args.active, args.trace_dir)
         elif mode == "forward":
-            profile_forward(device, args.B, args.T, args.warmup, args.wait, args.active)
+            profile_forward(device, args.B, args.T, args.warmup, args.wait, args.active, args.trace_dir)
         else:
-            profile_generate(device, args.prompt, args.new_tokens, args.warmup, args.wait, args.active)
+            profile_generate(device, args.prompt, args.new_tokens, args.warmup, args.wait, args.active, args.trace_dir)
 
 
 if __name__ == "__main__":

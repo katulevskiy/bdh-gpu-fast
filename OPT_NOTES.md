@@ -11,6 +11,12 @@ Push only to `https://github.com/katulevskiy/bdh-gpu-opt` (private).
 - Venv: `/workspace/bdh-gpu-opt/.venv`
 - Baseline frozen as `bdh_baseline.py` (byte-identical to upstream `bdh.py` at mirror time)
 
+## P3 profiler CI scaffold (2026-09-19)
+
+- `benchmarks/profile_smoke.py` runs one tiny, CPU-only `torch.profiler` forward pass and writes a Chrome trace under `benchmarks/traces/`.
+- The smoke is suitable for a manual/nightly CPU job: install the CPU PyTorch wheel, run `python benchmarks/profile_smoke.py`, then optionally upload `benchmarks/traces/*.json` with `actions/upload-artifact@v4` (seven-day retention is sufficient). Keep the job off pull requests; it makes no GPU performance claims.
+- Traces remain gitignored; local check: `python benchmarks/profile_smoke.py`.
+
 ## Inefficiencies found (upstream / baseline)
 
 1. **Attention materializes full T×T scores then masks** — `(QR @ KR.mT).tril(diagonal=-1)` still computes the discarded upper triangle; no fused lower-triangular kernel.
