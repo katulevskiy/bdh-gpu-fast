@@ -194,3 +194,17 @@ def test_cpu_amp_throughput_claim_is_none(monkeypatch):
     with monkeypatch.context() as mp:
         mp.setattr(tr, "device", torch.device("cpu"))
         assert tr.amp_throughput_claim_device() == "none"
+
+
+@pytest.mark.parametrize("amp_name", ["bfloat16", "float16"])
+def test_cpu_amp_throughput_claim_stays_none_with_active_amp(monkeypatch, amp_name):
+    """Active CPU AMP keeps the throughput claim disabled for every AMP dtype."""
+    probe_name = {
+        "bfloat16": "cpu_bf16_available",
+        "float16": "cpu_fp16_available",
+    }[amp_name]
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        mp.setattr(tr, probe_name, lambda: True)
+        tr.configure_amp(amp_name, forward_only=True)
+        assert tr.amp_throughput_claim_device() == "none"
