@@ -201,3 +201,19 @@ def test_auto_long_paths_fall_back_to_blocked_without_triton(monkeypatch):
     assert resolve_cold_impl(3) == "blocked"
     assert resolve_decode_impl(4) == "eager"
     assert resolve_decode_impl(5) == "blocked"
+
+
+def test_auto_long_paths_prefer_triton_when_available(monkeypatch):
+    """Long AUTO paths prefer Triton when the availability probe is true."""
+    monkeypatch.setattr(
+        "kernels.attention_dispatch.triton_decode_available", lambda: True
+    )
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "2")
+
+    assert resolve_cold_impl(2) == "eager"
+    assert resolve_cold_impl(3) == "triton"
+    assert resolve_decode_impl(4) == "eager"
+    assert resolve_decode_impl(5) == "triton"
