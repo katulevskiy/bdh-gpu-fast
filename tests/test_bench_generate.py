@@ -261,6 +261,22 @@ def test_attn_auto_only_overrides_requested_threshold(monkeypatch):
     assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
 
 
+def test_attn_auto_only_overrides_requested_cold_threshold(monkeypatch):
+    """An omitted decode gate stays independent during a cold-only override."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "old-decode")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "old-cold")
+
+    with bench_generate._attn_auto(True, cold_threshold=128):
+        assert os.environ["BDH_ATTN_AUTO"] == "1"
+        assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
+        assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "128"
+
+    assert os.environ["BDH_ATTN_AUTO"] == "0"
+    assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
+    assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "old-cold"
+
+
 def test_attn_auto_disable_preserves_omitted_thresholds(monkeypatch):
     """Disabling AUTO alone must not reset either threshold gate."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
