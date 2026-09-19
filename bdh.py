@@ -155,8 +155,33 @@ class Attention(torch.nn.Module):
 
         # Incremental: queries attend to all past positions + earlier positions
         # in this chunk (strict: no self). Equivalent to full tril(diagonal=-1)
-        # over concat(past, new).
+        # over concat(past, new). Single-token decode (T==1, S>0) is the hot path:
+        # QR @ past_kr.mT @ past_v — no tril needed (all keys are strictly past).
         S = past_kr.size(2)
+        assert past_v.size(2) == S
+
+        if T == 1 and S == 0:
+            out = V.new_zeros(B, nh, T, V.size(-1))
+            return out, QR, V
+
+        if T == 1:
+            # Hot decode step: attend only to past (j < i). Correct for any
+            # BDH_ATTN_IMPL.
+            scores = QR @ past_kr.transpose(-2, -1)  # (B, nh, 1, S)
+            out = scores @ past_v
+            return out, QR, V
+
+        # Multi-token chunk with past. Non-eager: concat + dispatched tril attn.
+        impl = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
+        if impl != "eager":
+            from kernels.attention_dispatch import bdh_attn
+
+            KR_all = torch.cat([past_kr, QR], dim=2)
+            V_all = torch.cat([past_v, V], dim=2)
+            out_all = bdh_attn(KR_all, KR_all, V_all, impl=impl)
+            out = out_all[:, :, S:, :]
+            return out, QR, V
+
         parts = []
         if S > 0:
             parts.append(QR @ past_kr.transpose(-2, -1))  # (B, nh, T, S)
@@ -164,16 +189,6 @@ class Attention(torch.nn.Module):
             self_scores = QR @ QR.transpose(-2, -1)
             self_scores.tril_(diagonal=-1)
             parts.append(self_scores)  # (B, nh, T, T)
-        elif T == 1 and S == 0:
-            # First token: no keys to attend to → zeros
-            out = V.new_zeros(B, nh, T, V.size(-1))
-            return out, QR, V
-
-        if not parts:
-            # T==1, S>0: only past
-            scores = QR @ past_kr.transpose(-2, -1)
-            out = scores @ past_v
-            return out, QR, V
 
         if S > 0 and T > 1:
             scores = torch.cat(parts, dim=-1)  # (B, nh, T, S+T)
@@ -185,6 +200,23 @@ class Attention(torch.nn.Module):
             out = parts[0] @ V
 
         return out, QR, V
+
+
+def _autocast_context(device: torch.device, amp_dtype: Optional[torch.dtype]):
+    """Return a nullcontext or torch.autocast for optional AMP.
+
+    Default (amp_dtype=None) is fp32 — no autocast. Supported: float16, bfloat16.
+    """
+    from contextlib import nullcontext
+
+    if amp_dtype is None:
+        return nullcontext()
+    if amp_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError(
+            f"amp_dtype must be torch.float16 or torch.bfloat16, got {amp_dtype}"
+        )
+    device_type = device.type if device.type in ("cuda", "cpu", "mps") else "cpu"
+    return torch.autocast(device_type=device_type, dtype=amp_dtype)
 
 
 class BDH(nn.Module):
@@ -230,6 +262,9 @@ class BDH(nn.Module):
         length n_layer with None | {'kr', 'v'} (cat every step). Mutated in place.
         When cache is provided, idx is the new token block; RoPE continues from
         cached length.
+
+        AMP: wrap the call in torch.autocast(...) or use generate(amp_dtype=...).
+        Default path remains fp32. RoPE phases stay float32.
         """
         C = self.config
 
@@ -314,11 +349,15 @@ class BDH(nn.Module):
         top_k: int | None = None,
         *,
         cache_dtype: torch.dtype | None = None,
+        amp_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         """Autoregressive decode with packed KR/V cache (preallocated max_seq).
 
         cache_dtype: optional storage dtype for the cache (e.g. torch.float16).
         Compute stays fp32 for RoPE score GEMMs when storage is narrower.
+
+        amp_dtype: optional torch.float16 / torch.bfloat16 for autocast over
+        forward. Default None keeps fp32 (no autocast). Sampling logits use fp32.
         """
         was_training = self.training
         self.eval()
@@ -333,18 +372,23 @@ class BDH(nn.Module):
             compute_dtype=torch.float32,
             storage_dtype=cache_dtype,
         )
-        logits, _ = self(idx, cache=cache)
+        device = idx.device
+        with _autocast_context(device, amp_dtype):
+            logits, _ = self(idx, cache=cache)
 
-        for _ in range(max_new_tokens):
-            step_logits = logits[:, -1, :] / temperature
-            if top_k is not None:
-                values, _ = torch.topk(step_logits, min(top_k, step_logits.size(-1)))
-                step_logits = step_logits.clone()
-                step_logits[step_logits < values[:, [-1]]] = float("-inf")
-            probs = F.softmax(step_logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, idx_next), dim=1)
-            logits, _ = self(idx_next, cache=cache)
+            for _ in range(max_new_tokens):
+                # Sampling in fp32 for numerical stability under AMP
+                step_logits = logits[:, -1, :].float() / temperature
+                if top_k is not None:
+                    values, _ = torch.topk(
+                        step_logits, min(top_k, step_logits.size(-1))
+                    )
+                    step_logits = step_logits.clone()
+                    step_logits[step_logits < values[:, [-1]]] = float("-inf")
+                probs = F.softmax(step_logits, dim=-1)
+                idx_next = torch.multinomial(probs, num_samples=1)
+                idx = torch.cat((idx, idx_next), dim=1)
+                logits, _ = self(idx_next, cache=cache)
 
         if was_training:
             self.train()
