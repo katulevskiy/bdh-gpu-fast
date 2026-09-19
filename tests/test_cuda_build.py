@@ -37,6 +37,24 @@ def test_default_setup_is_pure_python_noop():
     assert any(line.strip() == "bdh-gpu-opt" for line in output.splitlines())
 
 
+def test_missing_torch_keeps_native_opt_in_cpu_safe(tmp_path):
+    """A missing torch import must skip native setup without breaking metadata."""
+    (tmp_path / "torch.py").write_text(
+        "raise ImportError('torch unavailable for setup smoke test')\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    env.update({"BDH_BUILD_EXT": "1"})
+    pythonpath = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env["PYTHONPATH"] = pythonpath
+
+    output = _setup_name(env)
+
+    assert "torch not importable — skipping native extension build" in output
+    assert any(line.strip() == "bdh-gpu-opt" for line in output.splitlines())
+
+
 def test_cuda_flag_without_extension_opt_in_is_pure_python_noop():
     """BDH_BUILD_CUDA alone must not opt into native extension setup."""
     env = os.environ.copy()
