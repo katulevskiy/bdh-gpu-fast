@@ -535,6 +535,52 @@ def test_injected_scaler_path_orders_hooks_and_clears_grads(monkeypatch):
     assert model.weight.grad is None
 
 
+def test_disabled_scaler_falls_back_to_unscaled_step_and_clears_grads(monkeypatch):
+    """A disabled scaler cannot intercept the CPU-safe unscaled optimizer path."""
+    events = []
+
+    class _DisabledScaler:
+        def is_enabled(self):
+            return False
+
+        def scale(self, loss):
+            events.append("scale")
+            raise AssertionError("disabled scaler must not scale")
+
+        def step(self, optimizer):
+            events.append("step")
+            raise AssertionError("disabled scaler must not step")
+
+        def update(self):
+            events.append("update")
+            raise AssertionError("disabled scaler must not update")
+
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", True)
+    monkeypatch.setattr(tr, "scaler", _DisabledScaler())
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, 1))
+
+        def forward(self, x, y=None):
+            logits = x @ self.weight
+            return logits, logits.square().mean()
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    initial_weight = model.weight.detach().clone()
+
+    loss = tr.train_step(model, optimizer, torch.tensor([[2.0]]), torch.tensor([[0]]))
+
+    assert loss.ndim == 0
+    assert events == []
+    assert not torch.equal(model.weight.detach(), initial_weight)
+    assert model.weight.grad is None
+
+
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
     """A live CUDA runtime is the only positive throughput claim surface."""
     with monkeypatch.context() as mp:
