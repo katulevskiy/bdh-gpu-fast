@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 import bdh
 from bdh_cache import CacheManager
-from kernels.attention import eager_decode_attn
+from kernels.attention import eager_decode_attn, online_decode_attn
 from kernels.attention_dispatch import bdh_attn_decode
 
 
@@ -122,3 +122,19 @@ def test_multi_query_decode_keeps_signed_raw_scores_per_head():
         assert torch.equal(got, expected), (
             f"impl={impl} maxdiff={(got - expected).abs().max().item()}"
         )
+
+
+def test_online_decode_tiled_multi_query_keeps_raw_signed_scores():
+    """Direct online decode keeps signed score×V semantics after tiling."""
+    S = 513
+    Q = torch.tensor([[[[2.0, -1.0], [-1.0, 2.0]]]])
+    K_past = torch.zeros(1, 1, S, 2)
+    K_past[:, :, 0, :] = torch.tensor([1.0, 0.0])
+    K_past[:, :, 1, :] = torch.tensor([0.0, 1.0])
+    V_past = torch.zeros(1, 1, S, 1)
+    V_past[:, :, 0, 0] = 3.0
+    V_past[:, :, 1, 0] = 4.0
+
+    got = online_decode_attn(Q, K_past, V_past, block_size=1)
+    expected = torch.tensor([[[[2.0], [5.0]]]])
+    assert torch.equal(got, expected)
