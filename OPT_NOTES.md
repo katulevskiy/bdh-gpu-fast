@@ -5056,3 +5056,61 @@ question is real-GPU validation of fused score×V / RoPE / layout effects.
 - No default attention/RoPE implementation change
 - No softmax / scale / SDPA / diagonal inclusion
 - No GPU claims from CPU profiler percentages or copy_ counts
+
+
+## opt/scorev-fuse-v2 — deepen CPU blocked/online score×V (2026-09-19)
+
+**Branch:** `opt/scorev-fuse-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `82d5697` (`main`, docs-v19 / #99).
+
+### Audit and deepen
+
+The long CPU cold path already flattened `(B,H)` into one dense `bmm` batch,
+but each score tile still held a score tensor plus a separate `bmm(scores,V)`
+result until the add/copy epilogue. The remaining Python loops are the query
+tile loop, chunked-past loop when the score budget is exceeded, and the
+T=1 decode past-tile loop; they are required to keep peak score storage below
+full `T×T` / `Tq×S`. The generic short/device path retains its broadcast-V
+matmul behavior rather than paying a new expansion.
+
+This revision adds `_score_v_into`: inference/no-grad CPU tiles use
+`baddbmm(..., out=target)` so score×V writes directly into the flattened
+output tile; autograd uses the graph-safe add/copy fallback. The T=1
+head-matched decode path reuses the flattened output view, and the broadcast-V
+oneshot budget tightens from 2048 to **1024 score elements**. Strict
+`tril(diagonal=-1)` semantics, raw scores×V math, and default eager dispatch
+are unchanged.
+
+### Correctness (CPU)
+
+```text
+.venv/bin/python -m pytest -q
+# 490 passed, 18 skipped (CUDA/native paths), 3 warnings
+# blocked/online parity vs eager tril(-1); position 0 == 0; default eager unchanged
+```
+
+### Honest CPU microbench (single-thread; no GPU claim)
+
+```text
+# cold: B=1 H=2 N=32 D=64, eager / blocked, median ms
+T=256: 0.139 / 0.198  (0.70×)
+T=512: 0.516 / 0.397  (1.30×)
+T=1024: 2.622 / 1.756  (1.49×)
+
+# decode: B=1 H=2 Tq=1 N=32 D=64, eager / blocked, median ms
+S=512:  0.020 / 0.022  (0.94×), peak 512
+S=1024: 0.021 / 0.023  (0.90×), peak 1024
+S=1536: 0.026 / 0.129  (0.20×), peak 256
+S=4096: 0.073 / 0.134  (0.55×), peak 1024
+```
+
+CPU blocked is still slower at some short/mid shapes; the structural win is
+lower score peak and fewer inference epilogue buffers. These measurements are
+not GPU evidence. Re-measure Triton/CUDA on real hardware before claiming a
+kernel or speedup win.
+
+### Non-goals
+
+- No default `BDH_ATTN_IMPL` change; eager remains the default.
+- No softmax, scale, SDPA, diagonal inclusion, or full score materialization.
+- No GPU claims from CPU timings.

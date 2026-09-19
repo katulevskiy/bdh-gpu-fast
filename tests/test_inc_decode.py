@@ -228,6 +228,17 @@ def test_pick_tile_size_prefers_fewer_trips_for_tq1():
     assert big >= 2048 // 8
 
 
+def test_t1_decode_tight_oneshot_tiles_mid_past():
+    """The tighter T=1 budget tiles a mid-size past scan without drift."""
+    assert _DECODE_ONESHOT_ELEMS <= 1024
+    S = _DECODE_ONESHOT_ELEMS + 512
+    Q, K, V = _make_decode_qkv(B=1, H=2, S=S, N=8, D=16, seed=73)
+    ref = eager_decode_attn(Q, K, V)
+    got = blocked_decode_attn(Q, K, V, block_size=64)
+    assert max_decode_score_elems(S, block_size=64) < S
+    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+
+
 def test_tiled_score_v_shared_with_cold_past_region():
     """Cold blocked past region == decode helper against K[:, :i0]."""
     B, H, T, N, D = 1, 2, 20, 8, 16
