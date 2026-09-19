@@ -5345,6 +5345,37 @@ off.
 - No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change.
 - No softmax, scale, diagonal inclusion, or full-score materialization.
 
+## opt/triton-cold-v4 — actionable CPU-safe Triton skip diagnostics (2026-09-19)
+
+**Branch:** `opt/triton-cold-v4` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `c557b55` (`main`, after #148 docs through #147).
+
+### Audit / deepen
+
+- Added `triton_cold_skip_reason()` to report the exact import/device gate
+  without allocating a CUDA tensor or attempting a kernel launch.
+- Triton cold CUDA tests now use that diagnostic in their `skipif` reason,
+  distinguishing `Triton unavailable: import failed (...)` from
+  `CUDA unavailable: torch.cuda.is_available() is false`.
+- Added a CPU-safe unit test for the diagnostic; cold fallback, raw scores ×
+  strict `tril(diagonal=-1)`, eager default, and AUTO-off behavior are unchanged.
+
+### Validation (CPU-only)
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/test_triton_attn.py -q -rs
+# 36 passed, 3 skipped (CUDA unavailable: torch.cuda.is_available() is false)
+```
+
+No GPU timing, compilation, kernel validation, correctness, speedup, or other
+GPU claim is made. Defaults remain eager and `BDH_ATTN_AUTO` remains off.
+
+### Non-goals
+
+- No public or `pathwaycom/*` PRs; private repo only.
+- No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change.
+- No softmax, scale, diagonal inclusion, or full-score materialization.
+
 ## opt/gen-vcopy-v1 — V/sampler probe + T>1 RoPE pair store (2026-09-19)
 
 **Branch:** `opt/gen-vcopy-v1` (private `katulevskiy/bdh-gpu-opt` only).

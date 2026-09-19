@@ -10,15 +10,17 @@ from typing import Optional
 import torch
 
 # Optional Triton (may be installed without a usable CUDA device).
+_TRITON_IMPORT_ERROR: BaseException | None = None
 try:
     import triton
     import triton.language as tl
 
     _HAS_TRITON = True
-except Exception:  # pragma: no cover - import guard
+except Exception as exc:  # pragma: no cover - import guard
     triton = None  # type: ignore
     tl = None  # type: ignore
     _HAS_TRITON = False
+    _TRITON_IMPORT_ERROR = exc
 
 
 def eager_tril_attn(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> torch.Tensor:
@@ -751,6 +753,24 @@ def triton_decode_available() -> bool:
     boxes this is False, so AUTO keeps the #55 blocked long-S path.
     """
     return bool(_HAS_TRITON and torch.cuda.is_available())
+
+
+def triton_cold_skip_reason() -> str | None:
+    """Return an actionable CPU-safe reason why cold Triton is skipped.
+
+    ``None`` means the import and CUDA availability gates are both open. The
+    diagnostic intentionally only inspects import state and
+    ``torch.cuda.is_available()``; it does not allocate a CUDA tensor or try a
+    kernel launch, so pytest collection stays safe on CPU-only hosts.
+    """
+    if not _HAS_TRITON:
+        detail = ""
+        if _TRITON_IMPORT_ERROR is not None:
+            detail = f" ({type(_TRITON_IMPORT_ERROR).__name__})"
+        return f"Triton unavailable: import failed{detail}"
+    if not torch.cuda.is_available():
+        return "CUDA unavailable: torch.cuda.is_available() is false"
+    return None
 
 
 if _HAS_TRITON:
