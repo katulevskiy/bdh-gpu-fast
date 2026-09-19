@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#95)
+# OPT status — landed work (#1–#97)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `8e7a4d2` (`#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source remains `f10bdd4` (`#89` profile-v8, post-#85–#87); default eager remains unchanged, #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, and #95 reports CPU-only copy-call reductions. No GPU speedup is measured; GPU validation remains open.
+Tip documented here: `06e25d2` (`#97` docs-v18 / `#96` attn-bwd-gpu-scaffold / `#95` copy-tax-v1 / `#94` docs through #93 / `#93` blocked-tile-v2 / `#92` prefetch-h2d / `#91` docs through #90 / `#90` rope-fuse-v2 / `#89` profile-v8 / `#88` docs through #87 / `#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile-v9 source is `8e7a4d2` (`#95`); its rebased docs tip is `06e25d2`. Default eager remains unchanged, #92 is CPU no-op, #93 is an opt-in CPU cold-path win at T≥256, and #95 and profile-v9 report CPU-only copy-call evidence. No GPU speedup is measured; GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -271,6 +271,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **93** | `opt/blocked-tile-v2` | Flatten long CPU cold blocked/online `(B,H)` heads once and use dense `bmm` score and score×V tiles; preserve strict `tril(-1)` and default eager | Blocked wins at T≥256: 1.25× @256, 4.00× @512, 5.87× @1024 in the honest single-thread bench; short T still loses | CUDA path and GPU speedup unmeasured; default eager unchanged |
 | **94** | `opt/docs-matrix-v17` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #93 | Docs only | — |
 | **95** | `opt/copy-tax-v1` | Allocate contiguous QR for RoPE on the encoder permute view; use in-place `tril_` on fresh score buffers; reduce avoidable forward `aten::copy_` 24→18 and QR contig copies 8→0 | CPU call-count deltas only; correctness/parity tests pass; no wall-speed or GPU claim | GPU copy/layout impact unmeasured; defaults `BDH_ATTN_IMPL`/`BDH_ROPE_IMPL` unchanged |
+| **96** | `opt/attn-bwd-gpu-scaffold` | Add CUDA analytic-attention train harness with parity checks, dtype/config controls, and clean CPU skip | CPU skip contract; no GPU timing here | Real CUDA validation remains open; defaults unchanged |
+| **97** | `opt/docs-matrix-v18` | Refresh optimization matrix through #95/#96 | Docs only | — |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
