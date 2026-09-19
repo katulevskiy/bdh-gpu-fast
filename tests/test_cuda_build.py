@@ -463,6 +463,10 @@ def test_native_opt_in_stays_cpu_only_without_cuda(tmp_path):
         encoding="utf-8",
     )
 
+    nvcc = tmp_path / "cuda-home" / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
     kwargs_trace = tmp_path / "kwargs.txt"
     env = os.environ.copy()
     pythonpath = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
@@ -470,7 +474,7 @@ def test_native_opt_in_stays_cpu_only_without_cuda(tmp_path):
         {
             "BDH_BUILD_EXT": "1",
             "BDH_EXT_KWARGS": str(kwargs_trace),
-            "CUDA_HOME": str(tmp_path / "missing-cuda-home"),
+            "CUDA_HOME": str(nvcc.parents[1]),
             "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
             "PYTHONPATH": pythonpath,
         }
