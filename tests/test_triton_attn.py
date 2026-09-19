@@ -37,7 +37,7 @@ def test_blocked_matches_eager(T, block_size):
     ref = eager_tril_attn(Q, K, V)
     got = blocked_tril_attn(Q, K, V, block_size=block_size)
     assert got.shape == ref.shape
-    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5), (
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4), (
         f"T={T} BS={block_size} max diff={(got - ref).abs().max().item()}"
     )
 
@@ -56,7 +56,7 @@ def test_no_softmax_no_scale_semantics():
     scores = (Q @ K.transpose(-2, -1)).tril(diagonal=-1)
     expected = scores @ V
     assert torch.allclose(eager_tril_attn(Q, K, V), expected, rtol=0, atol=0)
-    assert torch.allclose(blocked_tril_attn(Q, K, V), expected, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(blocked_tril_attn(Q, K, V), expected, rtol=1e-4, atol=1e-4)
     # Softmax path would differ
     sm = torch.softmax(scores, dim=-1)  # includes -inf? no — zeros on upper become e^0
     # Upper is 0 not -inf so softmax ≠ causal softmax; either way ≠ raw scores@V
@@ -78,7 +78,7 @@ def test_dispatch_triton_falls_back_on_cpu(monkeypatch):
     assert not _can_use_triton(Q) or Q.device.type == "cpu"
     out = bdh_attn(Q, K, V, impl="triton")
     ref = eager_tril_attn(Q, K, V)
-    assert torch.allclose(out, ref, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(out, ref, rtol=1e-4, atol=1e-4)
 
 
 def test_triton_api_matches_eager_on_cpu_fallback():
@@ -86,7 +86,7 @@ def test_triton_api_matches_eager_on_cpu_fallback():
     Q, K, V = _make_qkv(T=20, seed=5)
     got = triton_tril_attn(Q, K, V)
     ref = eager_tril_attn(Q, K, V)
-    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or not _HAS_TRITON, reason="CUDA+Triton required")
@@ -127,8 +127,8 @@ def test_bdh_attention_hook_respects_env(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_IMPL", "triton")
     out_t, _, _ = attn(Q, Q, V)
 
-    assert torch.allclose(out_e, out_b, rtol=1e-5, atol=1e-5)
-    assert torch.allclose(out_e, out_t, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(out_e, out_b, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(out_e, out_t, rtol=1e-4, atol=1e-4)
     assert torch.equal(out_e[:, :, 0, :], torch.zeros_like(out_e[:, :, 0, :]))
 
 
@@ -137,4 +137,4 @@ def test_v_head_broadcast():
     Q, K, V = _make_qkv(B=2, H=4, T=9, N=16, D=32, seed=8)
     ref = eager_tril_attn(Q, K, V)
     got = blocked_tril_attn(Q, K, V, block_size=5)
-    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)

@@ -14,7 +14,13 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from kernels.attention import blocked_tril_attn, eager_tril_attn, triton_tril_attn
+from kernels.attention import (
+    blocked_tril_attn,
+    eager_tril_attn,
+    max_score_tile_elems,
+    online_tril_attn,
+    triton_tril_attn,
+)
 from kernels.attention_dispatch import backend_info
 
 
@@ -52,25 +58,39 @@ def main():
     # Correctness spot-check
     ref = eager_tril_attn(Q, K, V)
     blk = blocked_tril_attn(Q, K, V)
+    onl = online_tril_attn(Q, K, V)
     tri = triton_tril_attn(Q, K, V)
     d_blk = (blk - ref).abs().max().item()
+    d_onl = (onl - ref).abs().max().item()
     d_tri = (tri - ref).abs().max().item()
-    print(f"correctness max|blocked-eager|={d_blk:.3e}  max|triton_path-eager|={d_tri:.3e}")
+    print(
+        f"correctness max|blocked-eager|={d_blk:.3e}  "
+        f"max|online-eager|={d_onl:.3e}  "
+        f"max|triton_path-eager|={d_tri:.3e}"
+    )
+    print(
+        f"score peak elems: eager T*T={T*T}  "
+        f"blocked/online bound={max_score_tile_elems(T, 64)}  "
+        f"(no full T×T materialization)"
+    )
 
     t_eager = bench(eager_tril_attn, (Q, K, V), device=device)
     t_blocked = bench(blocked_tril_attn, (Q, K, V), device=device)
+    t_online = bench(online_tril_attn, (Q, K, V), device=device)
     t_triton = bench(triton_tril_attn, (Q, K, V), device=device)
 
     print(f"eager   median: {t_eager:.3f} ms")
     print(f"blocked median: {t_blocked:.3f} ms  ({t_eager / t_blocked:.2f}× vs eager)" if t_blocked else "")
+    print(f"online  median: {t_online:.3f} ms  ({t_eager / t_online:.2f}× vs eager)" if t_online else "")
     print(f"triton  median: {t_triton:.3f} ms  ({t_eager / t_triton:.2f}× vs eager)" if t_triton else "")
 
     if device.type != "cuda":
         print(
             "NOTE: CPU-only box — Triton kernel not executed; "
-            "BDH_ATTN_IMPL=triton uses blocked pure-PyTorch fallback. "
-            "Expect GPU speedup from fused kernel; on CPU blocked may be "
-            "slower than eager for small T (Python tile loop overhead)."
+            "BDH_ATTN_IMPL=triton uses blocked/online pure-PyTorch fallback. "
+            "Online fusion lowers peak score memory (no full T×T); on CPU the "
+            "Python tile/row loop is often slower than eager for modest T. "
+            "Do not claim GPU wins from these CPU medians."
         )
 
 

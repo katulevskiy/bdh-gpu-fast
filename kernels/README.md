@@ -36,7 +36,7 @@ Default remains **eager**.
 
 | Path | Role |
 |------|------|
-| `attention.py` | cold tril + decode: `blocked_*`, `triton_*`, shared `_tiled_score_v` |
+| `attention.py` | cold tril + decode: `blocked_*` / `online_*`, `triton_*`, shared `_tiled_score_v` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref (full + decode) |

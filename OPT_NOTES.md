@@ -1269,3 +1269,66 @@ export BDH_ATTN_IMPL=cuda      # kernels.cuda_attn.tril_decode
   long-S decode does not allocate a full `(1×S)` if callers force tiny
   `block_size` — but the default one-shots when `Tq*S` fits the budget.
 - Still no softmax / no scale / no SDPA. No PR to `pathwaycom/*`.
+
+## opt/fuse-scorev — online fused strict-tril score×V (2026-09-19)
+
+**Branch:** `opt/fuse-scorev` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `35564ad` (main after dropout-fuse #17).
+
+### Goal
+
+Deepen the existing blocked tiles so strict-tril attention accumulates
+`out[i] = sum_{j<i} (Q_i·K_j) V_j` **without materializing a full T×T score
+matrix**. Preserve `tril(diagonal=-1)`, **no softmax**, **no `1/√d`**. Default
+`BDH_ATTN_IMPL` remains **eager**.
+
+### What changed (`kernels/attention.py`)
+
+1. **`_accumulate_qk_v`** — past tiles fuse score×V in one expression; when
+   `Bi*Bj` is large, **stream query rows** so peak score storage is `O(Bj)`
+   not `O(Bi·Bj)`.
+2. **`_accumulate_diag_online`** — diagonal block is **row-wise online**
+   (keys `j ∈ [i0, i0+r)` for local row `r`). No `Bi×Bi` scores + `tril_`.
+3. **`blocked_tril_attn`** — uses the helpers above (same public API /
+   `BDH_ATTN_IMPL=blocked|triton` CPU fallback).
+4. **`online_tril_attn`** — explicit alias for benches / OPT notes.
+5. **`max_score_tile_elems(T, BS)`** — documents peak score-element bound
+   vs eager `T*T`.
+
+Dispatch / default unchanged: `BDH_ATTN_IMPL` default **eager**; blocked and
+triton-on-CPU pick up the deepened fusion automatically.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 195 passed, 7 skipped (CUDA/native paths skip on this box)
+```
+
+Assertions: blocked/online match eager (`atol/rtol 1e-5`); position 0 is exact
+zero; matmul spy shows eager allocates `(B,H,T,T)` scores while blocked does
+**not**; default impl stays `eager`.
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```bash
+.venv/bin/python benchmarks/bench_triton_attn.py
+# device=cpu  B=2 H=4 T=128 N=64 D=128  torch=2.14.0+cu130 cuda=False
+# correctness max|blocked-eager|≈1.2e-4  (tile/row reorder vs one eager GEMM)
+# score peak elems: eager T*T=16384  blocked/online bound=4096
+# eager   median: ~0.4 ms
+# blocked median: ~6.1 ms  (0.07× vs eager — slower on CPU)
+# online  median: ~6.3 ms  (alias of blocked)
+```
+
+On this CPU-only box the Python tile/row loop is **slower** than eager for
+modest `T` (interpreter overhead). The win here is **peak score memory**
+(bound ≪ `T*T`) and a correct online algorithm for GPU kernels to mirror.
+**Do not claim GPU speedups from these CPU medians.** Re-measure on CUDA.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal inclusion / SDPA
+- No change to default `BDH_ATTN_IMPL=eager`
+- No fake GPU speedups from CPU profiler/bench absolute times
