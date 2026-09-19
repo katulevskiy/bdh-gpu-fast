@@ -225,17 +225,22 @@ def _tiled_score_v(
     if Tq == 1 and Vh.size(1) == 1 and H != 1:
         Qf = Q.reshape(B * H, 1, _N)
         Kf = K.reshape(B * H, S, _N)
+        # Reuse one 3-D shared-V view across the whole past scan. This keeps
+        # the cache's (B,1,S,D) layout out of the tile loop and never stages
+        # a repeated B*H value tensor.
+        Vshared = Vh[:, 0, :, :]
         out = Q.new_zeros(B, H, 1, D)
         outf = out.reshape(B * H, 1, D)
         if S <= BS or Tq * S <= budget:
             scores = torch.bmm(Qf, Kf.transpose(1, 2))
-            _broadcast_t1_score_v_into(outf, scores, Vh, B=B, H=H, beta=0)
+            _broadcast_t1_score_v_into(
+                outf, scores, Vshared, B=B, H=H, beta=0
+            )
             return out
         for j0 in range(0, S, BS):
             j1 = min(j0 + BS, S)
-            tile = j1 - j0
             Kj = Kf[:, j0:j1, :]
-            Vj = Vh[:, :, j0:j1, :]
+            Vj = Vshared[:, j0:j1, :]
             scores = torch.bmm(Qf, Kj.transpose(1, 2))
             _broadcast_t1_score_v_into(outf, scores, Vj, B=B, H=H, beta=1)
             del scores
@@ -341,49 +346,50 @@ def _broadcast_t1_score_v_into(
 ) -> None:
     """Accumulate a T=1 shared-V tile without a score×V product buffer.
 
-    ``baddbmm`` has no head broadcast, so the inference path batches one
-    value view per sample (with a zero-stride head expansion) and writes each
-    result directly into ``target``. This keeps the CacheManager layout
-    ``(B,1,S,D)`` unexpanded and removes the temporary product from the hot
-    blocked/online decode epilogue. Training keeps the graph-safe matmul
-    fallback because ``out=`` operators do not participate in autograd.
+    ``baddbmm`` has no head broadcast, so the B=1 inference path batches one
+    zero-stride value view across heads and writes directly into ``target``.
+    For B>1, one broadcast ``matmul`` handles the whole batch (avoiding a
+    Python loop); only its small T=1 output tile is added for beta=1. This
+    keeps the CacheManager layout ``(B,1,S,D)`` unexpanded and removes any
+    repeated B*H staging. Training keeps the graph-safe matmul fallback
+    because ``out=`` operators do not participate in autograd.
     """
+    # Accept either the cache-shaped (B,1,Bj,D) view or the reused
+    # (B,Bj,D) shared-V view from _tiled_score_v.
+    Vshared = Vj[:, 0, :, :] if Vj.dim() == 4 else Vj
     Bi, Bj = scores.size(1), scores.size(2)
+    target4 = target.view(B, H, Bi, Vshared.size(-1))
+    scores4 = scores.view(B, H, Bi, Bj)
     use_out = not torch.is_grad_enabled() or not any(
         t.requires_grad for t in (target, scores, Vj)
     )
     if use_out:
         # B=1 is the common generate configuration. Keep the already-flattened
         # BH views and issue one direct baddbmm rather than rebuilding 4-D
-        # views and entering a Python batch loop. The zero-stride head view is
-        # read-only and preserves CacheManager's unexpanded (B,1,S,D) V.
+        # views and entering a one-iteration Python batch loop. The zero-stride
+        # head view is read-only and preserves CacheManager's unexpanded V.
         if B == 1:
-            Vshared = Vj[0, 0].unsqueeze(0).expand(H, Bj, Vj.size(-1))
+            Vhead = Vshared[0].unsqueeze(0).expand(H, Bj, Vshared.size(-1))
             torch.baddbmm(
                 target[:H],
                 scores[:H],
-                Vshared,
+                Vhead,
                 beta=beta,
                 out=target[:H],
             )
             return
 
-        target4 = target.view(B, H, Bi, Vj.size(-1))
-        scores4 = scores.view(B, H, Bi, Bj)
-        for b in range(B):
-            Vshared = Vj[b, 0].unsqueeze(0).expand(H, Bj, Vj.size(-1))
-            torch.baddbmm(
-                target4[b],
-                scores4[b],
-                Vshared,
-                beta=beta,
-                out=target4[b],
-            )
+        # For B>1, an ordinary broadcast matmul removes the per-sample Python
+        # loop. beta=0 can write directly; beta=1 pays only one small T=1
+        # product tile before adding it to the accumulated output.
+        V4 = Vshared.unsqueeze(1)
+        if beta == 0:
+            torch.matmul(scores4, V4, out=target4)
+        else:
+            target4.add_(torch.matmul(scores4, V4))
         return
 
-    target4 = target.view(B, H, Bi, Vj.size(-1))
-    scores4 = scores.view(B, H, Bi, Bj)
-    product = torch.matmul(scores4, Vj).reshape_as(target)
+    product = torch.matmul(scores4, Vshared.unsqueeze(1)).reshape_as(target)
     if beta == 0:
         target.copy_(product)
     else:
