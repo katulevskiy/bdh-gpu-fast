@@ -581,6 +581,73 @@ def test_disabled_scaler_falls_back_to_unscaled_step_and_clears_grads(monkeypatc
     assert model.weight.grad is None
 
 
+def test_forward_only_scaler_path_keeps_ce_in_fp32_and_clears_grads(monkeypatch):
+    """Forward-only AMP keeps CE in fp32 before the injected scaler path."""
+    events = []
+    ce_dtypes = []
+
+    class _ScaledLoss:
+        def __init__(self, loss):
+            self.loss = loss
+
+        def backward(self):
+            events.append("backward")
+            self.loss.backward()
+
+    class _ProbeScaler:
+        def is_enabled(self):
+            return True
+
+        def scale(self, loss):
+            events.append("scale")
+            return _ScaledLoss(loss)
+
+        def step(self, optimizer):
+            events.append("step")
+            optimizer.step()
+
+        def update(self):
+            events.append("update")
+
+    original_cross_entropy = torch.nn.functional.cross_entropy
+
+    def _record_cross_entropy(*args, **kwargs):
+        ce_dtypes.append(args[0].dtype)
+        return original_cross_entropy(*args, **kwargs)
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.eye(3))
+
+        def forward(self, x, y=None):
+            logits = (x @ self.weight).to(torch.float16)
+            return logits, None
+
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", True)
+    monkeypatch.setattr(tr, "_use_scaler", True)
+    monkeypatch.setattr(tr, "scaler", _ProbeScaler())
+    monkeypatch.setattr(torch.nn.functional, "cross_entropy", _record_cross_entropy)
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    initial_weight = model.weight.detach().clone()
+
+    loss = tr.train_step(
+        model,
+        optimizer,
+        torch.tensor([[[2.0, 0.0, 0.0], [0.0, 2.0, 0.0]]]),
+        torch.tensor([[0, 1]]),
+    )
+
+    assert loss.dtype is torch.float32
+    assert ce_dtypes == [torch.float32]
+    assert events == ["scale", "backward", "step", "update"]
+    assert not torch.equal(model.weight.detach(), initial_weight)
+    assert model.weight.grad is None
+
+
 def test_cuda_amp_throughput_claim_reports_live_runtime(monkeypatch):
     """A live CUDA runtime is the only positive throughput claim surface."""
     with monkeypatch.context() as mp:
