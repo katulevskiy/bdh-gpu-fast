@@ -413,10 +413,11 @@ def test_successful_backward_probe_returns_clean_wrapper(
 
 @pytest.mark.parametrize("caller_training", [False, True])
 @pytest.mark.parametrize("with_targets", [False, True])
+@pytest.mark.parametrize("preexisting_grads", [False, True])
 def test_eval_probe_is_no_grad_and_restores_caller_state(
-    monkeypatch, capsys, caller_training, with_targets
+    monkeypatch, capsys, caller_training, with_targets, preexisting_grads
 ):
-    """The eval probe uses no-grad with or without targets and restores mode."""
+    """The eval probe preserves grads, handles targets, and restores mode."""
     import train as tr
 
     monkeypatch.setenv("BDH_COMPILE", "1")
@@ -444,6 +445,12 @@ def test_eval_probe_is_no_grad_and_restores_caller_state(
             return self.module(x, y) if y is not None else self.module(x)
 
     model = bdh.BDH(_small_cfg()).train(caller_training)
+    expected_grads = []
+    if preexisting_grads:
+        for index, param in enumerate(model.parameters(), start=1):
+            grad = torch.full_like(param, float(index))
+            param.grad = grad
+            expected_grads.append(grad.clone())
     wrapper = EvalProbe(model)
 
     def compile_spy(compiled_model, **kwargs):
@@ -471,5 +478,10 @@ def test_eval_probe_is_no_grad_and_restores_caller_state(
     assert out is wrapper
     assert out.training is caller_training
     assert model.training is caller_training
+    if preexisting_grads:
+        assert all(
+            param.grad is not None and torch.equal(param.grad, expected)
+            for param, expected in zip(model.parameters(), expected_grads)
+        )
     assert "torch.compile enabled (mode=default, probe=eval" in captured
     assert "first probe failed" not in captured
