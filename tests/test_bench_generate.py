@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -27,6 +28,25 @@ def test_parse_threshold_sweep_is_stable_and_deduplicated():
 def test_parse_threshold_sweep_rejects_invalid_values(raw):
     with pytest.raises(ValueError):
         bench_generate._parse_threshold_sweep(raw)
+
+
+def test_run_impls_rejects_invalid_selection_before_model_setup(
+    monkeypatch, capsys
+):
+    """Invalid backend selections fail closed before device/model work."""
+    monkeypatch.setattr(
+        bench_generate,
+        "_cfg",
+        lambda args: pytest.fail("invalid impls must not build a model config"),
+    )
+
+    cases = (
+        ("blocked", "--impls must include eager"),
+        ("eager,warp", "unknown impl 'warp'"),
+    )
+    for raw, expected in cases:
+        assert bench_generate.run_impls(argparse.Namespace(impls=raw), None) == 2
+        assert expected in capsys.readouterr().out
 
 
 def test_attn_impl_restores_environment_after_exception(monkeypatch):
