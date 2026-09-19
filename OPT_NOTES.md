@@ -7451,3 +7451,45 @@ the unavailable-runtime no-allocation contract, and both prefetch defaults.
 Validation is CPU-only; the focused tests cover CPU, false availability, and
 availability-probe exceptions. No CUDA H2D correctness, overlap, timing, or
 speedup claim is made.
+
+## opt/profile-v20 — CPU re-profile after #247–#249 (2026-09-19)
+
+**Branch:** `opt/profile-v20` on the private `katulevskiy/bdh-gpu-opt` repository
+only. **Base tip:** `567c1bf` (#249, including #247–#248). This is CPU-only evidence;
+it makes no GPU performance claim.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+.venv/bin/python benchmarks/profile_forward.py \
+  --device cpu --mode all --warmup 2 --wait 1 --active 3
+# torch 2.14.0+cu130 cuda=False device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+This matches profile-v19: two warmups, one wait, and three active steps. The
+values below are aggregate calls across the three active steps, followed by the
+per-active-call count. Operator counts are the comparison signal; profiler
+timings are not used as a performance claim.
+
+### CPU profile counts
+
+| Mode | `aten::copy_` | `aten::cat` | `aten::contiguous` |
+|---|---:|---:|---:|
+| Attention | **6 / 3 = 2 per call** | **0** | **0** |
+| Forward | **36 / 3 = 12 per call** | **0** | **0** |
+| Generate | **1,182 / 3 = 394 per call** | **0** | **0** |
+
+Relative to profile-v19, every requested count is unchanged: attention
+`copy_`=2/call, forward `copy_`=12/call, and generate `copy_`=394/call;
+`cat` and `contiguous` remain zero in all three modes. The honest result is
+**flat versus v19**. No timing, speedup, or CPU-to-GPU conclusion is drawn.
+
+### Verdict / non-goals
+
+- The post-#247/#249 tip does not change these matched CPU operator counts or
+the default model behavior.
+- Attention remains raw scores × strict `tril(diagonal=-1)`.
+- No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
+claimed; real GPU measurement remains open.
