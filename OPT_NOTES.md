@@ -6738,3 +6738,51 @@ remain unchanged (`page_size=None` / `cache_page_size=None` still preallocate
 - No softmax / scale / SDPA; raw scores × `tril(diagonal=-1)` preserved
 - No default change and no generate-path change
 - No PRs to `pathwaycom/*`; private repo only
+
+## opt/profile-v16 — CPU re-profile after #159/#160 (2026-09-19)
+
+**Branch:** `opt/profile-v16` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR).
+**Base tip:** `717c38e` (`main`, after #159 zerograd logger fallback and #160
+cache-bench-v2; includes #158 docs and #157 profile-v15). This profile is
+CPU-only and makes no GPU claim.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+/workspace/bdh-gpu-opt/.venv/bin/python benchmarks/profile_forward.py \
+  --device cpu --mode all --warmup 2 --wait 1 --active 3
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The harness uses two warmups, one wait, and three active steps, matching
+profile-v15. Percentages below are self-CPU percentages from those three
+active steps; counts are aggregate counts followed by the per-active-call
+count. `cat` and `contiguous` were absent from all three CPU traces (zero
+calls).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators | copy_ / cat / contiguous |
+|------|-------------------------|---------------------------|
+| Attention | `aten::bmm` **29.74%**, `aten::mul` **22.64%**, `aten::complex` **16.18%**, `aten::copy_` **11.32%**, `aten::add` **7.60%**, `aten::sub` **6.09%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
+| Forward | `aten::bmm` **28.15%**, `aten::mm` **23.15%**, `aten::mul` **15.20%**, `aten::complex` **12.13%**, `aten::copy_` **7.77%**, `aten::clamp_min_` **2.97%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
+| Generate | `aten::mm` **21.68%**, `aten::bmm` **14.24%**, `aten::mul` **3.10%**, `aten::matmul` **2.37%**, `aten::native_layer_norm` **2.34%**, `aten::einsum` **2.00%**, `aten::copy_` **0.87%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
+
+The tip preserves raw scores × strict `tril(diagonal=-1)` attention: no
+softmax, scale, or SDPA. Relative to profile-v15, all copy/cat/contiguous
+counts are unchanged. The self-CPU mix moves modestly within this short CPU
+trace (attention bmm 31.99%→29.74%, forward bmm 29.05%→28.15%, generate mm
+21.81%→21.68%), so the honest result is **flat versus v15**, not a speedup
+claim. Absolute profiler milliseconds are omitted because they are CPU-box
+and profiler dependent; these are not GPU performance measurements.
+
+### Verdict / non-goals
+
+- CPU profile recorded after #159/#160 on the `717c38e` main tip.
+- Defaults remain unchanged; no attention semantic change was made.
+- No GPU timing, kernel-on-hardware result, correctness, or speedup claim.
+- P0 remains real GPU measurement, including cold CUDA/Triton validation.
+- No PRs to `pathwaycom/*`; private repository only.
