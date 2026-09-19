@@ -707,3 +707,35 @@ def test_multiple_query_tiles_accumulate_strict_past_gradients(impl):
     assert torch.equal(K.grad[:, :, 128:, :], torch.zeros_like(K.grad[:, :, 128:, :]))
     assert torch.equal(V.grad[:, :, 128:, :], torch.zeros_like(V.grad[:, :, 128:, :]))
 
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_zero_stride_self_attn_q_and_v_views_reduce_base_gradients(impl):
+    """Self-attn must reduce duplicate Q/K and broadcast-V paths together."""
+    generator = torch.Generator().manual_seed(2045)
+    Q_base = torch.randn(
+        1, 1, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    Q = Q_base.expand(2, 3, 5, 4)
+    V_base = torch.randn(
+        1, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = V_base.expand(2, 3, 5, 6)
+    dO = torch.randn(2, 3, 5, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, Q, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, Q_ref, V_ref)
+
+    assert Q.stride(0) == 0 and Q.stride(1) == 0
+    assert V.stride(0) == 0 and V.stride(1) == 0
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+
+    assert torch.allclose(
+        Q_base.grad, Q_ref.grad.sum(dim=(0, 1), keepdim=True), rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(
+        V_base.grad, V_ref.grad.sum(dim=(0, 1), keepdim=True), rtol=1e-12, atol=1e-12
+    )
+
