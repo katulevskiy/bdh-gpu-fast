@@ -323,6 +323,29 @@ def test_fused_backward_matches_eager_for_arbitrary_upstream_gradient():
     assert torch.equal(ve.grad, vf.grad)
 
 
+@pytest.mark.parametrize(
+    ("name", "rotate", "kwargs"),
+    [
+        ("blocked", fused_rope_rotate_blocked, {"block": 3}),
+        ("triton-cpu-fallback", fused_rope_rotate_triton, {}),
+    ],
+)
+def test_cpu_fused_entrypoints_backward_match_eager_for_arbitrary_upstream_gradient(
+    name, rotate, kwargs
+):
+    """CPU-safe fused entries preserve pair-specific upstream gradients."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=133)
+    ve = v.detach().requires_grad_(True)
+    vf = v.detach().requires_grad_(True)
+    ye = eager_rope_rotate(ve, cos, sin)
+    yf = rotate(vf, cos, sin, **kwargs)
+    torch.manual_seed(134)
+    grad = torch.randn_like(ye)
+    ye.backward(grad)
+    yf.backward(grad)
+    assert torch.equal(ve.grad, vf.grad), name
+
+
 def test_half_dtype_cast_path_matches():
     """fp32 cis + fp16 v: cast-then-add rounding matches eager."""
     cfg = _small_cfg()
