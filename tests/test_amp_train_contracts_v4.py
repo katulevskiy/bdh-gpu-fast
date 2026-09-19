@@ -187,3 +187,10 @@ def test_gradscaler_gate_is_cuda_float16_only(
         mp.setattr(torch.cuda, "is_available", lambda: cuda_available)
         assert tr._grad_scaler_allowed(amp_name) is expected
     tr.configure_amp("float32")
+
+
+def test_cpu_amp_throughput_claim_is_none(monkeypatch):
+    """CPU AMP remains correctness-only and cannot claim GPU throughput."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cpu"))
+        assert tr.amp_throughput_claim_device() == "none"
