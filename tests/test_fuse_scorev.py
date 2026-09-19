@@ -60,6 +60,23 @@ def test_online_blocked_match_eager_for_distinct_qk():
     assert torch.allclose(got_o, ref, rtol=1e-4, atol=1e-4)
 
 
+def test_online_blocked_match_eager_for_distinct_qk_and_per_head_v():
+    """Score×V must preserve distinct per-head values on the long CPU path."""
+    B, H, T, N, D = 2, 3, 257, 7, 5
+    g = torch.Generator(device="cpu").manual_seed(33)
+    Q = torch.randn(B, H, T, N, generator=g)
+    K = torch.randn(B, H, T, N, generator=g)
+    V = torch.randn(B, H, T, D, generator=g)
+
+    ref = eager_tril_attn(Q, K, V)
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.allclose(ref, expected, rtol=1e-5, atol=1e-5)
+
+    for fn in (blocked_tril_attn, online_tril_attn):
+        got = fn(Q, K, V, block_size=64)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
+
+
 def test_online_blocked_grad_matches_eager_for_distinct_qk():
     """Score×V must preserve Q/K/V gradients for distinct Q and K."""
     Q, _, V = _make_qkv(
@@ -158,7 +175,7 @@ def test_max_score_tile_bound_vs_full_txt():
     bound = max_score_tile_elems(T, BS)
     full = T * T
     assert bound < full
-    # Vectorized blocked: past Bi×i0 (budget-capped) + Bi×Bi diag — still ≪ T×T
+    # Vectorized blocked: past Bi×i0 (budget-capped) + diagonal Bi×Bi — still ≪ T×T
     assert bound <= max(BS * (T - 1), BS * BS)
     assert bound >= BS - 1
 
