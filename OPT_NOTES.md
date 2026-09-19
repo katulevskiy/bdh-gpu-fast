@@ -282,3 +282,33 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
   `from kernels.cuda_attn import tril_score_v` when integrating; keeps default
   training path unchanged until GPU validation.
 - Still **do not** use `F.scaled_dot_product_attention`.
+
+## Profiler (operator-level)
+
+Harness: `benchmarks/profile_forward.py`
+
+```bash
+cd /workspace/bdh-gpu-opt
+source .venv/bin/activate
+python benchmarks/profile_forward.py              # attn + forward + generate
+python benchmarks/profile_forward.py --mode attn
+python benchmarks/profile_forward.py --mode forward --T 256
+python benchmarks/profile_forward.py --mode generate --new-tokens 32
+```
+
+- Activities: CPU always; CUDA when `torch.cuda.is_available()`.
+- Chrome traces: `benchmarks/traces/bdh_{attn,forward,generate}_{cpu|cuda}.json`
+  (gitignored; dir kept via `.gitkeep`). Open in `chrome://tracing` or Perfetto.
+- Prints top ops by **CPU total** and **self CPU**.
+- Ranked follow-ups: see `OPT_BACKLOG.md`.
+
+### Snapshot (CPU, 2026-09-19, profiler overhead included)
+
+Same cfg as `bench_forward.py` (4 layers, d=128, B=4, T=128; gen 16→+32).
+Use **percentages**, not absolute ms (profiler inflates wall time heavily).
+
+| Mode | Top self-CPU ops (approx) | Takeaway |
+|------|---------------------------|----------|
+| Attention | `mul` ~28%, `copy_` ~20%, `bmm` ~12%, RoPE trig ~20%, `tril_` ~6% | Full TxT `bmm` then mask; RoPE + copies expensive on CPU |
+| Forward | `copy_` ~23%, `mul` ~16%, `bmm` ~13%, LN ~9%, `mm` ~7%, ReLU ~7% | Matmul + memory movement; compile/fuse candidates |
+| Generate | `bmm` ~42%, `mm` ~28%, LN ~11%, `cat` ~10% | Incremental GEMM dominates; **cache `cat` is the memory tax** |
