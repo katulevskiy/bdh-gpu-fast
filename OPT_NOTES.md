@@ -6573,3 +6573,34 @@ account for the warmed generate total at about **394 `copy_`/call** with
 - No custom sampler, cache-layout change, default RNG-stream change, or GPU
   timing claim.
 - No public or `pathwaycom/*` PRs; private repository only.
+
+## opt/rope-fuse-v3 — reuse warmed T>1 table narrows (2026-09-19)
+
+**Branch:** `opt/rope-fuse-v3` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no `pathwaycom/*`).
+**Base tip:** `d60380f` (`main`, after #152; includes #90/#124/#138).
+
+### Audit / deepen
+
+The CPU-safe RoPE fuse keeps the default `BDH_ROPE_IMPL=eager` behavior and
+adds one narrow cache for repeated table-backed `T>1` `(cos, sin)` ranges.
+When a caller does not hoist `cos_sin` itself, the covered range now reuses the
+same view until the single-slot range changes; rebuilding the generate table
+invalidates the view. No RoPE math, attention semantics, GPU path, or timing
+claim changes. The fused T>1 pair store and paired T=1 path remain as landed.
+
+### CPU validation
+
+```text
+python -m pytest tests/test_rope_cache.py tests/test_rope_fuse.py tests/test_rope_decode.py -q
+# 39 passed, 2 skipped in 2.04s
+```
+
+No GPU is available here, so no GPU timing, kernel-on-hardware correctness, or
+speedup claim is made. Attention remains raw scores × strict
+`tril(diagonal=-1)`.
+
+### Non-goals
+
+- No default eager, attention math, cache table contents, or generate behavior change.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.
