@@ -16,14 +16,23 @@ from kernels.attention_dispatch import (  # noqa: E402
 )
 
 
-def test_invalid_cold_threshold_does_not_poison_decode_gate(monkeypatch):
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        ("not-an-int", "must be an int"),
+        ("-1", "must be >= 0"),
+    ],
+)
+def test_invalid_cold_threshold_does_not_poison_decode_gate(
+    monkeypatch, raw, message
+):
     """An invalid cold-only override leaves the shared decode gate usable."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
     monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "6")
-    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "not-an-int")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raw)
 
-    with pytest.raises(ValueError, match="must be an int"):
+    with pytest.raises(ValueError, match=message):
         resolve_cold_impl(7)
 
     assert resolve_decode_impl(6) == "eager"
