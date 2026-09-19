@@ -62,3 +62,25 @@ def test_invalid_cold_threshold_recovers_to_shared_fallback(monkeypatch):
     assert resolve_cold_impl(7) == "eager"
     assert resolve_cold_impl(8) != "eager"
     assert resolve_decode_impl(7) == "eager"
+
+
+@pytest.mark.parametrize(
+    ("impl", "expected"),
+    [
+        ("blocked", "blocked"),
+        ("triton", "triton"),
+        ("cuda", "cuda"),
+        ("online", "blocked"),
+    ],
+)
+def test_invalid_cold_threshold_does_not_override_explicit_backend(
+    monkeypatch, impl, expected
+):
+    """An invalid cold override cannot disturb an explicit backend choice."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "6")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "not-an-int")
+
+    assert resolve_cold_impl(99) == expected
+    assert resolve_decode_impl(99) == expected
