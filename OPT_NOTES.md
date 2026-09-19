@@ -7003,5 +7003,15 @@ diagnostic contract. A focused CPU matrix also covers the long-T (`T=257`)
 Triton fallback against blocked and eager strict raw score ×
 `tril(diagonal=-1)` references for both shared-V and per-head-V layouts.
 
+### CPU-safe validation
+
+```text
+python -m pytest tests/test_triton_cold_v5.py tests/test_triton_attn.py -q -rs
+# 39 passed, 3 skipped
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q -rs
+# 593 passed, 19 skipped, 3 warnings
+```
+
 No CUDA allocation, kernel launch, timing, or GPU claim is added. Defaults stay
 eager and `BDH_ATTN_AUTO` remains opt-in.
