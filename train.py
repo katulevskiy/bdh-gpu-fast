@@ -622,6 +622,24 @@ class DataLoaderBatchSource:
         # DataLoader already pin_memory'd on CUDA; non_blocking H2D, no .item()
         return _to_train_device(x, y)
 
+    def close(self) -> None:
+        """Stop DataLoader workers and make shutdown explicit and idempotent."""
+        iterator = self._it
+        if iterator is None:
+            return
+        try:
+            shutdown = getattr(iterator, "_shutdown_workers", None)
+            if callable(shutdown):
+                shutdown()
+        finally:
+            self._it = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 def make_batch_source(split: str = "train"):
     """Default: BatchPrefetcher. Set BDH_DATALOADER=1 for DataLoader + workers."""

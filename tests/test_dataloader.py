@@ -674,6 +674,19 @@ def test_dataloader_persistent_workers(tr, monkeypatch):
     assert shapes == [(tr.BATCH_SIZE, tr.BLOCK_SIZE)] * 3
 
 
+def test_dataloader_close_shuts_down_cpu_workers_idempotently(tr, monkeypatch):
+    """Explicit CPU shutdown stops persistent workers and remains idempotent."""
+    monkeypatch.setattr(tr, "NUM_WORKERS", 2)
+    src = tr.DataLoaderBatchSource("train")
+    iterator = src._it
+    workers = tuple(iterator._workers)
+    src.close()
+
+    assert src._it is None
+    assert all(not worker.is_alive() for worker in workers)
+    src.close()
+
+
 def test_make_batch_source_default_is_prefetcher(tr, monkeypatch):
     monkeypatch.setattr(tr, "USE_DATALOADER", False)
     src = tr.make_batch_source("train")
