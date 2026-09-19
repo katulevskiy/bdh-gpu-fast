@@ -477,3 +477,35 @@ def test_density_probe_forwards_cli_sampling_options(monkeypatch, capsys):
     assert "density_guardrail=pass" in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=0 reason=probe_complete" in captured.out
+
+
+def test_unenforced_guardrail_failure_allows_crossover(monkeypatch, capsys):
+    """A diagnostic-only miss must not block the optional CPU sweep."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [{"x": 0.19, "y": 0.25, "xy": 0.07}],
+    )
+    calls = []
+
+    def fake_bench_matmul(M, K, N, density, seed=0):
+        calls.append((M, K, N, density, seed))
+        return {
+            "density_measured": density,
+            "dense_ms": 1.0,
+            "coo_ms": 2.0,
+            "csr_ms": 2.0,
+            "row_ms": 2.0,
+            "col_ms": 2.0,
+        }
+
+    monkeypatch.setattr(probe, "bench_matmul", fake_bench_matmul)
+    assert probe.main([]) == probe.EXIT_OK
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=fail" in captured.out
+    assert "CPU sparse vs dense crossover" in captured.out
+    assert len(calls) == 3 * 8
+    assert "density re-smoke guardrail failed" not in captured.err
+    assert "exit_code=0 reason=probe_complete" in captured.out
