@@ -18,7 +18,7 @@ import torch
 
 from .rope import (
     _HAS_TRITON,
-    _can_use_triton_rope,
+    triton_rope_skip_reason,
     eager_rope_rotate,
     fused_rope_rotate,
     fused_rope_rotate_blocked,
@@ -106,12 +106,20 @@ def backend_info(device: torch.device | None = None) -> dict:
     # report that Triton is skipped. This keeps diagnostics CPU-safe on hosts
     # where Triton is importable but CUDA is not usable.
     triton_usable = False
-    if dev.type == "cuda" and torch.cuda.is_available():
-        triton_usable = _can_use_triton_rope(torch.empty(1, device=dev))
+    if dev.type != "cuda":
+        skip_reason = "device-not-cuda"
+    elif not torch.cuda.is_available():
+        skip_reason = "cuda-not-available"
+    elif not _HAS_TRITON:
+        skip_reason = "triton-not-installed"
+    else:
+        skip_reason = triton_rope_skip_reason(torch.empty(1, device=dev))
+        triton_usable = skip_reason is None
     return {
         "BDH_ROPE_IMPL": resolve_rope_impl(),
         "has_triton": _HAS_TRITON,
         "triton_usable": triton_usable,
+        "triton_skip_reason": skip_reason,
         "device": str(dev),
     }
 
@@ -121,6 +129,7 @@ __all__ = [
     "bdh_rope_rotate",
     "bdh_rope_rotate_paired",
     "backend_info",
+    "triton_rope_skip_reason",
     "eager_rope_rotate",
     "fused_rope_rotate",
     "fused_rope_rotate_pytorch",
