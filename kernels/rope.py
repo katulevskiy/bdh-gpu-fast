@@ -41,6 +41,13 @@ def _validate_rope_inputs(
         raise ValueError(
             f"cos/sin last dim {cos.shape[-1]} != v last dim {v.shape[-1]}"
         )
+    try:
+        torch.broadcast_shapes(v.shape[:-1], cos.shape[:-1])
+    except RuntimeError as exc:
+        raise ValueError(
+            f"cos/sin leading dims {cos.shape[:-1]} are not broadcastable "
+            f"with v leading dims {v.shape[:-1]}"
+        ) from exc
     if out is not None:
         # dtype may differ: CacheManager.reserve can be fp32 storage while AMP
         # compute is fp16/bf16 — historical rope wrote via assignment cast.
@@ -69,6 +76,13 @@ def _validate_paired_cis(
         raise ValueError(
             f"paired cis trailing dims must be ({n_pairs}, 2), got {cos_p.shape[-2:]}"
         )
+    try:
+        torch.broadcast_shapes(v.shape[:-1], cos_p.shape[:-2])
+    except RuntimeError as exc:
+        raise ValueError(
+            f"paired cis leading dims {cos_p.shape[:-2]} are not broadcastable "
+            f"with v leading dims {v.shape[:-1]}"
+        ) from exc
     if out is not None:
         if out.shape != v.shape or out.device != v.device:
             raise ValueError(
