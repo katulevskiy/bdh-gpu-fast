@@ -1,8 +1,8 @@
-# OPT status — landed work (#1–#349; docs-v72)
+# OPT status — landed work (#1–#363; docs-v73)
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Tip: `8a5a94b` (#349, narrow top-k sampler-output layout) is the current tip. This refresh carries the requested #343–#348 matrix forward and includes #349 because it landed while the docs branch was being prepared.
+Documentation coverage: #350–#363. This branch is based on current main tip `a59b542` (#364, strided shared-V gradient contract); #364 landed while the docs branch was being prepared and is outside this refresh scope. The documented tip is `8cc215c` (#363).
 
 ## Evidence boundary
 
@@ -19,25 +19,32 @@ This sandbox is CPU-only (`torch 2.14.0+cu130`, `cuda=False`). CPU tests establi
 | Device | CPU-only; CUDA/Triton paths skip or fall back cleanly here | No GPU claim |
 | Attention | `eager` default; `blocked`, `online`, `triton`, and `cuda` opt-in | Raw strict-tril parity on CPU; GPU measure open |
 | AUTO | Off by default; long decode gate uses `past_len > 512`; cold gate may be independent | CPU dispatch/parity only |
-| RoPE | `eager` default; fused path opt-in | CPU parity only; fused GPU validation open |
-| Compile | Off by default; CPU guidance is eager-only with default mode | CUDA graphs/inductor unmeasured |
+| RoPE | `eager` default; fused path opt-in | CPU shape/parity only; fused GPU validation open |
+| Compile | Off by default; invalid probe falls back to `train_bwd`; CPU guidance is eager-only with default mode | CUDA graphs/inductor unmeasured |
 | AMP | fp32/off by default; bf16/fp16 opt-in | CPU smoke only; GPU train throughput open |
-| Sparse ReLU | Off by default; `BDH_SPARSE_PROBE=1` is explicit | CPU density only; no sparse-kernel result |
+| Sparse ReLU | Off by default; `BDH_SPARSE_PROBE=1` is explicit; no-sample guardrail skips crossover work | CPU density/control flow only; no sparse-kernel result |
 | Packed generate | Cache path remains cat-free (`aten::cat=0`) | CPU operator contract, not GPU timing |
 
 The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call for forward, and 394/call for generate, with `aten::cat=0` and `aten::contiguous=0`. These are CPU call-count observations, not GPU performance claims.
 
-## Landed since docs-v71
+## Landed in this refresh
 
 | PR | Branch / scope | What the matrix records | Result |
 |---:|---|---|---|
-| **#343** | `opt/sparse-v12` / sparse probe | Covers every supported truthy `BDH_SPARSE_PROBE` token with case/whitespace normalization; density-only work stays CPU-safe and crossover work remains skipped | Sparse remains opt-in/default-off; no GPU claim |
-| **#344** | `opt/docs-v71` / docs | Refreshed `OPT_STATUS.md` and `OPT_BACKLOG.md` through #342 | Docs-only; P0 unchanged |
-| **#345** | `opt/blocked-v12` / blocked prefill | Covers capacity-padded, non-contiguous V views for shared and head-matched layouts with raw strict-tril parity | CPU contract only |
-| **#346** | `opt/auto-thr-v12` / AUTO | Keeps invalid cold-only threshold overrides isolated from the shared decode gate and verifies recovery plus strict boundaries | CPU contract only |
-| **#347** | `opt/online-v13` / online decode | Covers multi-query reads from non-zero-offset packed K/V views and preserves the input views | CPU parity only; no GPU timing |
-| **#348** | `opt/scorev-v13` / score×V | Covers long-path shared-V output and Q/K/V gradient parity for blocked and online paths against eager strict-tril raw score×V | CPU contract only |
-| **#349** | `opt/layout-v12` / sampler layout | Adds the narrow top-k (`k=8`) strided-output branch and protects neighboring backing values | CPU contract only; current tip |
+| **#350** | `opt/docs-v72` / docs | Previous refresh through #349 | Docs-only; P0 unchanged |
+| **#351** | `opt/rope-v12` / RoPE | CPU shape contracts for unpaired/paired entrypoints, odd dimensions, cis mismatches, malformed outputs, and paired-axis mismatches | CPU contract only |
+| **#352** | `opt/gen-bench-v11` / AUTO | Explicit cold-threshold sweep remains independent of the decode threshold | CPU contract only |
+| **#353** | `opt/compile-v13` / compile | Unsupported `BDH_COMPILE_PROBE` fails closed to `train_bwd` with clean probe gradients and mode preservation | CPU contract only |
+| **#354** | `opt/cuda-build-v11` / CUDA build | `BDH_FORCE_CPU_EXT=1` is inert unless `BDH_BUILD_EXT=1`; pure-Python install remains safe | CPU contract only |
+| **#355** | `opt/attn-bwd-v12` / attention backward | Strict-past backward parity at the default 64-row tile boundary, including diagonal/future gradient zeros | CPU contract only |
+| **#356** | `opt/gpu-measure-v11` / GPU attention benchmark | Benchmark reference remains raw scores × strict `tril(diagonal=-1)` × V, without scaling or softmax | CPU contract only; no GPU timing |
+| **#357** | `opt/prefetch-v12` / DataLoader | Worker-backed batches preserve CPU tensor identity through `_to_train_device` without CUDA setup | CPU contract only |
+| **#358** | `opt/sparse-probe-v13` / sparse probe | Enforced guardrails have a distinct no-sample exit; crossover work stays skipped | CPU contract only; no GPU claim |
+| **#359** | `opt/amp-train-v13` / AMP | CPU execution cannot expose a GPU throughput claim; throughput remains gated to real CUDA | CPU contract only |
+| **#360** | `opt/auto-thr-v14` / AUTO | Blank/whitespace cold-threshold fallback keeps strict equality and above-threshold decode behavior aligned | CPU contract only |
+| **#361** | `opt/blocked-tile-v13` / blocked prefill | Float16/bfloat16 CPU inputs retain dtype while preserving raw strict-tril parity across the partial 128-row tile | CPU contract only |
+| **#362** | `opt/decode-gemm-v12` / decode | Eager, blocked, online, Triton-fallback, and CUDA dispatch preserve raw QK-transpose-times-V semantics without softmax or scaling | CPU contract only |
+| **#363** | `opt/online-decode-v14` / online decode | Empty past tensors return exact zero score×V output with expected shape and dtype across backends | CPU contract only; no GPU claim |
 
 ## Defaults and operator guidance
 
@@ -45,6 +52,7 @@ The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call
 - `BDH_ATTN_AUTO` remains unset/off; `BDH_ATTN_AUTO_THRESHOLD=512` is the retained decode threshold, with an optional independent cold threshold.
 - `BDH_ATTN_AUTOGRAD` remains opt-in. Blocked/online paths use tiled analytic backward only when explicitly enabled.
 - `BDH_ROPE_IMPL=eager`, `BDH_COMPILE=0`, `BDH_AMP_DTYPE=float32`, and sparse ReLU OFF remain unchanged.
+- `BDH_FORCE_CPU_EXT=1` remains inert unless native extension build is explicitly enabled.
 - Do not turn CPU medians, profiler times, density, skip results, or parity tests into GPU performance claims.
 
 ## Next measurement gate
