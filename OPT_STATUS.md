@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#273; #160 docs scope retained)
+# OPT status — landed work (#1–#275; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `3b3c082` (#273 blocked-tile raw-score contract, current tip) follows #272 sparse guardrail terminal coverage (`b9bf6c8`), #271 run-level GPU skip status (`75597c9`), #270 explicit prefetch H2D opt-out coverage (`dae2e07`), #268 tiled packed per-head decode gradients (`aebc449`), #266 strict-tril backward boundary queries (`cbf0831`), #265 CUDA_PATH missing-nvcc skip contract (`6d6aaab`), and profile-v20 (`f4c7cab`). Profile-v20 remains the matched CPU-only re-profile: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; #270–#273 add only CPU-safe contract/skip coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `81e0005` (#274 invalid gen-bench selection and #275 invalid AMP state, current tip) follows #273 blocked-tile raw-score contract (`3b3c082`), #272 sparse guardrail terminal coverage (`b9bf6c8`), #271 run-level GPU skip status (`75597c9`), and #270 explicit prefetch H2D opt-out coverage (`dae2e07`). Profile-v20 remains the matched CPU-only re-profile: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; #270–#275 add only CPU-safe contract/skip coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA-Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#273)
+## Landed opts (#1–#275)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -437,7 +437,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **271** | `benchmarks/bench_gpu_attn.py` | Mark run-level unavailable-device summaries with `status: skip` and carry the schema-v4 contract | CPU-safe skip coverage; no GPU timing or speedup claim | **P0** real GPU measurement remains open
 | **272** | `tests/test_sparse_probe_contract_v7.py` | Make an enforced sparse-density guardrail failure terminal before CPU crossover work; sparse remains opt-in/default-off | CPU-only terminal contract; no sparse-kernel or GPU claim | **P0** real GPU measurement / sparse validation remains open
 | **273** | `tests/test_prefill_blocked.py` | Add a deterministic blocked/online tile-boundary contract for raw `Q @ K.T` × `tril(diagonal=-1)` × `V` | CPU-only test coverage; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
-| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `3b3c082`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#273 add CPU-safe contract/skip coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **274** | `tests/test_bench_generate.py` | Fail closed on invalid generate-implementation selection before model or device setup; existing raw-score, eager-reference, parity, and cat-free contracts remain unchanged | CPU-only validation contract; no GPU timing or performance claim | **P1** GPU generate measurement remains open
+| **275** | `tests/test_amp_train_contracts_v4.py` | Preserve dtype, autocast context, scaler, and forward-only state when an invalid `float64` configuration is rejected | CPU-only failure-state coverage; no GPU timing or throughput claim | **P3** GPU AMP train measurement remains open
+| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `81e0005`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#275 add CPU-safe contract/skip coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -541,7 +543,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#271** `75597c9` marks run-level unavailable-device GPU summaries with `status: skip` under schema v4; no GPU timing or speedup evidence.
 - **#272** `b9bf6c8` makes an enforced sparse-density guardrail failure terminal before CPU crossover work; sparse remains opt-in/default-off with no GPU sparse claim.
 - **#273** `3b3c082` adds deterministic blocked/online tile-boundary coverage for raw strict-tril score×V semantics; CPU-only tests with no GPU timing or performance claim.
-- **Current tip** `3b3c082` carries the flat profile-v20 counts plus the CPU-only contracts through #273; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#274** `81e0005` adds CPU-only fail-closed validation for invalid generate implementation selection before model/device setup; no GPU performance claim.
+- **#275** `915fe71` adds CPU-only invalid-`float64` AMP failure-state coverage, preserving dtype/context/scaler/forward-only state; no GPU throughput claim.
+- **Current tip** `81e0005` carries the flat profile-v20 counts plus the CPU-only contracts through #275; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
