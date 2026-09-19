@@ -2,7 +2,7 @@
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #418–#478 plus documented tips `d9703b0` (#434) and `6181ba6`, with prior coverage retained. This branch is based on current main tip `6181ba6`; no later merges are in this refresh scope.
+Documentation coverage: #418–#478 plus documented tips `d9703b0` (#434) and `6181ba6`, with prior coverage retained. This branch is rebased onto current main tip `114883c` (#482); #480–#482 remain outside this refresh scope.
 
 ## Evidence boundary
 
