@@ -260,11 +260,11 @@ def fused_rope_rotate_blocked(
     ``y0/y1`` math as eager/fused. Used as the Triton entry's CPU fallback and
     for tile-structure parity tests. Not a claimed CPU wall win vs pytorch fuse.
     """
+    if block < 1:
+        raise ValueError(f"block must be >= 1, got {block}")
     if _is_t1_seq(v):
         return rope_rotate_t1(v, cos, sin, out=out)
     _validate_rope_inputs(v, cos, sin, out)
-    if block < 1:
-        raise ValueError(f"block must be >= 1, got {block}")
 
     n_pairs = v.shape[-1] // 2
     vp = v.reshape(*v.shape[:-1], n_pairs, 2)
