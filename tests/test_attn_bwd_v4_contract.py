@@ -31,3 +31,34 @@ def test_t1_excludes_self_attention_in_output_and_backward(impl, v_heads):
     assert torch.equal(Q.grad, torch.zeros_like(Q))
     assert torch.equal(K.grad, torch.zeros_like(K))
     assert torch.equal(V.grad, torch.zeros_like(V))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_single_query_backward_only_reaches_strict_past(impl, v_heads):
+    """A loss at query q can reach Q[q], but only K/V positions j < q."""
+    generator = torch.Generator().manual_seed(2027)
+    query = 3
+    Q = torch.randn(
+        1, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        1, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        1, v_heads, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    dO = torch.zeros_like(out)
+    dO[:, :, query, :] = torch.randn(
+        1, 3, 6, generator=generator, dtype=torch.float64
+    )
+    out.backward(dO)
+
+    # A single output row depends on its matching Q row only.
+    assert torch.equal(Q.grad[:, :, :query, :], torch.zeros_like(Q.grad[:, :, :query, :]))
+    assert torch.equal(Q.grad[:, :, query + 1 :, :], torch.zeros_like(Q.grad[:, :, query + 1 :, :]))
+    # Diagonal and future keys/values are excluded by tril(diagonal=-1).
+    assert torch.equal(K.grad[:, :, query:, :], torch.zeros_like(K.grad[:, :, query:, :]))
+    assert torch.equal(V.grad[:, :, query:, :], torch.zeros_like(V.grad[:, :, query:, :]))
