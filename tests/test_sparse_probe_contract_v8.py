@@ -130,6 +130,34 @@ def test_enforced_guardrail_checks_final_sample(monkeypatch, capsys):
     assert "exit_code=2 reason=guardrail_failed" in captured.err
 
 
+def test_enforced_guardrail_accepts_passing_final_sample(monkeypatch, capsys):
+    """A passing final sample must override an earlier transient miss."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    monkeypatch.setattr(
+        probe,
+        "short_train_density",
+        lambda **_: [
+            {"x": 0.19, "y": 0.25, "xy": 0.07},
+            {"x": 0.20, "y": 0.25, "xy": 0.08},
+        ],
+    )
+
+    def unexpected_crossover(**_):
+        raise AssertionError("density-only mode must not run crossover work")
+
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(["--density-only", "--enforce-density-guardrail"])
+        == probe.EXIT_OK
+    )
+
+    captured = capsys.readouterr()
+    assert "density_guardrail=pass" in captured.out
+    assert "final_x=0.2000 final_xy=0.0800" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=0 reason=probe_complete" in captured.out
+
+
 def test_enforced_guardrail_fails_when_only_xy_misses_floor(monkeypatch, capsys):
     """Both final density floors are required; one miss must still stop work."""
     monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
@@ -330,6 +358,7 @@ def test_enforced_guardrail_honors_explicit_skip_crossover(monkeypatch, capsys):
     assert "density_guardrail=pass" in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=0 reason=probe_complete" in captured.out
+
 
 def test_explicit_skips_complete_without_probe_work(monkeypatch, capsys):
     """Opted-in all-skip mode must remain a CPU-safe successful no-op."""
