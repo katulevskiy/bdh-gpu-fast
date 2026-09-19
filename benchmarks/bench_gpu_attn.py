@@ -165,6 +165,8 @@ def _skip_summary(
                 "detail": "torch.cuda.is_available() is false",
                 "timing_scope": "none",
                 "cuda_runtime_state": cuda_runtime["cuda_runtime_state"],
+                "cuda_built": cuda_runtime["cuda_built"],
+                "cuda_device_count": cuda_runtime["cuda_device_count"],
             }
         ],
         "mode": mode,
