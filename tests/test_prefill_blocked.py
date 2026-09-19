@@ -206,6 +206,21 @@ def test_auto_cold_mirrors_decode_threshold(monkeypatch):
     assert resolve_cold_impl(thr + 1) != "eager"
 
 
+def test_auto_cold_dispatch_preserves_blocked_contract_cpu(monkeypatch):
+    """AUTO cold dispatch selects CPU blocked and preserves strict-tril parity."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "256")
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump()
+
+    Q, K, V = _qkv(257, B=2, H=2, N=5, D=4, seed=211)
+    assert resolve_cold_impl(Q.size(2)) == "blocked"
+    got = bdh_attn(Q, K, V)
+    ref = eager_tril_attn(Q, K, V)
+    assert torch.allclose(got, ref, rtol=1e-3, atol=1e-3)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 def test_auto_does_not_override_explicit_blocked(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
