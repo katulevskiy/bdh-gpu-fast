@@ -85,6 +85,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Generate host-test repair (`opt/fix-gen-host-test` #61) — updated AUTO decode environ-get floor; semantics unchanged
 - Residual LN deepen: reuse inner LN out via `add_` (fewer add temps; `F.layer_norm` #30 path kept) (`opt/ln-deepen`) — CPU e2e ~noise
 - Compile reduce-overhead guidance (`opt/compile-reduce` #63) — CPU mode matrix and non-CUDA warning; GPU CUDA graphs still open
+- Compile fullgraph probe (`opt/compile-fullgraph` #84) — FULLGRAPH=1 × eager×AUTOGRAD; 0 Dynamo breaks on tip cold path; soft-fallback; GPU still open
 - Docs matrix v6 refresh (`opt/docs-matrix-v6` #65) — docs-only through #64; documented tip `4558501`
 
 ## Ranked next work
@@ -93,7 +94,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v7): attn `mul`~29% `bmm`~23% `copy_`~22% `tril`~0.9%; forward `copy_`~26% `mm`~23% `bmm`~23% `mul`~13%. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold` + `opt/triton-cold-v2`:** adaptive power-of-2 tiles (grow @T≥256 pair #75/#79), fused strict-tril score×V, broadcast-V staging, CPU→blocked adaptive; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
-| **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` via `benchmarks/bench_train_step.py` | Low |
+| **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn); optional `FULLGRAPH=1` (#84). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` + `FULLGRAPH` via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** + **`opt/prefill-blocked`** + **`opt/auto-tune`**: AUTO long-T cold+decode (adaptive blocked cold @T≥256), with optional independent cold threshold. CPU e2e AUTO **1.26×@1024 / 1.39×@2048**; IMPL=blocked ~1.23–1.43×; short A/B ~1.25× @1024. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
@@ -122,7 +123,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | OPT status docs refresh | **Landed** #43 `opt/docs-matrix-v2` — matrix through #40 |
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
-| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63+#70; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); dropout=0 / eval identity hardened (#70); remaining = **GPU** measure (P1) |
+| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63+#70+#84; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); dropout=0 / eval identity hardened (#70); **FULLGRAPH=1** probed (#84; 0 breaks cold eager×AUTOGRAD; soft-fallback); remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | T=1 RoPE apply deepen | **Landed** `opt/rope-decode` — `rope_rotate_t1` + table pairs / cis reuse; CPU wall ~noise; GPU open |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |

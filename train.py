@@ -552,9 +552,10 @@ def maybe_compile(
     try:
         compiled = torch.compile(model, **compile_kwargs)
     except Exception as e:
+        fg_note = f" fullgraph={COMPILE_FULLGRAPH}" if COMPILE_FULLGRAPH else ""
         print(
             f"torch.compile failed ({type(e).__name__}: {e}); using eager "
-            f"[device={device_tag} mode={COMPILE_MODE}]"
+            f"[device={device_tag} mode={COMPILE_MODE}{fg_note}]"
         )
         return model
 
@@ -596,9 +597,16 @@ def maybe_compile(
             f"fullgraph={COMPILE_FULLGRAPH}, device={device_tag})"
         )
     except Exception as e:
+        fg_note = f" fullgraph={COMPILE_FULLGRAPH}" if COMPILE_FULLGRAPH else ""
         print(
             f"torch.compile probe failed ({type(e).__name__}: {e}); using eager "
-            f"[probe={probe} device={device_tag} mode={COMPILE_MODE}]"
+            f"[probe={probe} device={device_tag} mode={COMPILE_MODE}{fg_note}]"
+            + (
+                " — FULLGRAPH=1 requires a single Dynamo graph (graph breaks "
+                "unsupported); soft-fallback to eager"
+                if COMPILE_FULLGRAPH
+                else ""
+            )
         )
         if was_training:
             model.train()

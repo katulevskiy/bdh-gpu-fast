@@ -33,6 +33,13 @@ COMPILE=1 dropout=0 vs >0 (opt/dropout-compile):
   BDH_COMPILE=1 for cfg.dropout in {0.0, 0.1}. Soft-skip if inductor/probe
   unavailable. CPU wall only — dropout=0 is the compile-friendly identity path;
   do not claim GPU wins. Opt out: BDH_BENCH_COMPILE_DROPOUT=0.
+
+COMPILE FULLGRAPH=0 vs 1 × eager × AUTOGRAD (opt/compile-fullgraph):
+  Set BDH_BENCH_COMPILE_FULLGRAPH=1 (default on). COMPILE=1 MODE=default;
+  FULLGRAPH∈{0,1} × AUTOGRAD∈{0,1} on IMPL=eager tiny cfg. Soft-skip a cell if
+  inductor/fullgraph unsupported (graph breaks → probe fallback). CPU wall
+  only — do not claim GPU / CUDA-graph wins. Opt out:
+  BDH_BENCH_COMPILE_FULLGRAPH=0.
 """
 
 from __future__ import annotations
@@ -590,6 +597,138 @@ def bench_compile_dropout_matrix(cfg_template, device, fused_ok: bool) -> None:
 
 
 
+
+def bench_compile_fullgraph_matrix(cfg, device, fused_ok: bool) -> None:
+    """Honest COMPILE=1: FULLGRAPH=0 vs 1 × eager × AUTOGRAD 0/1.
+
+    Soft-skips a cell if maybe_compile / train_step fails or falls back to
+    eager (fullgraph Unsupported on graph breaks). Restores env + train knobs
+    after. Absolute ms are device-local; no GPU / CUDA-graph claim.
+    """
+    print("--- COMPILE=1 FULLGRAPH × eager × AUTOGRAD (honest train-step) ---")
+    print(
+        f"device={device} mode={os.environ.get('BDH_COMPILE_MODE', tr.COMPILE_MODE)} "
+        f"probe={os.environ.get('BDH_COMPILE_PROBE', tr.COMPILE_PROBE)} "
+        f"cuda={torch.cuda.is_available()} cfg=layers={cfg.n_layer} d={cfg.n_embd} "
+        f"B=4 T=64 dropout={cfg.dropout} IMPL=eager"
+    )
+
+    saved = {
+        "BDH_COMPILE": os.environ.get("BDH_COMPILE"),
+        "BDH_COMPILE_FULLGRAPH": os.environ.get("BDH_COMPILE_FULLGRAPH"),
+        "BDH_ATTN_AUTOGRAD": os.environ.get("BDH_ATTN_AUTOGRAD"),
+        "BDH_ATTN_IMPL": os.environ.get("BDH_ATTN_IMPL"),
+    }
+    was_use = tr.USE_COMPILE
+    was_fg = tr.COMPILE_FULLGRAPH
+    x, y = _batch(device)
+    rows = []
+
+    def _restore():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        tr.USE_COMPILE = was_use
+        tr.COMPILE_FULLGRAPH = was_fg
+
+    try:
+        os.environ["BDH_ATTN_IMPL"] = "eager"
+        for autograd in (0, 1):
+            for fullgraph in (0, 1):
+                tag = f"AUTOGRAD={autograd} FULLGRAPH={fullgraph}"
+                if autograd:
+                    os.environ["BDH_ATTN_AUTOGRAD"] = "1"
+                else:
+                    os.environ.pop("BDH_ATTN_AUTOGRAD", None)
+                os.environ["BDH_COMPILE"] = "1"
+                os.environ["BDH_COMPILE_FULLGRAPH"] = str(fullgraph)
+                tr.USE_COMPILE = True
+                tr.COMPILE_FULLGRAPH = bool(fullgraph)
+
+                torch.manual_seed(0)
+                m = bdh.BDH(cfg).to(device)
+                m.train()
+
+                try:
+                    m = tr.maybe_compile(m, example_x=x, example_y=y)
+                except Exception as e:
+                    print(
+                        f"{tag}: soft-skip maybe_compile "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    rows.append((autograd, fullgraph, None, "soft-skip compile"))
+                    continue
+
+                if not _is_dynamo_compiled(m):
+                    print(
+                        f"{tag}: soft-skip (fell back to eager — "
+                        "inductor/probe/fullgraph unsupported)"
+                    )
+                    rows.append(
+                        (autograd, fullgraph, None, "soft-skip eager-fallback")
+                    )
+                    continue
+
+                opt = torch.optim.AdamW(
+                    m.parameters(),
+                    lr=tr.LEARNING_RATE,
+                    weight_decay=tr.WEIGHT_DECAY,
+                    fused=fused_ok,
+                )
+
+                def step():
+                    return tr.train_step(m, opt, x, y)
+
+                try:
+                    med = timed(step, warmup=2, reps=10)
+                except Exception as e:
+                    print(
+                        f"{tag}: soft-skip train_step "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    rows.append(
+                        (autograd, fullgraph, None, f"soft-skip step:{type(e).__name__}")
+                    )
+                    continue
+
+                ms = med * 1000.0
+                print(f"{tag}: median {ms:.2f} ms")
+                rows.append((autograd, fullgraph, ms, "ok"))
+    finally:
+        _restore()
+
+    print("--- FULLGRAPH summary (median ms; soft-skip = —) ---")
+    print(f"{'AUTOGRAD':>10} {'FULLGRAPH':>10} {'median_ms':>12} {'status':>24}")
+    for ag, fg, ms, status in rows:
+        med_s = f"{ms:.2f}" if ms is not None else "—"
+        print(f"{ag:>10} {fg:>10} {med_s:>12} {status:>24}")
+
+    # Ratios FULLGRAPH=0 / FULLGRAPH=1 per AUTOGRAD (when both ok)
+    for ag in (0, 1):
+        ms0 = next((ms for a, f, ms, st in rows if a == ag and f == 0 and ms), None)
+        ms1 = next((ms for a, f, ms, st in rows if a == ag and f == 1 and ms), None)
+        if ms0 is not None and ms1 is not None and ms1 > 0:
+            print(
+                f"ratio AUTOGRAD={ag} FULLGRAPH0/1: {ms0 / ms1:.2f}x  "
+                f"(>1 means FULLGRAPH=1 faster on this device)"
+            )
+
+    if device.type != "cuda":
+        print(
+            "honest: CPU wall medians only — FULLGRAPH=1 does **not** imply "
+            "CUDA graphs. Cold eager×AUTOGRAD@dropout=0 held 0 Dynamo breaks "
+            "on tip (soft-skip if Unsupported). Defaults remain "
+            "BDH_COMPILE=0, BDH_COMPILE_FULLGRAPH=0."
+        )
+    else:
+        print(
+            "GPU box: re-check FULLGRAPH=0 vs 1 under real inductor; "
+            "defaults still COMPILE=0 / FULLGRAPH=0."
+        )
+
+
 def bench_amp_vs_fp32(cfg, device, fused_ok: bool) -> None:
     """Honest tiny train_step: fp32 vs opt-in AMP (bf16 / fp16).
 
@@ -771,6 +910,16 @@ def main():
         print(
             "skip compile-dropout matrix "
             "(set BDH_BENCH_COMPILE_DROPOUT=1 to enable; default is on)"
+        )
+
+    # COMPILE=1 FULLGRAPH × eager × AUTOGRAD (opt/compile-fullgraph). Default on;
+    # opt out with BDH_BENCH_COMPILE_FULLGRAPH=0.
+    if os.environ.get("BDH_BENCH_COMPILE_FULLGRAPH", "1") in ("1", "true", "True"):
+        bench_compile_fullgraph_matrix(cfg, device, fused_ok)
+    else:
+        print(
+            "skip compile-fullgraph matrix "
+            "(set BDH_BENCH_COMPILE_FULLGRAPH=1 to enable; default is on)"
         )
 
     # Honest AMP vs fp32 (opt/amp-deepen). Default on; opt out BDH_BENCH_AMP=0.
