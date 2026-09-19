@@ -126,6 +126,30 @@ def test_cpu_flattened_bmm_padded_v_view_preserves_layout_contract(value_heads):
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_flattened_bmm_low_precision_padded_v_view_matches_eager(
+    dtype, value_heads
+):
+    """Low-precision cold tiles preserve parity for capacity-padded V views."""
+    T, B, H, N, D = 257, 2, 2, 5, 4
+    g = torch.Generator().manual_seed(29 + value_heads)
+    Q = torch.randn(B, H, T, N, dtype=dtype, generator=g) * 0.125
+    K = torch.randn(B, H, T, N, dtype=dtype, generator=g) * 0.125
+    V_storage = torch.randn(
+        B, value_heads, T, D + 1, dtype=dtype, generator=g
+    ) * 0.125
+    V = V_storage[..., :D]
+
+    assert not V.is_contiguous()
+    assert V.stride(-2) == D + 1
+    ref = eager_tril_attn(Q, K, V)
+    got = blocked_tril_attn(Q, K, V, block_size=128)
+    assert got.dtype == dtype
+    assert torch.allclose(got, ref, rtol=2e-2, atol=2e-2)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 @pytest.mark.parametrize("value_heads", [1, 3])
 def test_cpu_flattened_bmm_wide_head_parity(value_heads):
     """Wide N/D heads preserve CPU cold parity for both V layouts."""
