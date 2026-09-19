@@ -496,3 +496,54 @@ def test_sampler_accepts_nonunit_vocab_stride_with_strided_output():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1:2], ref), name
+
+
+def test_sampler_accepts_nonunit_vocab_stride_with_zero_stride_output():
+    """Non-unit vocab views must preserve the zero-stride output contract."""
+    torch.manual_seed(0)
+    logits_storage = torch.randn(2, 32, 2)
+    logits = logits_storage[..., 0]
+    assert logits.shape == (2, 32)
+    assert logits.stride() == (64, 2)
+
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-one", dict(scale=0.7, do_topk=True, top_k_n=1)),
+        ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        destination = torch.full((2, 3, 2), -123, dtype=torch.long)
+        before = destination.clone()
+        idx_out = destination[:, 1:2, :1].expand(-1, 2, -1)[:, :1, 0]
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (6, 0), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        target = torch.zeros_like(destination, dtype=torch.bool)
+        target[:, 1, 0] = True
+        assert torch.equal(
+            destination.masked_select(~target), before.masked_select(~target)
+        ), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.contiguous(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1, 0].reshape(2, 1), ref), name
