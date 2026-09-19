@@ -106,6 +106,10 @@ class Attention(torch.nn.Module):
         # (defensive if caller does not share cos_sin; zero-cost when shared).
         self._rope_t1_cis_key = None
         self._rope_t1_cis = None
+        # Last table-backed T>1 cis narrow: reuse the same view for callers that
+        # do not hoist cos_sin themselves. Invalidated with the table.
+        self._rope_table_cis_key = None
+        self._rope_table_cis = None
         # Paired narrow of `_rope_table_pairs` for the same T=1 key — apply path
         # skips per-step full-N→pair reshape of cis (opt/rope-fuse-v2).
         self._rope_t1_cis_pairs = None
@@ -179,6 +183,8 @@ class Attention(torch.nn.Module):
             # Invalidate T=1 cis narrow cache (table identity changed).
             self._rope_t1_cis_key = None
             self._rope_t1_cis = None
+            self._rope_table_cis_key = None
+            self._rope_table_cis = None
             self._rope_t1_cis_pairs = None
             # Also warm the rope_start=0 single-T cache for max_T.
             self._rope_cis_key = self._rope_cis_cache_key(max_T, device)
@@ -245,7 +251,31 @@ class Attention(torch.nn.Module):
                             else:
                                 self._rope_t1_cis_pairs = None
                         return cis
-                    return cos.narrow(-2, rope_start, T), sin.narrow(-2, rope_start, T)
+                    # Reuse the table-backed T>1 narrow when callers do not
+                    # hoist cos_sin across layers. This is a view-only cache;
+                    # the table rebuild path above invalidates it.
+                    range_key = (
+                        int(rope_start),
+                        int(T),
+                        device.type,
+                        device.index,
+                        int(max_T),
+                    )
+                    hit_range = self._rope_table_cis
+                    if (
+                        hit_range is not None
+                        and self._rope_table_cis_key == range_key
+                        and not torch.compiler.is_compiling()
+                    ):
+                        return hit_range
+                    cis = (
+                        cos.narrow(-2, rope_start, T),
+                        sin.narrow(-2, rope_start, T),
+                    )
+                    if not torch.compiler.is_compiling():
+                        self._rope_table_cis_key = range_key
+                        self._rope_table_cis = cis
+                    return cis
 
         if rope_start != 0:
             return self.phases_cos_sin(self._rope_phases(T, rope_start, device))

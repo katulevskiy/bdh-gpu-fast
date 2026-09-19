@@ -83,6 +83,39 @@ def test_rope_cos_sin_decode_rope_start_not_cached_as_zero():
     assert torch.equal(cos_s, cos_f) and torch.equal(sin_s, sin_f)
 
 
+def test_rope_table_t_gt1_narrow_hit_reuses_view():
+    """A warmed table reuses the same T>1 cis narrow on repeated calls."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    attn.ensure_rope_table(24, device)
+
+    cos1, sin1 = attn.rope_cos_sin(5, 7, device)
+    cos2, sin2 = attn.rope_cos_sin(5, 7, device)
+    assert cos1 is cos2 and sin1 is sin2
+    assert cos1.shape[-2] == 5 and sin1.shape[-2] == 5
+
+    # A different covered range replaces the single-slot view cache.
+    cos3, sin3 = attn.rope_cos_sin(5, 8, device)
+    assert cos3 is not cos1 and sin3 is not sin1
+    cos4, sin4 = attn.rope_cos_sin(5, 8, device)
+    assert cos4 is cos3 and sin4 is sin3
+
+
+def test_rope_table_t_gt1_narrow_hit_invalidates_on_rebuild():
+    """Rebuilding the generate table never returns a stale narrow view."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    attn.ensure_rope_table(16, device)
+    old_cos, old_sin = attn.rope_cos_sin(4, 3, device)
+
+    attn.ensure_rope_table(20, device)
+    new_cos, new_sin = attn.rope_cos_sin(4, 3, device)
+    assert new_cos is not old_cos and new_sin is not old_sin
+    assert torch.equal(new_cos, old_cos) and torch.equal(new_sin, old_sin)
+
+
 def test_rope_cache_model_forward_parity_across_batches():
     """Two eval forwards with same T reuse cis; logits match twin without cache abuse."""
     cfg = _small_cfg()
