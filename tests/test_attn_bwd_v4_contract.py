@@ -546,6 +546,37 @@ def test_zero_stride_batch_head_upstream_gradient_preserves_backward_contract(im
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_zero_stride_sequence_upstream_gradient_preserves_backward_contract(impl):
+    """Analytic backward must accept an upstream gradient broadcast over queries."""
+    generator = torch.Generator().manual_seed(2043)
+    Q = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        2, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO_base = torch.randn(2, 3, 1, 6, generator=generator, dtype=torch.float64)
+    dO = dO_base.expand(2, 3, 5, 6)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert dO.stride(2) == 0
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO.contiguous())
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(K.grad, K_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 @pytest.mark.parametrize(
     ("sequence_length", "query"), [(65, 63), (65, 64), (128, 127)]
 )
