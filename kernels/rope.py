@@ -341,9 +341,9 @@ if _HAS_TRITON:
 def _triton_cis_rows(v: torch.Tensor, cis: torch.Tensor) -> torch.Tensor:
     """Stage cis for the row-wise Triton kernel with less host tax when possible.
 
-    Same-shape cis: contig view only. Broadcast cis (e.g. 1×1×T×N vs B×H×T×N):
-    still expand+contig on host — kernel takes per-row pointers today; a future
-    stride-0 broadcast load would drop this copy (scaffold note, no GPU here).
+    Same-shape cis: contig view only. General broadcast cis (e.g.
+    1×1×T×N vs B×H×T×N) still expands for the flat multi-token kernel.
+    The paired T=1 entry below uses a zero cis row stride instead.
     """
     if cis.shape == v.shape and cis.dtype == v.dtype:
         return cis.contiguous() if not cis.is_contiguous() else cis
@@ -395,6 +395,72 @@ def _triton_rope_forward(
     return out_t.view(v.shape)
 
 
+def _triton_rope_paired_forward(
+    v: torch.Tensor,
+    cos_p: torch.Tensor,
+    sin_p: torch.Tensor,
+    out: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """Launch Triton from paired cis without expanding the T=1 table.
+
+    The generate table stores a T=1 narrow as ``(1, 1, 1, N/2, 2)``.
+    Flattening it to one row and passing a zero row stride lets every V row
+    reuse the same cis values. The old flat entry expanded the table to
+    ``(B, H, 1, N)`` before launch, which was the remaining T=1 GPU scaffold
+    gap.
+    """
+    assert _HAS_TRITON
+    _validate_paired_cis(v, cos_p, sin_p, out)
+    vc = v.contiguous()
+    n_elem = vc.shape[-1]
+    n_pairs = n_elem // 2
+    rows = vc.numel() // n_elem
+
+    cp = cos_p.contiguous().reshape(-1, n_elem)
+    sp = sin_p.contiguous().reshape(-1, n_elem)
+    # Match the flat Triton path and eager cast semantics for fp32 cis +
+    # fp16/bf16 V. The cast stays on device and does not expand rows.
+    if cp.dtype != vc.dtype:
+        cp = cp.to(dtype=vc.dtype)
+        sp = sp.to(dtype=vc.dtype)
+    if cp.shape[0] not in (1, rows) or sp.shape[0] not in (1, rows):
+        # Preserve the general broadcast contract for non-T=1 callers.
+        return _triton_rope_forward(
+            v,
+            cos_p.reshape(*cos_p.shape[:-2], n_elem),
+            sin_p.reshape(*sin_p.shape[:-2], n_elem),
+            out,
+        )
+
+    if out is None:
+        out_t = _alloc_rope_out(vc)
+    else:
+        out_t = out.contiguous() if not out.is_contiguous() else out
+
+    v2 = vc.view(rows, n_elem)
+    o2 = out_t.view(rows, n_elem)
+    stride_c_row = 0 if cp.shape[0] == 1 else cp.stride(0)
+    stride_s_row = 0 if sp.shape[0] == 1 else sp.stride(0)
+    block = 64 if n_pairs >= 64 else max(1, 1 << (n_pairs - 1).bit_length())
+    block = min(128, max(1, block))
+    _rope_rotate_kernel[(rows,)](
+        v2,
+        cp,
+        sp,
+        o2,
+        v2.stride(0),
+        stride_c_row,
+        stride_s_row,
+        o2.stride(0),
+        n_pairs,
+        BLOCK=block,
+    )
+    if out is not None and out.data_ptr() != out_t.data_ptr():
+        out.copy_(out_t)
+        return out
+    return out_t.view(v.shape)
+
+
 class _TritonRopeFn(torch.autograd.Function):
     """Triton forward + analytic backward (cos/sin treated as constant)."""
 
@@ -427,6 +493,33 @@ class _TritonRopeFn(torch.autograd.Function):
         return _store_pairs(dx0, dx1, grad_out, None), None, None
 
 
+class _TritonRopePairedFn(torch.autograd.Function):
+    """Triton T=1 forward with paired cis and analytic V backward."""
+
+    @staticmethod
+    def forward(ctx, v, cos_p, sin_p):  # type: ignore[override]
+        cos_d = cos_p.detach()
+        sin_d = sin_p.detach()
+        ctx.save_for_backward(cos_d, sin_d)
+        ctx.shape = v.shape
+        return _triton_rope_paired_forward(v, cos_d, sin_d, None)
+
+    @staticmethod
+    def backward(ctx, grad_out):  # type: ignore[override]
+        cos_p, sin_p = ctx.saved_tensors
+        go = grad_out.reshape(*ctx.shape[:-1], -1, 2)
+        g0, g1 = go[..., 0], go[..., 1]
+        c0, c1 = cos_p[..., 0], cos_p[..., 1]
+        s0, s1 = sin_p[..., 0], sin_p[..., 1]
+        if grad_out.dtype != cos_p.dtype:
+            dx0 = (g0 * c0).to(grad_out.dtype) + (g1 * s1).to(grad_out.dtype)
+            dx1 = ((-g0) * s0).to(grad_out.dtype) + (g1 * c1).to(grad_out.dtype)
+        else:
+            dx0 = g0 * c0 + g1 * s1
+            dx1 = -g0 * s0 + g1 * c1
+        return _store_pairs(dx0, dx1, grad_out, None), None, None
+
+
 def fused_rope_rotate_triton(
     v: torch.Tensor,
     cos: torch.Tensor,
@@ -445,6 +538,28 @@ def fused_rope_rotate_triton(
             return out
         return y
     return _triton_rope_forward(v, cos, sin, out)
+
+
+def fused_rope_rotate_paired(
+    v: torch.Tensor,
+    cos_p: torch.Tensor,
+    sin_p: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Apply paired cis; CUDA uses a zero-stride Triton T=1 launch.
+
+    CPU and unavailable-Triton paths intentionally reuse ``rope_rotate_paired``
+    for exact parity. This is opt-in; the default eager backend does not call it.
+    """
+    if not _can_use_triton_rope(v):
+        return rope_rotate_paired(v, cos_p, sin_p, out=out)
+    if v.requires_grad or (isinstance(v, torch.Tensor) and v.grad_fn is not None):
+        y = _TritonRopePairedFn.apply(v, cos_p, sin_p)
+        if out is not None:
+            out.copy_(y)
+            return out
+        return y
+    return _triton_rope_paired_forward(v, cos_p, sin_p, out)
 
 
 def fused_rope_rotate(

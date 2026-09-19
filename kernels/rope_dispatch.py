@@ -22,6 +22,7 @@ from .rope import (
     eager_rope_rotate,
     fused_rope_rotate,
     fused_rope_rotate_blocked,
+    fused_rope_rotate_paired,
     fused_rope_rotate_pytorch,
     fused_rope_rotate_triton,
     rope_rotate_paired,
@@ -73,13 +74,29 @@ def bdh_rope_rotate(
     - eager: historical strided even/odd path (bit-identical to prior ``Attention.rope``);
       T=1 decode uses ``rope_rotate_t1`` (pair stores; same math)
     - fused: Triton on CUDA when usable; else pure-PyTorch pair-contiguous path
-      (no cis ``expand`` / no ``stack``); T=1 shares ``rope_rotate_t1``. Triton
-      entry falls back to ``fused_rope_rotate_blocked`` on CPU (tile scaffold).
+      (no cis ``expand`` / no ``stack``); paired T=1 decode uses the selected
+      paired backend. Triton entry falls back to ``fused_rope_rotate_blocked``
+      on CPU (tile scaffold).
     """
     name = resolve_rope_impl(impl)
     if name == "eager":
         return eager_rope_rotate(v, cos, sin, out=out)
     return fused_rope_rotate(v, cos, sin, out=out)
+
+
+def bdh_rope_rotate_paired(
+    v: torch.Tensor,
+    cos_p: torch.Tensor,
+    sin_p: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+    *,
+    impl: str | None = None,
+) -> torch.Tensor:
+    """Apply already-paired cis while preserving the selected RoPE backend."""
+    name = resolve_rope_impl(impl)
+    if name == "eager":
+        return rope_rotate_paired(v, cos_p, sin_p, out=out)
+    return fused_rope_rotate_paired(v, cos_p, sin_p, out=out)
 
 
 def backend_info(device: torch.device | None = None) -> dict:
@@ -97,10 +114,12 @@ def backend_info(device: torch.device | None = None) -> dict:
 __all__ = [
     "resolve_rope_impl",
     "bdh_rope_rotate",
+    "bdh_rope_rotate_paired",
     "backend_info",
     "eager_rope_rotate",
     "fused_rope_rotate",
     "fused_rope_rotate_pytorch",
+    "fused_rope_rotate_paired",
     "fused_rope_rotate_blocked",
     "fused_rope_rotate_triton",
     "rope_rotate_paired",

@@ -5861,3 +5861,38 @@ No GPU was available; no GPU timing, kernel, or speedup claim is made.
 - No default enablement or threshold auto-selection; default BDH callers stay
   unchanged. The optional encoder hook now intentionally requires the gate.
 - No GPU claims from CPU density or timing observations.
+
+
+## opt/rope-gpu-scaffold — paired T=1 Triton launch (2026-09-19)
+
+**Branch:** `opt/rope-gpu-scaffold` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `aea2501` (current `origin/main`, after #123).
+
+### Audit after #90 (`opt/rope-fuse-v2`)
+
+#90 added the row-wise flat Triton kernel and the CPU blocked parity scaffold,
+but two GPU-readiness gaps remained: flat Triton staging expanded the
+broadcast `(1,1,1,N)` T=1 cis to every `(B,H,1,N)` row, and the warmed paired
+T=1 `Attention` path called `rope_rotate_paired` directly, bypassing
+`BDH_ROPE_IMPL=fused`.
+
+### Deepen
+
+- Add `fused_rope_rotate_paired` and `bdh_rope_rotate_paired`.
+- Route warmed T=1 decode through that dispatch without changing eager math.
+- Reuse the existing Triton kernel with a zero cis row stride for the common
+  one-row paired table; no host `expand` for the T=1 CUDA scaffold.
+- Keep a general broadcast fallback, CPU paired implementation, `out=`, and an
+  analytic V backward for the opt-in Triton path.
+
+`BDH_ROPE_IMPL=eager` remains the default and uses the paired reference path;
+`BDH_ROPE_IMPL=fused` is still opt-in. No GPU performance or correctness claim
+is made on this CPU-only box.
+
+### Tests
+
+- CPU paired T=1 parity remains exact against eager.
+- CUDA/Triton tests are skip-gated on both `torch.cuda.is_available()` and
+  Triton availability, so CPU pytest stays clean.
+- The new CUDA test covers the zero-stride paired launch against eager when a
+  CUDA+Triton environment is present.

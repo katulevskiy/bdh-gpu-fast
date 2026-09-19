@@ -15,8 +15,10 @@ sys.path.insert(0, str(ROOT))
 import bdh
 import bdh_baseline as baseline
 from kernels.rope import (
+    _HAS_TRITON,
     eager_rope_rotate,
     fused_rope_rotate_blocked,
+    fused_rope_rotate_paired,
     fused_rope_rotate_pytorch,
     fused_rope_rotate_triton,
     _can_use_triton_rope,
@@ -144,8 +146,8 @@ def test_half_dtype_cast_path_matches():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA required for Triton RoPE kernel",
+    not (torch.cuda.is_available() and _HAS_TRITON),
+    reason="CUDA + Triton required for Triton RoPE kernel",
 )
 def test_triton_rope_matches_eager_cuda():
     cfg = _small_cfg()
@@ -159,6 +161,27 @@ def test_triton_rope_matches_eager_cuda():
     assert _can_use_triton_rope(v)
     out_e = eager_rope_rotate(v, cos, sin)
     out_t = fused_rope_rotate_triton(v, cos, sin)
+    assert torch.allclose(out_t, out_e, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() and _HAS_TRITON),
+    reason="CUDA + Triton required for paired T=1 RoPE kernel",
+)
+def test_triton_paired_t1_matches_eager_cuda():
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cuda")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 5
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(18)
+    v = torch.randn(2, cfg.n_head, 1, N, device=device)
+    out_e = eager_rope_rotate(v, cos, sin)
+    out_t = fused_rope_rotate_paired(v, paired[0], paired[1])
     assert torch.allclose(out_t, out_e, rtol=1e-5, atol=1e-5)
 
 
@@ -212,6 +235,22 @@ def test_fused_out_none_pair_store_parity():
     # Explicit out=None path
     y = fused_rope_rotate_pytorch(v, cos, sin, out=None)
     assert torch.equal(y, eager_rope_rotate(v, cos, sin))
+
+
+def test_fused_paired_t1_cpu_parity():
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    rope_start = 4
+    attn.ensure_rope_table(16, device)
+    paired = attn.t1_cis_pairs(rope_start, device)
+    cos, sin = attn.rope_cos_sin(1, rope_start, device)
+    assert paired is not None
+    torch.manual_seed(28)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    ref = eager_rope_rotate(v, cos, sin)
+    assert torch.equal(fused_rope_rotate_paired(v, paired[0], paired[1]), ref)
 
 
 def test_blocked_out_param_and_t1():
