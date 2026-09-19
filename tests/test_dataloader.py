@@ -396,6 +396,28 @@ def test_dataloader_cpu_h2d_identity_does_not_probe_cuda(tr, monkeypatch):
     assert x is host_x and y is host_y
 
 
+def test_dataloader_cpu_h2d_workers_keep_pin_memory_off(tr, monkeypatch):
+    """CPU DataLoader workers keep H2D staging disabled without CUDA setup."""
+    def fail_cuda_probe():
+        pytest.fail("CPU DataLoader workers must not query CUDA availability")
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("CPU DataLoader workers must not construct CUDA objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "is_available", fail_cuda_probe)
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    monkeypatch.setattr(tr, "NUM_WORKERS", 2)
+    src = tr.DataLoaderBatchSource("train")
+    x, y = src.next()
+    assert src._loader.num_workers == 2
+    assert src._loader.pin_memory is False
+    assert src._loader.persistent_workers is True
+    assert x.device.type == "cpu" and y.device.type == "cpu"
+    assert x.is_contiguous() and y.is_contiguous()
+    assert torch.equal(x[:, 1:], y[:, :-1])
+
+
 def test_dataloader_persistent_workers(tr, monkeypatch):
     monkeypatch.setattr(tr, "USE_DATALOADER", True)
     monkeypatch.setattr(tr, "NUM_WORKERS", 2)
