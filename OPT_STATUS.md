@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#136)
+# OPT status — landed work (#1–#139)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `546192d` (`#136` compile-train-v3 / `#135` scorev-fuse-v3 / `#134` cuda-build-v2 / `#133` docs refresh through #131 / `#132` docs refresh through #130). The landed matrix below is aligned through #136; #134 makes optional CUDA setup skip cleanly when `nvcc` is unavailable on runtime-only boxes, #135 deepens the common B=1, T=1 shared-V decode epilogue by reusing flattened score/output views and writing score×V through `baddbmm(..., out=target)`, and #136 clarifies CPU-safe compile/probe soft-fallback diagnostics without changing defaults. CPU validation preserves strict raw-tril semantics, eager defaults, autograd fallback, and cat-free generate; no GPU timing or speedup evidence was added, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `6fd7950` (`#139` prefetch-h2d-v2 / `#138` rope-gpu-v2 / `#137` docs refresh through #136). The landed matrix below is aligned through #139; #138 hardens Triton RoPE selection with conservative complete-tensor/device/dtype skip gates, and #139 makes the CPU H2D-prefetch path an explicit identity no-op while preserving the CUDA opt-in defaults. CPU validation preserves strict raw-tril semantics, eager defaults, autograd fallback, and cat-free generate; no GPU timing or speedup evidence was added, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -77,7 +77,7 @@ export BDH_ATTN_AUTO_THRESHOLD=512
 | `eager` | Historical strided even/odd rotate (bit-identical default) |
 | `fused` | Pair-contiguous PyTorch; Triton on CUDA when usable |
 
-Cos/sin **tables** are cached in `Attention` regardless (#18). This flag only picks how cos/sin apply to `v` (#29).
+Cos/sin **tables** are cached in `Attention` regardless (#18). This flag only picks how cos/sin apply to `v` (#29). On the #138 tip, Triton is selected only when `v`, cis, and optional `out` share the same CUDA device and use the conservative fp16/bf16/fp32 set; unsupported or mixed inputs skip to the existing PyTorch/blocked fallback, and `backend_info(cuda)` skips cleanly without initializing an unavailable runtime.
 
 ```bash
 export BDH_ROPE_IMPL=eager   # default
@@ -137,10 +137,13 @@ BDH_PREFETCH_ASYNC=0 python train.py  # sync debug / A-B
 |-----|---------|---------|
 | `BDH_PREFETCH_H2D` | `1` | On CUDA, stage one pinned batch ahead on a dedicated side stream and hand it to the caller stream via an event; `0` keeps H2D on the caller stream |
 
-This flag is a CPU no-op. It applies to the async host-prefetch path;
-`BDH_PREFETCH_ASYNC=0` remains the synchronous debug/A-B mode. GPU H2D
-overlap and throughput are unmeasured. The `cuda_staging=` constructor override
-is available for tests/A-B and is ignored on CPU.
+This flag is a CPU no-op. #139 makes that contract explicit: device type is
+checked before any CUDA stream/event construction, no staged device lookahead
+is created on CPU, and `_to_device` preserves the original CPU tensor objects.
+It applies to the async host-prefetch path; `BDH_PREFETCH_ASYNC=0` remains the
+synchronous debug/A-B mode. GPU H2D overlap and throughput are unmeasured.
+The `cuda_staging=` constructor override is available for tests/A-B and is
+ignored on CPU.
 
 ```bash
 BDH_PREFETCH_H2D=1 python train.py  # default on CUDA
@@ -172,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#136)
+## Landed opts (#1–#139)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -312,6 +315,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **134** | `opt/cuda-build-v2` | Skip optional `CUDAExtension` setup cleanly when `nvcc` is unavailable; add default/no-`nvcc` subprocess smoke coverage | CPU configuration tests pass; CUDA-only tests skip cleanly | No GPU build, timing, or kernel claim; P0 GPU validation remains open |
 | **135** | `opt/scorev-fuse-v3` | Deepen the common B=1, T=1 shared-V decode epilogue by reusing flattened score/output views and writing score×V with `baddbmm(..., out=target)`; preserve broadcast-V layout, autograd fallback, eager default, strict raw `tril`, and cat-free generate | Focused CPU: 111 passed, 3 skipped; full suite: 533 passed, 19 skipped, 3 warnings | No GPU timing or speedup; GPU/Triton/CUDA validation remains P0 |
 | **136** | `opt/compile-train-v3` | Clarify CPU-safe compile/probe soft-fallback diagnostics, identify the original eager module on fallback, and document FULLGRAPH/AUTOGRAD/probe boundaries without changing defaults | `test_compile.py`: 36 passed, 1 skipped, 1 warning; full suite: 533 passed, 19 skipped, 4 warnings; baseline smoke skips compile matrix/AMP sections | No GPU or CUDA-graph measurement; compile validation remains open |
+| **137** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #136 | Docs only | — |
+| **138** | `opt/rope-gpu-v2` | Harden Triton RoPE dispatch with complete tensor/device/dtype skip gates; preserve eager default and PyTorch/blocked fallback | Focused CPU: 33 passed, 2 skipped; T>1 parity and out-buffer coverage; no GPU timing | **P0** GPU fused-RoPE validation remains open |
+| **139** | `opt/prefetch-h2d-v2` | Make the CPU H2D-prefetch contract explicit: gate by device before CUDA objects, keep no device lookahead, and preserve CPU tensor identity | CPU: 17 passed, 1 skipped; full suite: 539 passed, 19 skipped, 3 warnings; CPU path is a no-op | GPU H2D overlap/throughput remains unmeasured |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
