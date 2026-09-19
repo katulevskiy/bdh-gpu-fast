@@ -3219,3 +3219,88 @@ on CPU for broadcast-V. Default remains eager. **No GPU** — measure with
 - No re-introducing `aten::cat` in generate / CacheManager
 - No softmax / scale / SDPA
 - No fake GPU speedups from CPU medians
+
+## opt/attn-auto — opt-in long-S decode → blocked (2026-09-19)
+
+**Branch:** `opt/attn-auto` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `33eb300` (main after `#55` decode-online-v2).
+
+### Goal
+
+After `#55` showed **blocked** T=1 decode wins at long `S` (CPU-honest), add an
+**opt-in** auto backend: keep **default eager** everywhere, but when
+`BDH_ATTN_AUTO=1`, switch **decode only** to blocked once `past_len` exceeds a
+threshold. Cold / prefill stays on `BDH_ATTN_IMPL`. Hard constraints unchanged:
+`tril(diagonal=-1)`, `aten::cat=0`, default behavior unchanged unless the new
+env is set.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention_dispatch.py` | `BDH_ATTN_AUTO` / `BDH_ATTN_AUTO_THRESHOLD`; `resolve_decode_impl(past_len)`; `bdh_attn_decode` applies AUTO; cold `bdh_attn` unchanged |
+| `kernels/__init__.py` / `kernels/README.md` | Export + document AUTO knobs |
+| `tests/test_attn_auto.py` | Default-off, threshold switch, non-eager override, parity, Attention module |
+
+```bash
+# default — unchanged (eager cold + eager decode)
+unset BDH_ATTN_AUTO
+
+# opt-in long-S decode → blocked; cold/prefill still BDH_ATTN_IMPL (eager)
+export BDH_ATTN_AUTO=1
+export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when past_len > thr
+```
+
+### Threshold rationale (#55 CPU benches)
+
+`OMP_NUM_THREADS=2`, Europe/Podgorica, `torch 2.14.0+cu130`, `cuda=False`
+(from `#55` / `opt/decode-online-v2`):
+
+**Decode score×V** (B=4 H=4 N=64 D=128, broadcast V):
+
+| S | eager ms | blocked ms | spd | note |
+|---|----------|------------|-----|------|
+| 64 | ~0.025 | ~0.026 | ~0.96× | stay eager |
+| 256 | ~0.082 | ~0.076 | ~1.07× | ~parity |
+| 1024 | ~0.44 | ~0.45 | ~0.98× | ~parity |
+| 4096 | ~9.0 | ~2.1 | **~4.4×** | prefer blocked |
+
+**Generate** (CacheManager; tokens match; `aten::cat=0`):
+
+| prompt | blocked/eager | note |
+|--------|---------------|------|
+| 64 | ~0.91× | stay eager |
+| 256 | ~0.83× | stay eager |
+| 1024 | **~1.56×** | prefer blocked (cold+decode) |
+
+**Default threshold = 512** sits between the mid-S “stay eager” regime and the
+long-S wins (`S≥1024` generate / `S=4096` decode). Switch is strict
+`past_len > threshold`. Re-tune via `BDH_ATTN_AUTO_THRESHOLD` after GPU benches.
+
+### Semantics
+
+```text
+cold / prefill:  always BDH_ATTN_IMPL   (AUTO ignored)
+T=1 decode:
+  if AUTO off or IMPL != eager:  IMPL
+  elif past_len > THRESHOLD:     blocked
+  else:                          eager
+# tril(diagonal=-1); past-only; cat=0; default AUTO off
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_attn_auto.py tests/test_inc_decode.py \
+  tests/test_attn_unify.py tests/test_gen_sample.py -q
+# AUTO off → eager at any S; AUTO on → blocked when S>512; parity vs eager;
+# explicit IMPL=blocked|triton|cuda not overridden; cold path ignores AUTO
+```
+
+### Non-goals
+
+- No change to default `BDH_ATTN_IMPL=eager` or decode path when AUTO unset
+- No AUTO on cold / prefill / train
+- No PRs to `pathwaycom/*`
+- No softmax / scale / SDPA
+- No fake GPU speedups from CPU medians

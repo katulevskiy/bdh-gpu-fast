@@ -1,6 +1,15 @@
 """BDH custom kernels (attention + RoPE; Triton, blocked PyTorch, optional CUDA)."""
 
-from .attention_dispatch import backend_info, bdh_attn, bdh_attn_decode, resolve_attn_impl
+from .attention_dispatch import (
+    DEFAULT_ATTN_AUTO_THRESHOLD,
+    attn_auto_enabled,
+    attn_auto_threshold,
+    backend_info,
+    bdh_attn,
+    bdh_attn_decode,
+    resolve_attn_impl,
+    resolve_decode_impl,
+)
 from .rope_dispatch import (
     backend_info as rope_backend_info,
     bdh_rope_rotate,
@@ -31,6 +40,10 @@ __all__ = [
     "bdh_attn",
     "bdh_attn_decode",
     "resolve_attn_impl",
+    "resolve_decode_impl",
+    "attn_auto_threshold",
+    "attn_auto_enabled",
+    "DEFAULT_ATTN_AUTO_THRESHOLD",
     "backend_info",
     "strict_tril_attn",
     "StrictTrilAttnFn",

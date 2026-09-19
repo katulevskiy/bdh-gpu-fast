@@ -241,7 +241,9 @@ class Attention(torch.nn.Module):
         Cached / incremental T=1 decode: ``eager`` keeps the two-GEMM form;
         ``blocked`` / ``triton`` / ``cuda`` use ``bdh_attn_decode`` against
         packed past KR/V (``cuda`` → ``kernels.cuda_attn.tril_decode``).
-        Default remains ``eager``.
+        Opt-in ``BDH_ATTN_AUTO=1`` switches eager→blocked decode when
+        ``past_len > BDH_ATTN_AUTO_THRESHOLD`` (default 512); cold/prefill
+        still follows ``BDH_ATTN_IMPL`` only. Default remains ``eager``.
 
         Train path: ``BDH_ATTN_AUTOGRAD=1`` routes cold (+ multi-token-with-past)
         through ``StrictTrilAttnFn`` / analytic Q/K/V backward. T=1 decode is
