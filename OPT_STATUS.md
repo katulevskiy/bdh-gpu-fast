@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#191; #160 docs scope retained)
+# OPT status — landed work (#1–#196; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `39fe7f7` (`opt/rope-fuse-v4`, #191) follows `#190` docs refresh through #188, `#189` online-decode-v5, `#188` CPU sampler-layout probe coverage, `#187` docs refresh through gen-bench-v3, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, #188 adds CPU-only sampler-layout probe coverage, #189 adds CPU-only packed shared-V decode parity coverage, #190 is docs-only, and #191 adds CPU-only RoPE cache correctness/parity coverage; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `4e9d3e4` (`opt/cuda-build-v3`, #196) follows #195 compile-probe diagnostics, #194 B=1 shared-V epilogue coverage, #193 docs refresh through #191, #191 RoPE cache narrows, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, #188 adds CPU-only sampler-layout probe coverage, #189 adds CPU-only packed shared-V decode parity coverage, #190 is docs-only, #191 adds CPU-only RoPE cache correctness/parity coverage, #193 is docs-only, #194 adds CPU-only B=1 shared-V epilogue coverage, #195 adds CPU-only compile-probe fallback diagnostics, and #196 adds CPU-only missing-nvcc setup-skip coverage; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#191)
+## Landed opts (#1–#196)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -369,6 +369,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **189** | `opt/online-decode-v5` | Add B>1 long-S packed shared-V CPU parity coverage across blocked, online, Triton-fallback, and CUDA-reference dispatch while preserving eager defaults, strict lower-triangular semantics, and the autograd fallback | CPU-only parity/stride coverage at the long-S tiled boundary; no GPU timing or win claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **190** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #188 while preserving the profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
 | **191** | `opt/rope-fuse-v4` | Keep paired and flat T=1 RoPE cache narrows aligned across position switches; add CPU T>1 narrow and paired-cache invalidation coverage while preserving eager defaults and raw strict-tril attention semantics | CPU-only cache correctness/parity coverage; no GPU timing or RoPE win claim | **P0** GPU fused-RoPE validation remains open |
+| **193** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #191 while preserving profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
+| **194** | `opt/scorev-v5` | Deepen B=1 shared-V score×V epilogue coverage for packed-cache `out=` accumulation and the grad-safe fallback while preserving eager defaults and raw strict-tril attention semantics | CPU-only test coverage; no GPU timing or speedup claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **195** | `opt/compile-v5` | Sharpen optional `torch.compile` missing-target and first-probe soft-fallback diagnostics; add CPU eval-probe coverage that restores the caller training mode without changing defaults | CPU-only diagnostics/smoke; no GPU or CUDA-graph timing claim | **P1** GPU inductor / CUDA-graph validation remains open |
+| **196** | `opt/cuda-build-v3` | Check CUDA_HOME/CUDA_PATH and PATH before constructing the optional CUDA extension; keep missing-nvcc setup a clear CPU-safe no-op and retain explicit CPU-only setup smoke | CPU-only setup/test coverage; no GPU build or timing claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 
 ### Concurrent main updates
 
@@ -400,7 +404,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#188** `opt/layout-v4` is at `87ccac9`; deepens CPU sampler-layout probe coverage for scaled and top-k signatures without changing defaults or sampler/RNG behavior.
 - **#189** `opt/online-decode-v5` is at `da79013`; adds B>1 long-S packed shared-V CPU parity across blocked, online, Triton-fallback, and CUDA-reference dispatch with no GPU timing claim.
 - **#190** docs refresh is at `a618356`; carries the matrix through #188 and preserves profile-v17 counts plus the real-GPU P0 blocker.
-- **Current tip #191** `opt/rope-fuse-v4` is at `39fe7f7`; keeps paired/flat T=1 RoPE cache narrows aligned with CPU parity and invalidation coverage, with no GPU timing claim.
+- **#193** docs refresh merged as `4bd410a`; carries the matrix through #191 and preserves profile-v17 counts plus the real-GPU P0 blocker.
+- **#194** `opt/scorev-v5` is at `4fda79f`; adds CPU-only packed-cache `out=` accumulation and grad-safe fallback coverage on the B=1 shared-V score×V path, with no GPU timing claim.
+- **#195** `opt/compile-v5` is at `4ae8ab2`; clarifies missing-target and first-probe soft fallbacks and adds CPU eval-probe training-mode restoration coverage, with no GPU/CUDA-graph timing claim.
+- **#196** `opt/cuda-build-v3` is at `4e9d3e4`; clarifies missing-nvcc setup discovery and keeps the CPU-safe setup smoke explicit, with no GPU build or timing claim.
+- **Current tip #196** `opt/cuda-build-v3` is at `4e9d3e4`; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
