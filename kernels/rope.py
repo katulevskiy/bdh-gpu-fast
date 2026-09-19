@@ -105,6 +105,20 @@ def _rotate_pair_views(
     return y0, y1
 
 
+
+def _alloc_rope_out(v: torch.Tensor) -> torch.Tensor:
+    """Allocate a fresh contiguous RoPE output buffer matching ``v``'s meta.
+
+    ``torch.empty_like(v)`` defaults to ``preserve_format``, so a non-contiguous
+    permute view (train hot path: ``(B,T,nh,N).permute(0,2,1,3)``) yields a
+    non-contiguous QR. The following ``QR @ QR.mT`` then ``clone``+``copy_``
+    both QR and ``QR.mT`` for BLAS. Dense contiguous storage keeps that GEMM
+    copy-free on the operands. Caller-supplied ``out=`` (e.g. cache slot) is
+    unchanged.
+    """
+    return torch.empty(v.shape, dtype=v.dtype, device=v.device)
+
+
 def _store_pairs(
     y0: torch.Tensor,
     y1: torch.Tensor,
@@ -117,7 +131,7 @@ def _store_pairs(
     the extra ``stack→reshape`` temporary that previously taxed fuse/T=1 alloc.
     """
     if out is None:
-        out = torch.empty_like(v)
+        out = _alloc_rope_out(v)
     op = out.reshape(*v.shape[:-1], -1, 2)
     op[..., 0] = y0
     op[..., 1] = y1
@@ -186,7 +200,7 @@ def eager_rope_rotate(
         return rope_rotate_t1(v, cos, sin, out=out)
     _validate_rope_inputs(v, cos, sin, out)
     if out is None:
-        out = torch.empty_like(v)
+        out = _alloc_rope_out(v)
 
     ve = v[..., 0::2]
     vo = v[..., 1::2]
@@ -257,7 +271,7 @@ def fused_rope_rotate_blocked(
     cp = cos.reshape(*cos.shape[:-1], -1, 2)
     sp = sin.reshape(*sin.shape[:-1], -1, 2)
     if out is None:
-        out = torch.empty_like(v)
+        out = _alloc_rope_out(v)
     op = out.reshape(*v.shape[:-1], n_pairs, 2)
 
     for start in range(0, n_pairs, block):
@@ -349,7 +363,7 @@ def _triton_rope_forward(
     cos_b = _triton_cis_rows(v, cos)
     sin_b = _triton_cis_rows(v, sin)
     if out is None:
-        out_t = torch.empty_like(vc)
+        out_t = _alloc_rope_out(vc)
     else:
         out_t = out.contiguous() if not out.is_contiguous() else out
 
