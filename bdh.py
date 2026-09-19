@@ -676,11 +676,12 @@ class BDH(nn.Module):
                 # else allocate a small (B, k) probs (k << V).
                 probs_k = softmax(values, dim=-1)
                 idx_k = multinomial(probs_k, num_samples=1)
-                gathered = indices.gather(1, idx_k)
+                # gather out= into idx_out skips one aten::copy_ vs gather+copy_
+                # (top_k path only; default top_k=None uses multinomial out=).
                 if idx_out is not None:
-                    idx_out.copy_(gathered)
+                    torch.gather(indices, 1, idx_k, out=idx_out)
                     return idx_out
-                return gathered
+                return indices.gather(1, idx_k)
             # k == V: fall through to full-vocab path using values order? Use mask.
             values_min = values[:, -1:]
             logits_bv.masked_fill_(logits_bv < values_min, float("-inf"))

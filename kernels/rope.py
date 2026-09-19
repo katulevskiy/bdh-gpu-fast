@@ -202,33 +202,21 @@ def eager_rope_rotate(
     sin: torch.Tensor,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Reference rotate: strided even/odd slices (matches historical ``Attention.rope``).
+    """Reference rotate via pair-contiguous ``_store_pairs`` (all sequence lengths).
 
-    When ``v`` has sequence length 1 (decode), uses ``rope_rotate_t1`` — same
-    math, pair-contiguous stores into ``out`` / empty+pair store when ``out`` is
-    None. Multi-token keeps the historical strided path.
+    Historical eager used strided ``0::2``/``1::2`` setitems (two ``aten::copy_``
+    per call on multi-token). ``gen-vcopy-v1`` routes T>1 through the same pair
+    + ``_store_pairs`` path as T=1 / fused: bit-identical math, **one** fp32/fp64
+    ``copy_``, **no** ``cat``. ``BDH_ROPE_IMPL`` default remains ``eager``.
     """
     if _is_t1_seq(v):
         return rope_rotate_t1(v, cos, sin, out=out)
     _validate_rope_inputs(v, cos, sin, out)
-    if out is None:
-        out = _alloc_rope_out(v)
-
-    ve = v[..., 0::2]
-    vo = v[..., 1::2]
-    ce = cos[..., 0::2]
-    se = sin[..., 0::2]
-    co = cos[..., 1::2]
-    so = sin[..., 1::2]
-
-    if v.dtype != cos.dtype:
-        # Match baseline cast-then-add rounding when phases are fp32 and v is not.
-        out[..., 0::2] = (ve * ce).to(v.dtype) + ((-vo) * se).to(v.dtype)
-        out[..., 1::2] = (vo * co).to(v.dtype) + (ve * so).to(v.dtype)
-    else:
-        out[..., 0::2] = ve * ce - vo * se
-        out[..., 1::2] = vo * co + ve * so
-    return out
+    vp = v.reshape(*v.shape[:-1], -1, 2)
+    cp = cos.reshape(*cos.shape[:-1], -1, 2)
+    sp = sin.reshape(*sin.shape[:-1], -1, 2)
+    y0, y1 = _rotate_pair_views(vp, cp, sp, v_dtype=v.dtype, cis_dtype=cos.dtype)
+    return _store_pairs(y0, y1, v, out)
 
 
 def fused_rope_rotate_pytorch(

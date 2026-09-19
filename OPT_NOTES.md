@@ -5317,3 +5317,69 @@ off.
 - No public or `pathwaycom/*` PRs; private repo only.
 - No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change.
 - No softmax, scale, diagonal inclusion, or full-score materialization.
+
+## opt/gen-vcopy-v1 — V/sampler probe + T>1 RoPE pair store (2026-09-19)
+
+**Branch:** `opt/gen-vcopy-v1` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f430b53` (`main`, #109 docs-v23; includes #108).
+
+### Goal
+
+After #102 (~558→~398 generate `aten::copy_`), attribute the remainder and cut
+anything safe from V-cache writes / sampler internals. Keep `tril(diagonal=-1)`,
+`aten::cat=0`, defaults unchanged. No GPU claims.
+
+### Attribution (CPU, cfg layers=4 d=128 nh=4, prompt=16 / +32)
+
+One generate call (~398 before this PR):
+
+| Bucket | ~copy_/gen | Notes |
+|--------|------------|-------|
+| V slot `dst_v.copy_(v_tok)` | 132 | 4×(1 prefill + 32 decode) — necessary x→cache snapshot; residual updates `x` so aliasing is unsafe |
+| RoPE decode `_store_pairs` | 128 | 4×32 — already 1/call after #102 |
+| Prefill RoPE T>1 strided setitem | 8 | 4×2 — **cut by this PR** (→ 4 via `_store_pairs`) |
+| multinomial internals | 128 | 4 `copy_`/sample × 32 — ATen C++; `_to_copy`×3 + `any`×1; RNG-coupled |
+| prompt `out[:, :T].copy_` | 1 | |
+| **Total** | **~397** | matches profile-v10 harness |
+
+**Not safely removable (defaults / RNG / layout):**
+
+- **V writes:** each layer must snapshot `x` into packed `(B,1,T,D)` before
+  residual LN replaces `x`. Squeeze-view `copy_` is still one `copy_`. Layout
+  change to drop the singleton head dim does not remove the snapshot.
+- **Default sampler:** `torch.multinomial(..., out=idx_out)` still emits ~4
+  `aten::copy_` + 3 `_to_copy` + 1 `any` per step inside ATen. Custom
+  Gumbel-max / Categorical would change the RNG stream vs baseline.
+
+### What landed (1 safe reduce + small top-k cleanup)
+
+| Piece | Detail |
+|-------|--------|
+| `kernels/rope.py` `eager_rope_rotate` | T>1 uses pair reshape + `_store_pairs` (same as T=1/fused) — bit-identical to historical strided setitem; **1** fp32 `copy_`, **0** `cat` |
+| `BDH._sample_from_logits` top-k | `torch.gather(..., out=idx_out)` when set — drops gather+`copy_` (non-default `top_k` only) |
+| Defaults | unchanged (`BDH_ROPE_IMPL=eager`, `top_k=None`) |
+| Tests | T>1 single-copy + strided parity; top-k gather parity; attribution bucket sum; generate/cache gates |
+
+### Profile (this box, CPU)
+
+| Metric | profile-v10 (#102 tip) | After gen-vcopy-v1 |
+|--------|------------------------|--------------------|
+| `aten::copy_` / generate | **~398** | **~394** |
+| `aten::cat` | 0 | **0** |
+
+Delta ≈ **−4**/gen from prefill RoPE 8→4. V (132) + multinomial (128) remain.
+
+### Correctness
+
+```bash
+.venv/bin/python -m pytest tests/test_gen_copy_tax.py tests/test_cache_pack.py \
+  tests/test_rope_decode.py tests/test_rope_fuse.py tests/test_copy_tax.py \
+  tests/test_gen_sample.py tests/test_gen_host.py -q
+```
+
+### Non-goals
+
+- Softmax / diagonal / SDPA
+- Changing default multinomial RNG or V cache layout
+- PRs to `pathwaycom/*`
+- Claiming GPU speedups from CPU copy_ counts
