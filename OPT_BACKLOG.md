@@ -7,9 +7,11 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b160469` (documented tip `d3ff475` after docs-only #40; current main tip `8d56385` after #46), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `c7a7471` / documented tip `f16111b` (post #48 gen-sample + #49 compile-guidance; this PR `opt/profile-v4`), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
+
+Post-#48/#49 re-profile (`opt/profile-v4`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. gen-host host self ~1.4% (was ~26% in v3). **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v4.
 
 Post-#36/#39 re-profile (`opt/profile-v3`): generate still **0× `aten::cat`**; forward **0× `aten::contiguous`** (mlp-fuse); default eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v3.
 
@@ -60,10 +62,10 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
-| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (post-#36 profile-v3): attn self `bmm` ~16–32% + RoPE `mul`/`copy_` + `tril`; forward `bmm` ~15–28% + `copy_` ~18–25% + `mm` ~10–18%.
+| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v4): attn `mul`~31% `copy_`~26% `bmm`~16% `tril`~7%; forward `copy_`~24% `mul`~18% `bmm`~14% `mm`~10%. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** (#46/#49; blocked warns). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` (+ `reduce-overhead`) via `benchmarks/bench_train_step.py` | Low |
-| **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** `opt/gen-host`: RoPE table + hoist dispatch/sampling; CPU ~1.3× generate wall, arange 33→1. Remaining = GPU decode GEMM. | Generate (profile-v3): `bmm` ~14–44%, `copy_` ~6–11% (post-#20 **cats=0**); |blocked|triton|cuda; honest CPU ~noise, `aten::cat=0`, tokens match eager. Default still eager. | A100/H100: `bench_generate.py` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
+| **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48 landed; profile-v4 generate: `bmm`~43% `mm`~30% `copy_`~11%, `BDH.generate` self ~1.4% (was ~26% in v3); **cats=0**. Remaining = **GPU** decode GEMM (`blocked`/`triton`/`cuda`). Default still eager. | A100/H100: `bench_generate.py` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | **Density measured** `opt/sparse-probe`: short-train x~27% xy~12% @150 steps (≫ paper 5%); CPU sparse **never reliably beat dense** → **keep OFF**. GPU sparse still open. | GPU sparse bench if density ≪10% | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** + **`opt/mlp-fuse`** — `(B,T,nh,N)` encoder, free decoder view, fused bias+ReLU / `_mlp_merge`; embed-tie #16; CPU wall ~noise vs tip | Low |
@@ -80,6 +82,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | CUDA attn CPU refs deepen | **Landed** #37 `opt/cuda-ref-v2` |
 | Vectorized CPU blocked tiles | **Landed** #38 `opt/blocked-vec` — still < eager; GPU measure open |
 | Re-profile post-mlp-fuse | **Landed** #40 `opt/profile-v3` — profile source tip `b160469`; documented tip `d3ff475`; cats=0; contiguous=0 |
+| Re-profile post-gen-sample | **Landed** `opt/profile-v4` (this PR) — tip `f16111b`; profile source `c7a7471`; cats=0; contiguous=0; gen-host host self ↓ |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |

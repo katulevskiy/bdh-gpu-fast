@@ -2869,3 +2869,54 @@ for peak-score memory / parity experiments without compile, or for future
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No PRs to `pathwaycom/*`
 - No GPU / CUDA-graph claims
+
+## opt/profile-v4 — re-profile tip after gen-sample #48 (2026-09-19)
+
+**Branch:** `opt/profile-v4` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f16111b` (main after compile-guidance #49; post gen-sample #48,
+encoder-fuse #47, compile-blocked #46, gen-host #44). Profile windows captured at
+`c7a7471` (post-#48); default **eager** path unchanged by #49 (guidance/warn only).
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+Absolute ms are **profiler-inflated** (and noisy across short active windows).
+Rank by **% self CPU** and call counts. Chrome traces under `benchmarks/traces/`
+(gitignored). Compare to § opt/profile-v3 (tip `b160469` / docs `d3ff475`).
+
+### New % breakdown (self CPU)
+
+Representative midpoints on this box. Default `BDH_ATTN_IMPL=eager` throughout:
+
+| Mode | Top self-CPU ops | vs profile-v3 / post-#44–#48 note |
+|------|------------------|-----------------------------------|
+| Attention | `mul` ~31%, `copy_` ~26%, `bmm` ~16%, `sub`/`add` ~8–10%, `tril` ~7% | Same eager T×T shape as v3 (RoPE `mul`/`copy_` vs GEMM mix wobbles). No structural change from #44–#49. |
+| Forward | `copy_` ~24%, `mul` ~18%, `bmm` ~14%, LN ~11%, `mm` ~10%, `clamp_min_` ~7%, `tril` ~3% | Same GEMM+copies shape as v3. **`aten::contiguous` = 0** still (mlp-fuse #36). #47 encoder-fuse keeps default einsum — no % reshuffle. |
+| Generate | `bmm` ~43%, `mm` ~30%, LN ~12%, `copy_` ~11%; `BDH.generate` self ~1.4% | **`aten::cat` = 0** still (#20). **gen-host #44 visible:** Python `BDH.generate` self dropped vs v3’s often-~26% attributed host tax. **gen-sample #48:** structural T=1 lm_head+sample fuse; default-V wall % still decode GEMM-dominated (tiny V; no big % reshuffle). |
+
+### Confirmed landed (profile-visible / structural)
+
+- **#44 gen-host:** generate host self-CPU attribution much lower (~1.4% vs ~26% in v3 windows); remaining tax is decode `bmm`/`mm`/`copy_`.
+- **#48 gen-sample:** fused T=1 vocab+sample path on tip; profiler % on default V=256 still GEMM-led (honest: wall ~noise on tiny V per § opt/gen-sample).
+- **#20 cache-v2:** generate still **zero `aten::cat`** (0 calls in traces).
+- **#36 mlp-fuse:** forward still **zero `aten::contiguous`**.
+- **#49 compile-guidance / #46 / #47:** no default-eager profile delta.
+
+### Ranked follow-ups
+
+Unchanged honesty vs backlog: **P0** = GPU measure fused score×V (CPU % above
+are not GPU wins). **P1** = GPU compile train-step + generate/decode GEMM
+(`bench_generate.py` / `bench_gpu_attn.py --mode decode`). gen-host / gen-sample /
+compile-guidance already on main — strike from “next.”
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal / SDPA
+- No GPU speedup claims from these CPU % figures
+- No defaulting `BDH_ATTN_IMPL=blocked` on CPU
