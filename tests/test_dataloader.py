@@ -446,6 +446,29 @@ def test_batch_prefetcher_sync_close_clears_host_slot(tr, monkeypatch):
     loader.close()
 
 
+def test_batch_prefetcher_sync_next_consumes_and_refills_host_slot(tr, monkeypatch):
+    """Sync next returns the preloaded batch before refilling one host slot."""
+    first = (
+        torch.zeros((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64),
+        torch.ones((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64),
+    )
+    second = (
+        torch.full((tr.BATCH_SIZE, tr.BLOCK_SIZE), 2, dtype=torch.int64),
+        torch.full((tr.BATCH_SIZE, tr.BLOCK_SIZE), 3, dtype=torch.int64),
+    )
+    batches = iter((first, second))
+    monkeypatch.setattr(tr.BatchPrefetcher, "_gather_pinned_host", lambda self: next(batches))
+
+    loader = tr.BatchPrefetcher("train", async_host=False)
+    try:
+        assert loader._host_next is first
+        x, y = loader.next()
+        assert x is first[0] and y is first[1]
+        assert loader._host_next is second
+    finally:
+        loader.close()
+
+
 def test_batch_prefetcher_producer_failure_is_terminal(tr, monkeypatch):
     """Once the CPU producer fails, every pending ``next()`` fails promptly."""
 
