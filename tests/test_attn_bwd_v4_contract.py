@@ -10,6 +10,33 @@ from kernels.attention_bwd import strict_tril_attn
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_raw_score_strict_tril_forward_and_backward_contract(impl):
+    """Strict-tril attention is raw score@V, with no scale or softmax."""
+    Q = torch.tensor(
+        [[[[2.0, 0.0], [1.0, 3.0], [4.0, 5.0]]]], requires_grad=True
+    )
+    K = torch.tensor(
+        [[[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]]], requires_grad=True
+    )
+    V = torch.tensor(
+        [[[[2.0], [3.0], [100.0]]]], requires_grad=True
+    )
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    expected = torch.tensor([[[[0.0], [14.0], [124.0]]]])
+    assert torch.equal(out, expected)
+
+    out.sum().backward()
+    assert torch.equal(
+        Q.grad, torch.tensor([[[[0.0, 0.0], [2.0, 4.0], [11.0, 16.0]]]])
+    )
+    assert torch.equal(
+        K.grad, torch.tensor([[[[10.0, 16.0], [12.0, 15.0], [0.0, 0.0]]]])
+    )
+    assert torch.equal(V.grad, torch.tensor([[[[21.0], [32.0], [0.0]]]]))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 @pytest.mark.parametrize("v_heads", [1, 3])
 def test_t1_excludes_self_attention_in_output_and_backward(impl, v_heads):
     """T=1 has no past keys, so output and every input gradient are zero."""
