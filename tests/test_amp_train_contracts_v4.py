@@ -34,6 +34,25 @@ def _configure_or_cpu_skip(amp_name: str) -> None:
         raise
 
 
+@pytest.mark.parametrize("amp_name", ["bfloat16", "float16"])
+def test_cpu_amp_skip_reason_keeps_dtype_and_backend_context(monkeypatch, amp_name):
+    """CPU skips retain the requested dtype and actionable backend context."""
+    if tr.device.type != "cpu":
+        pytest.skip("CPU-only backend skip contract")
+    probe_name = {
+        "bfloat16": "cpu_bf16_available",
+        "float16": "cpu_fp16_available",
+    }[amp_name]
+    monkeypatch.setattr(tr, probe_name, lambda: False)
+    with pytest.raises(pytest.skip.Exception) as caught:
+        _configure_or_cpu_skip(amp_name)
+    message = str(caught.value)
+    assert f"CPU-safe skip for {amp_name}" in message
+    assert f"BDH_AMP_DTYPE={amp_name}" in message
+    assert f"{amp_name} requested on CPU" in message
+    assert "autocast is unavailable" in message
+
+
 @pytest.mark.parametrize(
     ("amp_name", "expected_ptdtype"),
     [
