@@ -138,3 +138,22 @@ def test_online_decode_tiled_multi_query_keeps_raw_signed_scores():
     got = online_decode_attn(Q, K_past, V_past, block_size=1)
     expected = torch.tensor([[[[2.0], [5.0]]]])
     assert torch.equal(got, expected)
+
+
+def test_online_decode_multi_query_packed_shared_v_tiled_parity():
+    """Multi-query online decode preserves packed shared-V views across tiles."""
+    B, H, S, Tq, N, D = 2, 3, 353, 3, 4, 2
+    capacity = S + 11
+    g = torch.Generator().manual_seed(811)
+    Q = torch.randn(B, H, Tq, N, generator=g)
+    K = torch.randn(B, H, S, N, generator=g)
+    V_storage = torch.randn(B, 1, capacity, D, generator=g)
+    V = V_storage.narrow(2, 5, S)
+
+    assert V.stride() == (capacity * D, capacity * D, D, 1)
+    ref = eager_decode_attn(Q, K, V)
+    got = online_decode_attn(Q, K, V, block_size=64)
+
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+        f"maxdiff={(got - ref).abs().max().item()}"
+    )
