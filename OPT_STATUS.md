@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#221; #160 docs scope retained)
+# OPT status — landed work (#1–#225; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `39ca536` (multi-step sampler layout contract, #221) follows #220 B=1 score×V view alignment (`f344494`), #219 B=1 non-flat score×V view coverage (`d218150`), and #218 online decode raw-score contract (`50d40f5`). Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #218 adds CPU-only raw-score decode contract coverage; #219 and #220 add CPU-only B=1 score×V view parity/shape coverage; and #221 adds CPU-only multi-step sampler-layout contract coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `258b24c` (clean failed compile backward probe fallback, #225) follows #224 paired RoPE table-boundary guards (`ad7a50b`), #223 docs refresh through #221 (`75ce6c2`), #221 multi-step sampler layout contract (`39ca536`), and #220 B=1 score×V view alignment (`f344494`). Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #218 adds CPU-only raw-score decode contract coverage; #219 and #220 add CPU-only B=1 score×V view parity/shape coverage; #221 adds CPU-only multi-step sampler-layout contract coverage; #224 adds CPU-only paired RoPE table-boundary coverage; and #225 adds CPU-only failed-backward compile-probe fallback coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#221)
+## Landed opts (#1–#225)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -401,6 +401,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **219** | `opt/scorev-v6` | Add CPU parity coverage for B=1 non-flat packed K views on the score×V path; preserve 4-D strides, avoid staging, and match eager decode | CPU-only parity/stride coverage; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **220** | `opt/scorev-v6` | Align the B=1 non-flat K-view contract with the tiled `bmm` score×V path while preserving eager parity | CPU-only tiled shape/parity coverage; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **221** | `opt/layout-v5` | Deepen the multi-step sampler-layout contract: generate two tokens and require one `(B,)` sampler result per token while keeping `aten::cat=0` and no `(B,V)` materialization | CPU-only profiler contract coverage; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **224** | `opt/rope-fuse-v5` | Guard paired T=1 RoPE table lookups at negative and out-of-range positions without poisoning the last valid flat or paired narrow cache | CPU-only boundary/skip contract coverage; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **225** | `opt/compile-v6` | Clear partial parameter gradients when a `train_bwd` compile probe fails before returning the eager fallback; preserve caller training mode | CPU-only failing-backward fallback coverage; no GPU compile or performance claim | **P1** GPU inductor / CUDA-graph validation remains open |
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -460,7 +462,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#219** B=1 non-flat score×V tests merged as `d218150`; CPU parity confirms non-flat packed K views retain the 4-D path without staging, with no GPU timing or performance claim.
 - **#220** B=1 score×V view tests merged as `f344494`; non-flat K views retain tiled `bmm` shape parity with eager decode, with no GPU timing or performance claim.
 - **#221** multi-step sampler layout tests merged as `39ca536`; two-token CPU profiling preserves one `(B,)` result per token, `aten::cat=0`, and no `(B,V)` sampler materialization.
-- **Current tip #221** `39ca536` deepens the CPU-safe sampler-layout contract; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#224** paired RoPE table-boundary tests merged as `ad7a50b`; rejected negative/out-of-range lookups do not poison valid flat or paired cache narrows, with no GPU timing or performance claim.
+- **#225** failed compile-backward probe tests merged as `258b24c`; partial parameter gradients are cleared before the eager fallback, caller training mode is preserved, and CPU-only regression coverage adds no GPU compile result.
+- **Current tip #225** `258b24c` carries the CPU-safe failed-backward compile fallback contract; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
