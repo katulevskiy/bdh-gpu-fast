@@ -362,3 +362,36 @@ def test_decode_reference_uses_raw_past_scores_without_scaling():
     actual = namespace["BACKENDS_DECODE"]["eager"](q, k, v)
 
     assert torch.equal(actual, expected)
+
+
+def test_no_cuda_skip_includes_native_cuda_handoff(tmp_path):
+    """A cold-path skip keeps the optional native CUDA handoff actionable."""
+    summary_path = tmp_path / "gpu-summary.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--mode",
+            "cold",
+            "--json-out",
+            str(summary_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(summary_path.read_text())
+    assert summary["status"] == "skip"
+    assert summary["timing_scope"] == "none"
+    assert summary["commands"]["native_cuda_optional"] == [
+        "BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation",
+        "python benchmarks/bench_gpu_attn.py",
+    ]
+    assert (
+        "BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation"
+        in result.stdout
+    )
+    assert "median ms" not in result.stdout
