@@ -36,6 +36,17 @@ def test_parse_prompt_lengths_rejects_malformed_values(raw):
         bench_generate._parse_prompt_lengths(raw)
 
 
+def test_resolve_device_is_cpu_safe_when_cuda_is_unavailable(monkeypatch, capsys):
+    """Auto uses CPU, while an explicit unavailable CUDA request cleanly skips."""
+    monkeypatch.setattr(bench_generate.torch.cuda, "is_available", lambda: False)
+
+    assert bench_generate._resolve_device(
+        argparse.Namespace(device="auto")
+    ) == bench_generate.torch.device("cpu")
+    assert bench_generate._resolve_device(argparse.Namespace(device="cuda")) is None
+    assert "torch.cuda.is_available() is False" in capsys.readouterr().out
+
+
 def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
     """Each unique decode threshold runs once with a mirrored cold gate."""
     calls = []
