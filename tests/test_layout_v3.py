@@ -102,3 +102,28 @@ def test_cpu_probe_documents_remaining_layout_materializations():
     generate_contig_shapes = _event_shapes(generate, "aten::contiguous")
     assert generate_contig_shapes.count((2, cfg.vocab_size)) == 1
     assert generate_contig_shapes.count((2,)) == 2
+
+def test_cpu_probe_covers_scaled_and_topk_sampler_signatures():
+    """Cover sampler-owned layout branches without changing model defaults."""
+    cfg = _cfg()
+    model = bdh.BDH(cfg).eval()
+    idx = torch.randint(0, cfg.vocab_size, (2, 8))
+
+    # Non-default sampler options own the first-step logits buffer.  Probe both
+    # the narrow top-k path and the k==V fallback, not just default multinomial.
+    cases = (
+        ("scaled", dict(temperature=0.7)),
+        ("topk-narrow", dict(temperature=0.7, top_k=8)),
+        ("topk-full", dict(temperature=0.7, top_k=cfg.vocab_size)),
+    )
+    with torch.inference_mode():
+        for name, kwargs in cases:
+            prof = _profile_call(
+                lambda kwargs=kwargs: model.generate(
+                    idx[:, :5], max_new_tokens=1, **kwargs
+                )
+            )
+            shapes = _event_shapes(prof, "aten::contiguous")
+            assert _count(prof, "aten::cat") == 0, name
+            assert shapes.count((2,)) == 1, (name, shapes)
+            assert (2, cfg.vocab_size) not in shapes, (name, shapes)
