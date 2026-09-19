@@ -187,6 +187,59 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
     assert "first probe failed" not in captured
 
 
+@pytest.mark.parametrize("caller_training", [False, True])
+def test_forward_probe_without_targets_returns_wrapper_and_restores_state(
+    monkeypatch, capsys, caller_training
+):
+    """The forward-only train probe accepts only inputs and restores mode."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    class ProbedWrapper(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.calls = 0
+
+        def forward(self, *args, **kwargs):
+            self.calls += 1
+            return self.module(*args, **kwargs)
+
+    model = bdh.BDH(_small_cfg()).train(caller_training)
+    wrapper = ProbedWrapper(model)
+
+    def compile_spy(compiled_model, **kwargs):
+        assert compiled_model is model
+        compile_kwargs.update(kwargs)
+        return wrapper
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    x = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert out is wrapper
+    assert wrapper.calls == 1
+    assert out.training is caller_training
+    assert model.training is caller_training
+    assert "torch.compile enabled (mode=default, probe=train" in captured
+    assert "first probe failed" not in captured
+
+
 def test_compile_failure_without_probe_preserves_caller_state(
     monkeypatch, capsys
 ):
