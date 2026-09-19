@@ -393,3 +393,26 @@ def test_decode_dispatch_t1_preserves_per_head_v_tiled_views():
         )
         assert torch.equal(K, K_before)
         assert torch.equal(V, V_before)
+
+
+def test_online_decode_t1_long_per_head_v_tiled_parity():
+    """Long T=1 per-head decode takes the tiled path without mutating cache views."""
+    B, H, S, N, D = 1, 2, 65537, 3, 2
+    offset = 5
+    capacity = S + 7
+    g = torch.Generator().manual_seed(2324)
+    K_storage = torch.randn(B, H, offset + capacity, N, generator=g)
+    V_storage = torch.randn(B, H, offset + capacity, D, generator=g)
+    K = K_storage.narrow(2, offset, S)
+    V = V_storage.narrow(2, offset, S)
+    Q = torch.randn(B, H, 1, N, generator=g)
+    K_before, V_before = K.clone(), V.clone()
+
+    ref = eager_decode_attn(Q, K, V)
+    got = online_decode_attn(Q, K, V, block_size=64)
+
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+        f"maxdiff={(got - ref).abs().max().item()}"
+    )
+    assert torch.equal(K, K_before)
+    assert torch.equal(V, V_before)
