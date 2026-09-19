@@ -391,7 +391,8 @@ def main() -> int:
             for command in commands:
                 print(f"    {command}")
         print(
-            f"  torch={summary['torch_version']}  cuda_available=false "
+            f"  torch={summary['torch_version']}  "
+            f"cuda_available={str(summary['cuda_available']).lower()} "
             f"cuda_version={summary['cuda_version']}  "
             f"cuda_built={summary['cuda_built']}  "
             f"cuda_built_probe_error={summary['cuda_built_probe_error']}  "
