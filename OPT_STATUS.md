@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#314+; #160 docs scope retained)
+# OPT status — landed work (#1–#315+; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `8e4ce85` (#314 packed shared-V online-decode parity) follows the gen-bench threshold-sweep contract at `6d575a3`, #312 AUTO cold-threshold validation, #311 blocked-prefill dispatch coverage, #310 AMP forward-only toggle coverage, #309 sparse latest-sample guardrail coverage, #308 docs-v67, and #307 prefetch H2D identity coverage. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
+Tip pointer: `c58a8d9` (#315 per-head score×V parity) follows #314 packed shared-V online-decode parity, the gen-bench threshold-sweep contract at `6d575a3`, #312 AUTO cold-threshold validation, #311 blocked-prefill dispatch coverage, #310 AMP forward-only toggle coverage, #309 sparse latest-sample guardrail coverage, #308 docs-v67, and #307 prefetch H2D identity coverage. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#314+; prefetch, docs-v67, sparse, AMP, blocked, AUTO, packed shared-V, and gen-bench tip coverage)
+## Landed opts (#1–#315+; prefetch, docs-v67, sparse, AMP, blocked, AUTO, packed shared-V, per-head score×V, and gen-bench tip coverage)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -469,8 +469,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **311** | `opt/blocked-v10` | Exercise the public cold/prefill AUTO route above threshold on CPU and preserve strict lower-triangular raw-score parity on a non-divisible tile | CPU-only blocked-dispatch parity; no GPU performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **312** | `opt/auto-thr-v10` | Reject malformed and negative `BDH_ATTN_AUTO_COLD_THRESHOLD` values before cold dispatch and recover after a valid update | CPU-only AUTO threshold contract; no GPU timing or threshold claim | **P0** GPU threshold/tile validation remains open |
 | **314** | `tests/test_online_decode_v5.py` | CPU-only multi-query online decode preserves packed shared-V views across tiled `Tq=3`, `S=353` parity coverage | CPU-only packed-view parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
-| **tip** | `tests/test_bench_gpu_attn.py` | Tip `8e4ce85`: packed shared-V online decode parity follows the gen-bench threshold sweep; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
-| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `8e4ce85`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #307–#312, #314, and follow-up threshold-sweep tests add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **315** | `tests/test_fuse_scorev.py` | CPU-only distinct-Q/K score×V parity with per-head V values across the long blocked/online path | CPU-only per-head-V parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **tip** | `tests/test_bench_gpu_attn.py` | Tip `c58a8d9`: per-head score×V parity follows packed shared-V online decode and the gen-bench threshold sweep; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `c58a8d9`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #307–#315 and follow-up threshold-sweep tests add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -613,8 +614,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#311** `fce51fe` covers the public blocked/prefill AUTO route and non-divisible strict-tril parity on CPU; no GPU performance claim.
 - **#312** `5100b01` adds CPU-safe malformed/negative AUTO cold-threshold validation and recovery; no GPU timing claim.
 - **#314** `8e4ce85` adds CPU-only multi-query online decode parity for packed shared-V views across a tiled boundary; no GPU performance claim.
+- **#315** `c58a8d9` adds CPU-only distinct-Q/K score×V parity with per-head V values across the long blocked/online path; no GPU timing or performance claim.
 - **Tip follow-up** `6d575a3` (gen-bench threshold sweep) de-duplicates decode thresholds and mirrors the cold gate; it adds no GPU evidence.
-- **Current tip** `8e4ce85` carries the flat profile-v20 counts plus CPU-only contracts/docs through #314+; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **Current tip** `c58a8d9` carries the flat profile-v20 counts plus CPU-only contracts/docs through #315+; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
