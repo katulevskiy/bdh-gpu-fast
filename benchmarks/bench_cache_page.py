@@ -93,12 +93,18 @@ def _run_policy(
     wall_ms = (time.perf_counter() - t0) * 1000.0
     assert cm.seq_len == max_seq
     assert cm.capacity == max_seq
+    elem_stride = _elem_stride_bytes(cm)
+    live_bytes = cm.seq_len * elem_stride
     return {
         "page": page,
         "max_seq": max_seq,
+        "initial_capacity": min(max_seq, page),
+        "final_capacity": cm.capacity,
         "n_grows": cm.n_grows,
         "bytes_copied": cm.bytes_copied_on_grow,
-        "elem_stride": _elem_stride_bytes(cm),
+        "elem_stride": elem_stride,
+        "live_bytes": live_bytes,
+        "allocated_bytes": cm.bytes_allocated,
         "wall_ms": wall_ms,
     }
 
@@ -238,7 +244,8 @@ def main() -> int:
     )
     print()
     hdr = (
-        f"{'page':>6} {'geo_grows':>9} {'lin_grows':>9} {'geo_bytes':>12} "
+        f"{'page':>6} {'capacity':>13} {'alloc_KiB':>10} "
+        f"{'geo_grows':>9} {'lin_grows':>9} {'geo_bytes':>12} "
         f"{'lin_bytes':>12} {'bytes_x':>8} {'grows_x':>8} {'geo_ms':>8}"
     )
     print(hdr)
@@ -267,8 +274,14 @@ def main() -> int:
         gx = (
             lin["n_grows"] / geo["n_grows"] if geo["n_grows"] else float("inf")
         )
+        assert geo["initial_capacity"] == lin["initial_capacity"]
+        assert geo["final_capacity"] == lin["final_capacity"] == args.max_seq
+        assert geo["allocated_bytes"] == lin["allocated_bytes"]
+        capacity = f"{geo['initial_capacity']}→{geo['final_capacity']}"
+        alloc_kib = geo["allocated_bytes"] / 1024
         print(
-            f"{page:6d} {geo['n_grows']:9d} {lin['n_grows']:9d} "
+            f"{page:6d} {capacity:>13} {alloc_kib:10.1f} "
+            f"{geo['n_grows']:9d} {lin['n_grows']:9d} "
             f"{geo['bytes_copied']:12d} {lin['bytes_copied']:12d} "
             f"{bx:7.1f}× {gx:7.1f}× {geo['wall_ms']:7.1f}"
         )
@@ -277,6 +290,9 @@ def main() -> int:
                 "page": page,
                 "geo_grows": geo["n_grows"],
                 "lin_grows": lin["n_grows"],
+                "initial_capacity": geo["initial_capacity"],
+                "final_capacity": geo["final_capacity"],
+                "allocated_bytes": geo["allocated_bytes"],
                 "geo_bytes": geo["bytes_copied"],
                 "lin_bytes": lin["bytes_copied"],
                 "bytes_x": bx,

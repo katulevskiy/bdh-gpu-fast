@@ -6693,3 +6693,48 @@ CPU percentages and operator counts are not GPU performance measurements.
 - CPU profile recorded after #152/#154 on the post-#156 main tip.
 - No GPU timing, kernel-on-hardware result, correctness, or speedup claim.
 - No attention-semantic change, public PR, or PR to `pathwaycom/*`.
+
+## opt/cache-bench-v2 — report packed-cache footprint per page (2026-09-19)
+
+**Branch:** `opt/cache-bench-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `86315f0` (`main`, after #152 / #157).
+
+### Goal
+
+Deepen the post-#85 CPU-only cache-page bench without changing cache or
+`generate` defaults. The page sweep now reports the packed `CacheManager`
+capacity transition (`initial→final`) and final packed KR+V allocation in KiB,
+alongside geometric-vs-linear grow/copy counts. This makes a small page and a
+large page directly comparable without inferring the allocation from `max_seq`
+and dtype.
+
+### What changed
+
+- `benchmarks/bench_cache_page.py`: `_run_policy()` now captures initial and
+  final capacity, live bytes, and `CacheManager.bytes_allocated`; the sweep
+  prints `capacity` and `alloc_KiB` for each page size.
+- The benchmark asserts that the geometric and linear A/B policies reach the
+  same final packed capacity and allocation; only the grow/copy policy differs.
+- No model, attention, page-growth, or default behavior changed. The linear
+  policy remains a benchmark-only monkeypatch.
+
+```bash
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_cache_page.py --smoke
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_cache_page.py \
+  --max-seq 2048 --pages 8,16,32,64,128,256
+```
+
+### CPU evidence
+
+The smoke/sweep reports remain CPU accounting only. `alloc_KiB` is the final
+packed KR+V tensor footprint for the fp32 benchmark configuration; it is not a
+GPU memory measurement or a claim about attention/generate wall time. Defaults
+remain unchanged (`page_size=None` / `cache_page_size=None` still preallocate
+`max_seq`).
+
+### Non-goals
+
+- No GPU/CUDA claims or measurements
+- No softmax / scale / SDPA; raw scores × `tril(diagonal=-1)` preserved
+- No default change and no generate-path change
+- No PRs to `pathwaycom/*`; private repo only
