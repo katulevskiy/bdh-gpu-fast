@@ -185,3 +185,19 @@ def test_auto_toggle_releases_and_reenables_both_gates(monkeypatch):
     monkeypatch.setenv("BDH_ATTN_AUTO", "true")
     assert resolve_cold_impl(5) != "eager"
     assert resolve_decode_impl(5) != "eager"
+
+
+def test_auto_long_paths_fall_back_to_blocked_without_triton(monkeypatch):
+    """Long AUTO paths use blocked when Triton is unavailable."""
+    monkeypatch.setattr(
+        "kernels.attention_dispatch.triton_decode_available", lambda: False
+    )
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "2")
+
+    assert resolve_cold_impl(2) == "eager"
+    assert resolve_cold_impl(3) == "blocked"
+    assert resolve_decode_impl(4) == "eager"
+    assert resolve_decode_impl(5) == "blocked"
