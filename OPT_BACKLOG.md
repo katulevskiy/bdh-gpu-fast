@@ -1,8 +1,8 @@
-# OPT backlog — ranked remaining work (docs-v75)
+# OPT backlog — ranked remaining work (docs-v76)
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #350–#388, with documented landing tip `dabc3db` (#388).
+Documentation coverage: #389–#402, with documented landing tip `9ae8df5` (#402). This branch is rebased onto current main tip `3e2f9c5` (#404); #403–#404 remain outside this requested refresh range.
 
 ## Hard constraints
 
@@ -15,15 +15,15 @@ Documentation coverage: #350–#388, with documented landing tip `dabc3db` (#388
 
 | Priority | Work | Current state | Acceptance evidence |
 |---|---|---|---|
-| **P0** | Real GPU cold attention | CPU reference, padded/strided-Q/K/V parity, packed-decode layouts, and benchmark contracts are covered; no live CUDA measurement | A100/H100 cold eager vs blocked/online/Triton/CUDA medians plus strict-tril parity |
+| **P0** | Real GPU cold attention | CPU reference, padded/strided-Q/K/V parity, strided-gradient and packed-decode contracts, and benchmark contracts are covered; no live CUDA measurement | A100/H100 cold eager vs blocked/online/Triton/CUDA medians plus strict-tril parity |
 | **P0** | Cold CUDA–Triton validation | Scaffolds and CPU fallbacks are present; no launch has been measured here | Successful build/launch, cold compile behavior, output parity, and median timing |
-| **P0** | T=1 decode on GPU | CPU score×V, packed-past, empty-past, float64 tiled, and capacity-strided-V contracts are covered by #362/#363/#378/#388 | Real-GPU decode medians, peak memory, and parity at tile/oneshot boundaries |
-| **P1** | Long-T AUTO threshold/tile retune | CPU cold/decode threshold independence, blank clearing, and decode-only overrides are covered by #352/#360/#368/#377; AUTO remains opt-in | GPU cold/decode sweep that justifies threshold and tile choices |
-| **P1** | Fused RoPE on GPU | CPU shape/layout, paired-output alias, and fp16-input/fp32-cache T=1 contracts are covered by #351/#366/#383 | Real-GPU fused/eager parity and timing across supported dtypes/layouts |
-| **P1** | AMP train and H2D overlap | CPU bf16/fp16 throughput contracts and repeated worker/H2D opt-out identity are covered by #359/#372/#374/#387; no CUDA throughput evidence | CUDA bf16/fp16 train throughput and pinned H2D overlap measurements |
-| **P1** | Compile train step | CPU invalid/normalized-probe fallback and force-CPU/nvcc build guards are covered by #353/#354/#369/#370/#384/#385; GPU path unmeasured | GPU inductor/CUDA-graph A/B with `BDH_COMPILE=0|1` |
-| **P2** | Analytic attention backward on GPU | CPU strict-past tile-boundary, strided-V, empty-prefix, and non-contiguous-Q/K/V gradient contracts are covered by #355/#364/#371/#386; GPU path unmeasured | GPU train-step parity and timing across eager/blocked/online/Triton/CUDA |
-| **P2** | Sparse production path | No-sample and density-failure guardrails are covered by #358/#375; probe is explicit and default-off | Density plus a measured GPU sparse-kernel win before any default change |
+| **P0** | T=1 decode on GPU | CPU score×V, packed-past, empty-past including float64, and capacity-strided-V contracts are covered by #362/#363/#378/#388/#389/#395 | Real-GPU decode medians, peak memory, and parity at tile/oneshot boundaries |
+| **P1** | Long-T AUTO threshold/tile retune | CPU cold/decode threshold independence, blank transitions, decode-only overrides, and pre-run sweep validation are covered by #352/#360/#368/#377/#394/#399; AUTO remains opt-in | GPU cold/decode sweep that justifies threshold and tile choices |
+| **P1** | Fused RoPE on GPU | CPU shape/layout, paired-output alias, and fp16-input/fp32-cache T=1 contracts are covered by #351/#366/#383/#398 | Real-GPU fused/eager parity and timing across supported dtypes/layouts |
+| **P1** | AMP train and H2D overlap | CPU bf16/fp16 throughput contracts, no-claim gating, disabled CPU GradScaler, and repeated worker/H2D opt-out identity are covered by #359/#372/#374/#387/#390; no CUDA throughput evidence | CUDA bf16/fp16 train throughput and pinned H2D overlap measurements |
+| **P1** | Compile train step | CPU invalid/normalized-probe cleanup, failed-probe restoration, and force-CPU/nvcc build guards are covered by #353/#354/#369/#370/#384/#385/#400/#401; GPU path unmeasured | GPU inductor/CUDA-graph A/B with `BDH_COMPILE=0|1` |
+| **P2** | Analytic attention backward on GPU | CPU strict-past tile-boundary, strided-V, empty-prefix, non-contiguous-Q/K/V, padded-V, and strided-upstream-gradient contracts are covered by #355/#364/#371/#386/#393/#402; GPU path unmeasured | GPU train-step parity and timing across eager/blocked/online/Triton/CUDA |
+| **P2** | Sparse production path | No-sample and terminal density-floor failure guardrails are covered by #358/#375/#392; probe is explicit and default-off | Density plus a measured GPU sparse-kernel win before any default change |
 
 ## Latest landed contracts
 
@@ -68,10 +68,24 @@ Documentation coverage: #350–#388, with documented landing tip `dabc3db` (#388
 | **#386** | Strided attention backward | Analytic strict-tril backward parity holds for non-contiguous Q/K/V views |
 | **#387** | DataLoader H2D opt-out | CPU H2D opt-out remains explicit and clean under the deeper contract |
 | **#388** | Packed decode GEMM | Shared and per-head capacity-strided V layouts preserve raw score×V semantics across CPU-safe dispatch |
+| **#389** | Packed decode measurement contract | Packed decode layouts are included in the GPU-measure reference contract; no timing was added |
+| **#390** | AMP throughput claim contract | CPU AMP cannot report GPU throughput and keeps GradScaler disabled |
+| **#391** | Docs-v75 | Matrix/backlog refreshed through #388; no GPU evidence added |
+| **#392** | Sparse guardrail floor | Terminal `xy` density-floor failure is distinct and skips crossover work |
+| **#393** | Padded-V backward | Capacity-padded non-contiguous V preserves blocked/online forward and gradient parity |
+| **#394** | AUTO cold-threshold transition | Blank-to-explicit transitions keep the later cold override independent |
+| **#395** | Online decode empty dtype | Float64 empty-past decode returns typed, shaped zero score×V output |
+| **#396** | Score-V dispatch | Blocked/online paths retain raw score×strict-tril semantics including row zero |
+| **#397** | Strided sampler layout | Strided prefill logits slices preserve singleton output identity, RNG parity, and neighbor isolation |
+| **#398** | Paired RoPE mixed dtype | Non-contiguous paired T=1 output slots preserve fp16-input/fp32-cache parity |
+| **#399** | AUTO sweep validation | Malformed threshold sweeps fail closed before execution or model setup |
+| **#400** | Compile probe failure | Failed probes restore mode and clear partial gradients before eager fallback |
+| **#401** | CUDA nvcc directory contract | A `CUDA_PATH/nvcc` directory is rejected cleanly while CPU fallback remains safe |
+| **#402** | Strided upstream attention gradients | Strict-tril backward covers non-contiguous upstream gradients across CPU-safe dispatch paths |
 
 ## Current evidence summary
 
-The profile-v20 call-count baseline remains attention `copy_` 2/call, forward `copy_` 12/call, generate `copy_` 394/call, `cat=0`, and `contiguous=0`. The #350–#388 additions are CPU-safe docs/tests/contracts; #356 and #373 define GPU benchmark references but add no CUDA timing. None adds GPU throughput, sparse-kernel evidence, or cold CUDA–Triton validation.
+The profile-v20 call-count baseline remains attention `copy_` 2/call, forward `copy_` 12/call, generate `copy_` 394/call, `cat=0`, and `contiguous=0`. The #350–#402 additions are CPU-safe docs/tests/contracts; #356, #373, and #389 define GPU benchmark references but add no CUDA timing. None adds GPU throughput, sparse-kernel evidence, or cold CUDA–Triton validation.
 
 Defaults remain:
 
