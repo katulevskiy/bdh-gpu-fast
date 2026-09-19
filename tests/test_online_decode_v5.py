@@ -256,3 +256,25 @@ def test_online_decode_tiled_nonempty_preserves_query_dtype():
     assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10), (
         f"maxdiff={(got - ref).abs().max().item()}"
     )
+
+
+def test_decode_dispatch_nonempty_preserves_float64_query_dtype():
+    """Every CPU-safe decode dispatch keeps float64 on a packed cache view."""
+    B, H, S, N, D = 2, 3, 1025, 4, 3
+    offset = 3
+    capacity = S + 11
+    g = torch.Generator().manual_seed(1718)
+    Q = torch.randn(B, H, 1, N, dtype=torch.float64, generator=g)
+    K_storage = torch.randn(B, H, offset + capacity, N, dtype=Q.dtype, generator=g)
+    V_storage = torch.randn(B, 1, offset + capacity, D, dtype=Q.dtype, generator=g)
+    K = K_storage.narrow(2, offset, S)
+    V = V_storage.narrow(2, offset, S)
+
+    ref = eager_decode_attn(Q, K, V)
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K, V, impl=impl, block_size=64)
+        assert got.shape == (B, H, 1, D)
+        assert got.dtype == Q.dtype
+        assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10), (
+            f"impl={impl} maxdiff={(got - ref).abs().max().item()}"
+        )
