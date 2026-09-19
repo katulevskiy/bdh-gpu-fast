@@ -224,7 +224,14 @@ def prefetch_h2d_skip_reason() -> str | None:
     """
     if device.type != "cuda":
         return f"device-not-cuda: {device.type}"
-    if not torch.cuda.is_available():
+    try:
+        cuda_available = torch.cuda.is_available()
+    except (AssertionError, RuntimeError) as exc:
+        return (
+            "CUDA unavailable: torch.cuda.is_available() raised "
+            f"{type(exc).__name__}"
+        )
+    if not cuda_available:
         return "CUDA unavailable: torch.cuda.is_available() is false"
     return None
 
