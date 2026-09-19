@@ -4885,7 +4885,7 @@ zero and no softmax/scale/SDPA was introduced.
 ```text
 python -m pytest tests/test_prefill_blocked.py tests/test_fuse_scorev.py \
   tests/test_attn_mem.py tests/test_attn_auto.py -q
-# 69 passed
+# 71 passed
 
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python benchmarks/bench_blocked_vec.py
 # torch 2.14.0+cu130, cuda=False, B=1 H=2 N=32 D=64
