@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#75)
+# OPT status — landed work (#1–#76+)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `43948b7` (`#75` prefill-blocked on `main`; `#74` docs matrix v9 / `#73` attn-mem-probe / `#72` gen-long-bench / `#71` docs matrix / `#70` dropout-compile). Profile source: tip of `#68` (`b126d77`, post-#64–#66); #69–#75 are documented updates after that profile.
+Tip documented here: `acd26d7` (`#76` docs matrix through #75; `#75` prefill-blocked / `#74` docs / `#73` attn-mem / `#72` gen-long). Profile source: tip of `#68` (`b126d77`, post-#64–#66); #69–#76 are documented updates after that profile.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -43,15 +43,19 @@ Re-run on A100/H100 via `benchmarks/bench_gpu_attn.py` before claiming kernel wi
 
 Also: `BDH_ATTN_AUTOGRAD=1` → `StrictTrilAttnFn` analytic Q/K/V backward (opt-in; #7/#39/#41). Default **off**. With `IMPL=blocked|online|triton|cuda`, bwd is **tiled** (no full T×T); eager keeps dense M-recompute. T=1 CacheManager decode / `generate` stay on the decode path.
 
-### `BDH_ATTN_AUTO` — opt-in long-S decode backend (default **off**)
+### `BDH_ATTN_AUTO` — opt-in long-S backend (default **off**)
 
-When set (`1|true|yes|on`) and `BDH_ATTN_IMPL` is `eager`, T=1 decode uses
-**blocked** once `past_len > BDH_ATTN_AUTO_THRESHOLD` (default **512**, from
-`#55` CPU benches; triton-decode-v3 prefers Triton when CUDA+Triton). Cold / prefill uses the same length gate on prompt `T`: above the threshold,
-AUTO prefers **triton** when CUDA+Triton is available, otherwise **blocked**, so
-long-`S` generate prefill is not stuck on eager `T×T`. Explicit
-`IMPL∈{blocked,online,triton,cuda}` is never overridden. Default (AUTO unset) =
-eager cold and decode at every length.
+When set (`1|true|yes|on`) and `BDH_ATTN_IMPL` is `eager`:
+- **T=1 decode** → **triton** (CUDA+Triton) else **blocked** once
+  `past_len > BDH_ATTN_AUTO_THRESHOLD` (default **512**, retained after
+  `#55`/`#72`/`#73`/`#75` — CPU wall crossover ~≥512).
+- **Cold / prefill** → same prefer rule once
+  `T > BDH_ATTN_AUTO_COLD_THRESHOLD` (unset → mirrors `AUTO_THRESHOLD`).
+  Lower cold thr (e.g. 256) only when mid-T **peak-score** budget matters more
+  than wall (`#73`: T∈{128,256} peak↓ wall↑).
+
+Explicit `IMPL∈{blocked,online,triton,cuda}` is never overridden. Default
+(AUTO unset) = eager cold and decode at every length.
 
 ```bash
 export BDH_ATTN_IMPL=eager     # default
@@ -59,9 +63,11 @@ export BDH_ATTN_IMPL=blocked
 export BDH_ATTN_IMPL=triton
 export BDH_ATTN_IMPL=cuda
 
-# opt-in long-T cold + long-S decode → blocked|triton (#75 deepens cold)
+# opt-in long-T cold + long-S decode → blocked|triton (#75/#auto-tune)
 export BDH_ATTN_AUTO=1
 export BDH_ATTN_AUTO_THRESHOLD=512
+# optional independent cold gate (unset → same as THRESHOLD):
+# export BDH_ATTN_AUTO_COLD_THRESHOLD=256   # peak-mem mid-T; accept wall loss
 ```
 
 ### `BDH_ROPE_IMPL` — RoPE rotate (default `eager`)
@@ -148,7 +154,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#75)
+## Landed opts (#1–#76+)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -226,6 +232,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e then deepened by #75 | GPU thr re-tune open |
 | **73** | `opt/attn-mem-probe` | CPU peak-mem probe eager vs blocked vs online (`bench_attn_mem.py`) | Mid-T: peak↓ wall↑; long-T both; default eager | No GPU claims |
 | **75** | `opt/prefill-blocked` | Deepen blocked/online cold (adaptive BS@T≥256); AUTO long-T cold+decode | AUTO e2e 1.26×@1024 / 1.39×@2048; cats=0; default eager | GPU thr re-tune open |
+| **…** | `opt/auto-tune` | Keep thr=512; add `BDH_ATTN_AUTO_COLD_THRESHOLD`; operator recs from #72/#73/#75 | short AUTO A/B 1.25×@1024; default AUTO off | GPU thr re-check open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -241,7 +248,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 |------|-------------------------|--------------|
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
-| `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75); `THRESHOLD` default 512 (#55/#56/#75) |
+| `BDH_ATTN_AUTO` | off / unset | `1` for long-T cold + long-S decode→triton (CUDA) or blocked (#55/#75); `THRESHOLD` default 512; optional `COLD_THRESHOLD` (#auto-tune) |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
 | `BDH_COMPILE` / `BDH_COMPILE_MODE` | `0` / `default` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |

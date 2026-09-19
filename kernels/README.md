@@ -31,18 +31,23 @@ export BDH_ATTN_AUTOGRAD=1
 export BDH_ATTN_IMPL=blocked
 
 # opt-in: long-T cold + long-S decode → triton (CUDA) or blocked (CPU)
-# threshold from #55 CPU benches (mid-S stay eager; S≫512 prefer)
+# default thr=512 after #55/#72/#73/#75 (wall crossover ~≥512 on CPU)
 export BDH_ATTN_AUTO=1
-export BDH_ATTN_AUTO_THRESHOLD=512   # optional; default 512; switch when length > thr
+export BDH_ATTN_AUTO_THRESHOLD=512        # decode: past_len > thr → prefer
+export BDH_ATTN_AUTO_COLD_THRESHOLD=512   # optional; unset → same as THRESHOLD
+                                          # lower (e.g. 256) for mid-T peak-mem
 ```
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` for **all**
-impls including eager (`_two_gemm_decode`). With `BDH_ATTN_AUTO=1` and default eager, length above
-`BDH_ATTN_AUTO_THRESHOLD` (default 512) switches **cold/prefill** (`T`) and
-**T=1 decode** (`past_len`) to **triton** if CUDA+Triton are available
-(`triton_decode_available`), else **blocked** (#55 / `opt/prefill-blocked`).
+impls including eager (`_two_gemm_decode`). With `BDH_ATTN_AUTO=1` and default eager:
+- **decode** switches when `past_len > BDH_ATTN_AUTO_THRESHOLD` (default 512)
+- **cold/prefill** switches when `T > BDH_ATTN_AUTO_COLD_THRESHOLD` (falls back
+  to `AUTO_THRESHOLD` when unset)
+to **triton** if CUDA+Triton are available (`triton_decode_available`), else
+**blocked** (#55 / `opt/prefill-blocked` / `opt/auto-tune`).
 Short sequences stay eager; explicit non-eager `IMPL` is never overridden.
+Default AUTO remains **off**.
 Blocked/online/triton share
 `_tiled_score_v` (broadcast-V tight `_DECODE_ONESHOT_ELEMS`, `out.add_`
 tiles, peak ~Tq×tile on long S); Triton decode-v3 uses `V_BROADCAST` +

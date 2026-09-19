@@ -11,29 +11,34 @@ Backends (``BDH_ATTN_IMPL``)::
                                    # blocked|online|triton|cuda → tiled analytic bwd
                                    # (no full T×T); eager → dense M recompute
 
-Opt-in long-S decode auto-select (does **not** change default)::
+Opt-in long-S auto-select (does **not** change default)::
 
-    export BDH_ATTN_AUTO=1                 # off unless set
-    export BDH_ATTN_AUTO_THRESHOLD=512     # default 512; past_len > thr → prefer
+    export BDH_ATTN_AUTO=1                      # off unless set
+    export BDH_ATTN_AUTO_THRESHOLD=512          # decode past_len > thr → prefer
+    export BDH_ATTN_AUTO_COLD_THRESHOLD=512     # optional; cold T > thr → prefer
+                                                # unset → same as AUTO_THRESHOLD
 
 When ``BDH_ATTN_AUTO`` is truthy and ``BDH_ATTN_IMPL`` resolves to ``eager``,
-long sequences switch once length exceeds the threshold:
+long sequences switch once length exceeds the (path-specific) threshold:
 
-- **T=1 decode** (``past_len > thr``): **Triton** when
+- **T=1 decode** (``past_len > AUTO_THRESHOLD``): **Triton** when
   ``triton_decode_available()`` (CUDA + Triton); else **blocked** (#55).
-- **Cold / prefill** (``T > thr``): same prefer-triton-else-blocked rule so
-  long-S ``generate`` prefill is not stuck on eager ``T×T`` (#72 e2e lesson).
+- **Cold / prefill** (``T > COLD_THRESHOLD``): same prefer-triton-else-blocked
+  rule so long-S ``generate`` prefill is not stuck on eager ``T×T`` (#72/#75).
+  ``COLD_THRESHOLD`` defaults to ``AUTO_THRESHOLD`` when unset.
 
+Default shared threshold stays **512** after #72/#73/#75: wall crossover ~
+T/S≥512 on CPU; mid-T (128–256) blocked wins peak mem but loses wall — use a
+lower ``COLD_THRESHOLD`` only when peak-score budget matters more than wall.
 Short sequences and explicit non-eager ``IMPL`` are never overridden.
-Default (AUTO unset) remains eager for all paths. Decode AUTO behavior is
-unchanged; cold AUTO is the prefill deepen on top of the same knobs.
+Default (AUTO unset) remains eager for all paths.
 
 Backends: eager, blocked (=online), triton, or cuda.
 
 Wire-up in ``bdh.Attention.forward``:
 
 - Cold path (``past_kr is None``): ``bdh_attn`` → ``resolve_cold_impl(T)``
-  (``BDH_ATTN_IMPL``, plus AUTO long-T → triton|blocked). With
+  (``BDH_ATTN_IMPL``, plus AUTO long-T via cold thr → triton|blocked). With
   ``BDH_ATTN_AUTOGRAD=1``, wraps in ``StrictTrilAttnFn`` (analytic train).
 - Multi-token + past under AUTOGRAD: also ``bdh_attn`` → ``strict_tril_attn``.
 - T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM by
@@ -69,9 +74,10 @@ _VALID = ("eager", "blocked", "triton", "cuda")
 # "online" is accepted as an alias of blocked (fuse-scorev / OPT notes name).
 _ALIASES = {"online": "blocked"}
 
-# CPU-honest default from #55 benches: mid-S ~parity / slightly slower blocked
-# on generate; long-S decode (S=4096 ~4.4×) and generate prompt=1024 (~1.56×)
-# favor blocked. 512 sits between the stay-eager and prefer-blocked regimes.
+# CPU-honest default from #55/#72/#73/#75: mid-T (128–256) blocked wins peak
+# mem but loses wall; wall crossover ~T/S≥512 (cold ~3×@512, generate AUTO
+# ~1.26×@1024 / ~1.39×@2048 after prefill-blocked). 512 stays the shared
+# default; operators may lower COLD_THRESHOLD for peak-mem mid-T.
 DEFAULT_ATTN_AUTO_THRESHOLD = 512
 _TRUTHY = ("1", "true", "yes", "on")
 
@@ -85,6 +91,8 @@ _ATTN_AUTO_ENV: object | None = object()
 _ATTN_AUTO_ENABLED: bool = False
 _ATTN_AUTO_THR_ENV: object | None = object()
 _ATTN_AUTO_THR: int = DEFAULT_ATTN_AUTO_THRESHOLD
+_ATTN_AUTO_COLD_THR_ENV: object | None = object()
+_ATTN_AUTO_COLD_THR: int | None = None  # None → mirror decode thr
 
 
 def resolve_attn_impl(requested: str | None = None) -> ImplName:
@@ -129,7 +137,11 @@ def attn_auto_enabled() -> bool:
 
 
 def attn_auto_threshold() -> int:
-    """Past-length threshold for AUTO eager→triton|blocked decode (default 512)."""
+    """Decode past-length threshold for AUTO eager→triton|blocked (default 512).
+
+    Also the fallback for cold/prefill when ``BDH_ATTN_AUTO_COLD_THRESHOLD`` is
+    unset. Retained at 512 after #72/#73/#75 (CPU wall crossover ~≥512).
+    """
     global _ATTN_AUTO_THR_ENV, _ATTN_AUTO_THR
     env = os.environ.get("BDH_ATTN_AUTO_THRESHOLD", "")
     if env is _ATTN_AUTO_THR_ENV or env == _ATTN_AUTO_THR_ENV:
@@ -151,6 +163,40 @@ def attn_auto_threshold() -> int:
     _ATTN_AUTO_THR_ENV = env
     _ATTN_AUTO_THR = thr
     return _ATTN_AUTO_THR
+
+
+def attn_auto_cold_threshold() -> int:
+    """Cold/prefill length threshold for AUTO eager→triton|blocked.
+
+    Reads ``BDH_ATTN_AUTO_COLD_THRESHOLD``. When unset / empty, mirrors
+    ``attn_auto_threshold()`` so a single knob still covers both paths.
+    Lower (e.g. 256) only when mid-T peak-score budget matters more than
+    wall (#73: T∈{128,256} peak↓ wall↑).
+    """
+    global _ATTN_AUTO_COLD_THR_ENV, _ATTN_AUTO_COLD_THR
+    env = os.environ.get("BDH_ATTN_AUTO_COLD_THRESHOLD", "")
+    if env is _ATTN_AUTO_COLD_THR_ENV or env == _ATTN_AUTO_COLD_THR_ENV:
+        if _ATTN_AUTO_COLD_THR is None:
+            return attn_auto_threshold()
+        return _ATTN_AUTO_COLD_THR
+    raw = (env or "").strip()
+    if not raw:
+        _ATTN_AUTO_COLD_THR_ENV = env
+        _ATTN_AUTO_COLD_THR = None
+        return attn_auto_threshold()
+    try:
+        thr = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"BDH_ATTN_AUTO_COLD_THRESHOLD must be an int, got {raw!r}"
+        ) from exc
+    if thr < 0:
+        raise ValueError(
+            f"BDH_ATTN_AUTO_COLD_THRESHOLD must be >= 0, got {thr}"
+        )
+    _ATTN_AUTO_COLD_THR_ENV = env
+    _ATTN_AUTO_COLD_THR = thr
+    return _ATTN_AUTO_COLD_THR
 
 
 def resolve_decode_impl(
@@ -186,14 +232,18 @@ def resolve_cold_impl(
 ) -> ImplName:
     """Resolve cold/prefill backend, applying optional long-T AUTO switch.
 
-    Mirrors ``resolve_decode_impl`` with the same knobs (``BDH_ATTN_AUTO``,
-    ``BDH_ATTN_AUTO_THRESHOLD``, prefer Triton when available else blocked).
+    Mirrors ``resolve_decode_impl`` with ``BDH_ATTN_AUTO`` and prefer
+    Triton-when-available else blocked. Length gate uses
+    ``attn_auto_cold_threshold()`` (``BDH_ATTN_AUTO_COLD_THRESHOLD``, falling
+    back to ``BDH_ATTN_AUTO_THRESHOLD`` when unset) so operators can lower the
+    cold switch for peak-mem mid-T without moving decode (#73/#75).
+
     When AUTO is off, or ``BDH_ATTN_IMPL`` is already non-eager, this matches
     ``resolve_attn_impl``. When AUTO is on and base is eager and
-    ``seq_len > threshold``, switches so long ``generate`` prefill is not
-    stuck on full ``T×T`` eager (see ``opt/gen-long-bench`` / #72).
+    ``seq_len > cold_threshold``, switches so long ``generate`` prefill is not
+    stuck on full ``T×T`` eager (see ``opt/gen-long-bench`` / #72/#75).
 
-    Short ``T`` (≤ threshold) stays eager under AUTO — preserves prior
+    Short ``T`` (≤ cold threshold) stays eager under AUTO — preserves prior
     short-cold behavior. Explicit non-eager ``requested`` / ``IMPL`` is never
     overridden.
     """
@@ -202,7 +252,7 @@ def resolve_cold_impl(
         return name
     if not attn_auto_enabled():
         return "eager"
-    if int(seq_len) > attn_auto_threshold():
+    if int(seq_len) > attn_auto_cold_threshold():
         if triton_decode_available():
             return "triton"
         return "blocked"
@@ -233,9 +283,10 @@ def bdh_attn(
     unchanged.
 
     With ``BDH_ATTN_AUTO=1`` and base ``eager``, switches when
-    ``Q.size(2) > BDH_ATTN_AUTO_THRESHOLD`` (default 512) to ``triton`` if
-    CUDA+Triton are available, else ``blocked`` — same rule as decode AUTO.
-    Explicit non-eager ``impl`` / ``BDH_ATTN_IMPL`` is never overridden.
+    ``Q.size(2) > BDH_ATTN_AUTO_COLD_THRESHOLD`` (falls back to
+    ``BDH_ATTN_AUTO_THRESHOLD``, default 512) to ``triton`` if CUDA+Triton
+    are available, else ``blocked``. Explicit non-eager ``impl`` /
+    ``BDH_ATTN_IMPL`` is never overridden.
     """
     name = resolve_cold_impl(int(Q.size(2)), requested=impl)
     if use_autograd_fn is None:
@@ -321,6 +372,7 @@ def backend_info() -> dict:
         "BDH_ATTN_AUTOGRAD": _env_autograd_enabled(),
         "BDH_ATTN_AUTO": attn_auto_enabled(),
         "BDH_ATTN_AUTO_THRESHOLD": attn_auto_threshold(),
+        "BDH_ATTN_AUTO_COLD_THRESHOLD": attn_auto_cold_threshold(),
         "has_triton": _HAS_TRITON,
         "triton_decode_available": triton_decode_available(),
         "auto_decode_prefers": (

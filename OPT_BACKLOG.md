@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b126d77` / documented tip `43948b7` (post #64–#66 cuda-decode-v3 + docs-matrix + log-sync; #67 docs refresh; #68 profile-v6; #69 rope-decode; #70 dropout-compile; #71 docs; #72 gen-long-bench; #73 attn-mem-probe; #74 docs-matrix-v9; #75 prefill-blocked), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b126d77` / documented tip `acd26d7` (post #64–#66; #67–#75 as before; #76 docs matrix through #75; + auto-tune cold thr), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
