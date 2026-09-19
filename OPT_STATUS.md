@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#149)
+# OPT status — landed work (#1–#150)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `8f6ec4a` (`#149` AUTO threshold sweep smoke after `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #149; #148 keeps the docs aligned through #147, while #149 exercises stable threshold de-duplication, recursive-dispatch suppression, malformed-input rejection, and independent cold-gate propagation without changing eager or AUTO-off defaults. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. #148 is docs-only and #149 adds no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `748a138` (`#150` Triton cold-v4 CPU-safe skip diagnostics after `#149` AUTO threshold sweep smoke; `#149` AUTO threshold sweep smoke; `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #150; #150 reports the import/device gate without allocating CUDA tensors or launching kernels during pytest collection, with this CPU box reporting `CUDA unavailable: torch.cuda.is_available() is false`. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. #148 and #150 are docs/code-hygiene updates with no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#149)
+## Landed opts (#1–#150)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -328,6 +328,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **147** | `opt/online-decode-v3` | Deepen opt-in blocked/online T=1 shared-V decode by reusing shared cache views and vectorizing the B>1 epilogue; preserve strict raw `tril(-1)`, autograd fallback, cat-free generate, and default eager | CPU parity/coverage; no GPU timing or speedup claim | **P0** GPU/CUDA-Triton validation remains open |
 | **148** | `opt/docs-matrix-v35` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #147 | Docs only | — |
 | **149** | `opt/auto-thr-v3` | Add CPU-safe smoke coverage for the #131 `--auto-threshold-sweep` dispatcher: stable threshold de-duplication, recursive-dispatch suppression, malformed-input rejection, and independent cold-gate preservation | CPU-only smoke; eager and AUTO-off defaults unchanged; no GPU timing or performance claim | **P0** GPU measure / threshold-tile validation remains open |
+| **150** | `opt/triton-cold-v4` | Add `triton_cold_skip_reason()` for actionable CPU-safe cold Triton import/device diagnostics without CUDA allocation or launch; preserve strict raw `tril(-1)`, eager defaults, AUTO-off behavior, and CPU blocked fallback | CPU targeted: 127 passed, 6 skipped; full suite: 548 passed, 19 skipped, 3 warnings; cold skips report `CUDA unavailable: torch.cuda.is_available() is false` | **P0** GPU measure / cold CUDA-Triton validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
