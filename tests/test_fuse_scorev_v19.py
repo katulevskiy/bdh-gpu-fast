@@ -169,8 +169,9 @@ def test_dispatch_preserves_capacity_strided_v_storage_gradients(impl, v_heads):
 
 
 @pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
-def test_dispatch_preserves_capacity_strided_qk_storage_gradients(impl):
-    """Dispatch aliases accumulate Q/K gradients in backing storage."""
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_capacity_strided_qk_storage_gradients(impl, v_heads):
+    """Dispatch aliases accumulate Q/K storage gradients for shared/per-head V."""
     B, H, T, N, D = 2, 3, 67, 5, 4
     generator = torch.Generator(device="cpu").manual_seed(1925)
     Q_storage = torch.randn(
@@ -179,7 +180,7 @@ def test_dispatch_preserves_capacity_strided_qk_storage_gradients(impl):
     K_storage = torch.randn(
         B, H, T + 3, N, generator=generator, dtype=torch.float64
     )
-    V = torch.randn(B, 1, T, D, generator=generator, dtype=torch.float64)
+    V = torch.randn(B, v_heads, T, D, generator=generator, dtype=torch.float64)
     Q = Q_storage[:, :, 1 : T + 1, :]
     K = K_storage[:, :, 2 : T + 2, :]
     dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
