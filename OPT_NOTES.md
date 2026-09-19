@@ -6469,3 +6469,42 @@ No GPU is available on this box.
 - No softmax, scaling, diagonal inclusion, or change to raw score × strict
   `tril(diagonal=-1)` semantics.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+
+## opt/auto-thr-v3 — CPU-safe AUTO threshold sweep smoke (2026-09-19)
+
+**Branch:** `opt/auto-thr-v3` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `c557b55` (main after #148 docs refresh; code tip #146).
+
+### Audit / deepen
+
+The #131 `bench_generate.py --auto-threshold-sweep` harness now has focused
+CPU-safe smoke coverage. The test drives the sweep dispatcher without a model
+run, confirming that threshold order is stable, duplicate decode thresholds are
+deduplicated, recursive sweep dispatch is disabled for each child run, and an
+explicit independent cold threshold is preserved across every decode threshold.
+Malformed, empty, and negative sweep items are also rejected. This hardens the
+reporting/control surface for independent strict gates without changing the
+AUTO resolver or any defaults.
+
+Attention remains raw scores × strict `tril(diagonal=-1)`; eager remains the
+default and `BDH_ATTN_AUTO` remains off. This CPU-only test adds no GPU timing,
+CUDA/Triton execution, kernel correctness, or speedup claim.
+
+### CPU validation
+
+```text
+python -m pytest tests/test_auto_threshold_sweep.py tests/test_attn_auto.py -q
+# 28 passed in 2.81s
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q
+# 552 passed, 19 skipped, 3 warnings in 67.18s
+```
+
+### Non-goals
+
+- No default eager/AUTO behavior change.
+- No softmax, scaling, diagonal inclusion, or change to raw score × strict
+  `tril(diagonal=-1)` semantics.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.
