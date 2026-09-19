@@ -106,3 +106,24 @@ def test_blank_cold_threshold_accepts_later_explicit_override(monkeypatch):
     assert attn_auto_cold_threshold() == 2
     assert resolve_cold_impl(2) == "eager"
     assert resolve_cold_impl(3) != "eager"
+
+
+def test_explicit_cold_threshold_does_not_shadow_decode_threshold(monkeypatch):
+    """An explicit cold override stays scoped while decode follows the shared knob."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "2")
+
+    assert attn_auto_cold_threshold() == 2
+    assert resolve_cold_impl(2) == "eager"
+    assert resolve_cold_impl(3) != "eager"
+    assert resolve_decode_impl(4) == "eager"
+    assert resolve_decode_impl(5) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "8")
+    assert attn_auto_cold_threshold() == 2
+    assert resolve_cold_impl(2) == "eager"
+    assert resolve_cold_impl(3) != "eager"
+    assert resolve_decode_impl(8) == "eager"
+    assert resolve_decode_impl(9) != "eager"
