@@ -224,3 +224,21 @@ def test_decode_empty_past_returns_typed_zeros_for_all_backends():
         assert got.shape == expected.shape
         assert got.dtype == expected.dtype
         assert torch.equal(got, expected), f"impl={impl} returned {got}"
+
+
+def test_online_decode_tiled_nonempty_preserves_query_dtype():
+    """A tiled nonempty CPU decode keeps score×V output in the query dtype."""
+    B, H, S, Tq, N, D = 2, 3, 1025, 2, 4, 3
+    g = torch.Generator().manual_seed(1516)
+    Q = torch.randn(B, H, Tq, N, dtype=torch.float64, generator=g)
+    K = torch.randn(B, H, S, N, dtype=torch.float64, generator=g)
+    V = torch.randn(B, 1, S, D, dtype=torch.float64, generator=g)
+
+    ref = eager_decode_attn(Q, K, V)
+    got = online_decode_attn(Q, K, V, block_size=64)
+
+    assert got.shape == (B, H, Tq, D)
+    assert got.dtype == Q.dtype
+    assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10), (
+        f"maxdiff={(got - ref).abs().max().item()}"
+    )
