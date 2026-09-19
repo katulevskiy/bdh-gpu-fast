@@ -466,6 +466,65 @@ def test_no_cuda_decode_skip_preserves_requested_mode(tmp_path):
     assert "median ms" not in result.stdout
 
 
+def test_no_cuda_decode_skip_stdout_matches_json_without_timings(tmp_path):
+    """Decode skips keep the structured stdout handoff diagnostics-only."""
+    summary_path = tmp_path / "decode-summary.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--mode",
+            "decode",
+            "--B",
+            "3",
+            "--H",
+            "5",
+            "--T",
+            "17",
+            "--N",
+            "7",
+            "--D",
+            "11",
+            "--dtype",
+            "bfloat16",
+            "--warmup",
+            "4",
+            "--iters",
+            "9",
+            "--json-out",
+            str(summary_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(summary_path.read_text())
+    summary_lines = [
+        line.removeprefix("GPU_ATTN_SUMMARY ")
+        for line in result.stdout.splitlines()
+        if line.startswith("GPU_ATTN_SUMMARY ")
+    ]
+
+    assert len(summary_lines) == 1
+    assert json.loads(summary_lines[0]) == summary
+    assert summary["request"] == {
+        "B": 3,
+        "H": 5,
+        "T": 17,
+        "N": 7,
+        "D": 11,
+        "dtype": "bfloat16",
+        "warmup": 4,
+        "iters": 9,
+    }
+    assert summary["timing_scope"] == "none"
+    assert "results" not in summary
+    assert "median ms" not in result.stdout
+
+
 def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
     """Cold CUDA skips expose diagnostics without implying a CPU measurement."""
     summary_path = tmp_path / "gpu-summary.json"
