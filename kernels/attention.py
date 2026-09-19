@@ -44,12 +44,12 @@ DEFAULT_BLOCK_DECODE = 256
 # Soft cap on score elements (Tq * tile) before preferring another tile split.
 # Cold blocked past-region keeps this large budget (BLAS-friendly oneshot).
 _SCORE_ELEMS_BUDGET = 256 * 256
-# Decode-online-v2: tighter oneshot for T=1 vs packed KR/V. Above this many
+# Decode-online-v3: tighter oneshot for T=1 vs packed KR/V. Above this many
 # score elements (Tq*S), blocked/online decode *tiles* so peak score mem is
 # ~Tq×tile (not Tq×S). Also avoids a CPU broadcast-V oneshot cliff at long S
 # (measured ~8–10× vs tiled at S=4096, B=4 H=4). Per-head V still oneshots
 # under the large cold budget (BH-bmm likes big GEMMs).
-_DECODE_ONESHOT_ELEMS = 2048
+_DECODE_ONESHOT_ELEMS = 1024
 
 
 def _expand_v_heads(V: torch.Tensor, B: int, H: int, S: int, D: int) -> torch.Tensor:
@@ -216,13 +216,15 @@ def _tiled_score_v(
     # Tq=1: flatten Q once; reuse across past tiles (decode-online-v2).
     if Tq == 1 and Vh.size(1) == H:
         Qf = Q.reshape(B * H, 1, _N)
+        outf = out.reshape(B * H, 1, D)
         for j0 in range(0, S, BS):
             j1 = min(j0 + BS, S)
             tile = j1 - j0
             Kj = K[:, :, j0:j1, :].reshape(B * H, tile, _N)
             Vj = Vh[:, :, j0:j1, :].reshape(B * H, tile, D)
             scores = torch.bmm(Qf, Kj.transpose(1, 2))
-            out.add_(torch.bmm(scores, Vj).view(B, H, 1, D))
+            _score_v_into(outf, scores, Vj, beta=1)
+            del scores
         return out
 
     for j0 in range(0, S, BS):
@@ -237,6 +239,33 @@ def _tiled_score_v(
 # Peak score elements for a single tile before the ×V epilogue discards it.
 # Used by tests / OPT_NOTES — blocked never allocates a full T×T score tensor.
 _STREAM_SCORE_ELEMS = 4096  # if Bi*Bj exceeds this, stream query rows (bound peak)
+
+
+def _score_v_into(
+    target: torch.Tensor,
+    scores: torch.Tensor,
+    Vj: torch.Tensor,
+    *,
+    beta: float,
+) -> None:
+    """Accumulate ``scores @ Vj`` into a 3-D bmm target.
+
+    In the inference/no-grad path, ``baddbmm(..., out=target)`` makes the
+    score×V epilogue write directly into the output tile instead of allocating
+    a second bmm result for ``add_``/``copy_``. Autograd cannot use ``out=``
+    arguments, so the differentiable fallback keeps the graph-safe add/copy
+    behavior. ``target`` is a flattened ``(BH, Bi, D)`` view on the CPU
+    blocked path and the T=1 decode path.
+    """
+    use_out = not torch.is_grad_enabled() or not any(
+        t.requires_grad for t in (target, scores, Vj)
+    )
+    if use_out:
+        torch.baddbmm(target, scores, Vj, beta=beta, out=target)
+    elif beta == 0:
+        target.copy_(torch.bmm(scores, Vj))
+    else:
+        target.add_(torch.bmm(scores, Vj))
 
 
 def _blocked_cpu_bmm(
@@ -274,7 +303,8 @@ def _blocked_cpu_bmm(
         if i0 > 0:
             if Bi * i0 <= score_budget:
                 scores = torch.bmm(Qi, Kb[:, :i0, :].transpose(1, 2))
-                target.copy_(torch.bmm(scores, Vb[:, :i0, :]))
+                _score_v_into(target, scores, Vb[:, :i0, :], beta=0)
+                del scores
             else:
                 tile = max(BS, score_budget // max(Bi, 1))
                 for j0 in range(0, i0, tile):
@@ -282,13 +312,15 @@ def _blocked_cpu_bmm(
                     scores = torch.bmm(
                         Qi, Kb[:, j0:j1, :].transpose(1, 2)
                     )
-                    target.add_(torch.bmm(scores, Vb[:, j0:j1, :]))
+                    _score_v_into(target, scores, Vb[:, j0:j1, :], beta=1)
+                    del scores
 
         if Bi > 1:
             scores = torch.bmm(Qi, Kb[:, i0:i1, :].transpose(1, 2))
             # Fuse the mask in-place: scores is consumed immediately by ×V.
             scores.tril_(diagonal=-1)
-            target.add_(torch.bmm(scores, Vb[:, i0:i1, :]))
+            _score_v_into(target, scores, Vb[:, i0:i1, :], beta=1)
+            del scores
 
     return out.view(B, H, T, D)
 
