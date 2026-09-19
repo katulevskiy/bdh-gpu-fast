@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile-v11 source tip `4963b0f` / current docs tip `f24a5d8`; #113 docs-matrix-v25; #114 cuda-cold-v3; profile-v10 source tip `1363794`; docs #106/#107 on #104/#105; rebased documented code tip `234de2a`; profile-v9 source tip `8e7a4d2`; post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #96 attn-bwd scaffold; #97 docs-v18; #98 profile-v9; #99 docs-v19; #100 scorev-fuse-v2; #101 docs-v20; #102 gen-copy-tax-v1; #103 docs-v21; #104 profile-v10; #105 ln-resid-v2; #106 docs through #104; #107 docs through #105; #108 triton-cold-v3; #109 docs-v23; #110 gen-vcopy-v1; #111 docs-v24; #112 profile-v11; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile-v11 source tip `4963b0f` / current docs tip `bcf2458`; #115 docs-matrix-v26; #116 online-decode-t1-v2; #117 compile-train-v2; #114 cuda-cold-v3; #113 docs-matrix-v25; profile-v10 source tip `1363794`; docs #106/#107 on #104/#105; rebased documented code tip `234de2a`; profile-v9 source tip `8e7a4d2`; post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #96 attn-bwd scaffold; #97 docs-v18; #98 profile-v9; #99 docs-v19; #100 scorev-fuse-v2; #101 docs-v20; #102 gen-copy-tax-v1; #103 docs-v21; #104 profile-v10; #105 ln-resid-v2; #106 docs through #104; #107 docs through #105; #108 triton-cold-v3; #109 docs-v23; #110 gen-vcopy-v1; #111 docs-v24; #112 profile-v11; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -31,6 +31,12 @@ Post-#111 docs refresh (`opt/docs-matrix-v24`, source `acf6e09`): align `OPT_STA
 Post-#113 docs refresh (`opt/docs-matrix-v25`): align `OPT_STATUS.md` / `OPT_BACKLOG.md` through #112 and carry the profile-v11 evidence forward. Docs-only; no code or GPU evidence.
 
 Post-#114 CUDA cold v3 (`opt/cuda-cold-v3`): align wide-head CUDA cold tile bounds with Triton #108, retain CPU reference parity, clean CUDA skips, and add a C++20 build smoke. No GPU timing or speedup evidence was added; **GPU measurement and cold CUDA validation remain P0 blockers.** Defaults remain eager and AUTO-off.
+
+Post-#115 docs refresh (`opt/docs-matrix-v26`): refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #114. Docs-only; no code or GPU evidence.
+
+Post-#116 online decode T=1 (`opt/online-decode-t1-v2`): flatten broadcast-V score tiles over `B*H` and write inference/no-grad score×V directly into the output with `baddbmm(..., out=target)` for oneshot and long-S paths; retain the graph-safe autograd fallback, strict lower-triangular semantics, `S=0` zeros, cat-free generate, and default eager. CPU tests reported 507 passed, 18 skipped, 3 warnings; no GPU timing or speedup claim.
+
+Post-#117 compile train v2 (`opt/compile-train-v2`): make `BDH_COMPILE_PROBE=train_bwd` the opt-in default, probe forward plus backward, soft-fallback to eager when backward targets are missing, and document the compiled forward/backward versus eager optimizer boundary. CPU A/B smoke reported 19.08 ms uncompiled vs 31.23 ms with the stronger probe; 506 tests passed and 18 skipped. No GPU/CUDA-graph or speedup claim; `COMPILE=0` remains the repository default.
 
 Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU, #93 is an opt-in cold path at T≥256, and #95 adds only CPU copy-call evidence (forward `copy_` 24→18; QR contig copies 8→0). No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
 
@@ -82,6 +88,9 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
 - Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold` + `opt/cuda-cold-v2` + #114 `opt/cuda-cold-v3` adaptive/bounded long-T) — GPU measure and cold CUDA validation still P0
 - Docs matrix v25 (#113) — docs-only refresh through #112; current docs align to #114 tip
+- Docs matrix v26 (#115) — docs-only refresh through #114
+- Online decode T=1 (#116) — opt-in blocked/online shared-V direct inference epilogue; CPU parity only
+- Compile train v2 (#117) — backward-aware `train_bwd` probe default and eager optimizer boundary; CPU-only evidence
 - `torch.compile` harden: train probe, graph-break docs, CPU inductor parity (`opt/compile-harden` #22)
 - Compile-friendly LN+residual: `F.layer_norm` only, no `is_grad_enabled` product branch (`opt/ln-compile` #30); deepen: inner-LN buffer `add_` reuse (`opt/ln-deepen`)
 - CPU train-step `BDH_COMPILE=0` vs `1` microbench via `maybe_compile` (soft-skip if inductor missing) (`opt/compile-bench`)
@@ -126,9 +135,9 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
-| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v9, #100, #102, #104, #105, and #110 are CPU evidence only): attention `bmm` 30.50% / `mul` 30.78% / `copy_` 19.45%; forward `bmm` 34.12% / `mm` 24.93% / `mul` 17.69% / `copy_` 9.09%. #96–#114 add no GPU timing or speedup claim; #95 isolated forward `copy_`=24→18, while profile-v9 warmed harness is 16/call and generate is 558/call before #102. #100 lowers blocked/online inference epilogue buffering and tightens T=1 decode tiling; #102/#104 cut and re-measure generate `copy_` ~558→~398 with `cat` at 0; #105 confirms the residual-LN path without GPU evidence; #108 keeps wide-head cold Triton tiles bounded and removes shared-V CPU staging without GPU evidence; #110 cuts generate `copy_` ~398→~394 but leaves V-slot (~132/gen) and multinomial (~128/gen) copies at the probe ceiling; #114 adds only bounded CUDA cold-tile/build-smoke coverage, not GPU timing. GPU validation remains open. #93, #108, #110, and #112 remain CPU-only evidence; #111 is docs-only. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
+| **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v9, #100, #102, #104, #105, and #110 are CPU evidence only): attention `bmm` 30.50% / `mul` 30.78% / `copy_` 19.45%; forward `bmm` 34.12% / `mm` 24.93% / `mul` 17.69% / `copy_` 9.09%. #96–#117 add no GPU timing or speedup claim; #95 isolated forward `copy_`=24→18, while profile-v9 warmed harness is 16/call and generate is 558/call before #102. #100 lowers blocked/online inference epilogue buffering and tightens T=1 decode tiling; #102/#104 cut and re-measure generate `copy_` ~558→~398 with `cat` at 0; #105 confirms the residual-LN path without GPU evidence; #108 keeps wide-head cold Triton tiles bounded and removes shared-V CPU staging without GPU evidence; #110 cuts generate `copy_` ~398→~394 but leaves V-slot (~132/gen) and multinomial (~128/gen) copies at the probe ceiling; #114 adds only bounded CUDA cold-tile/build-smoke coverage; #116 adds only CPU shared-V T=1 epilogue/parity coverage; #117 adds only CPU compile-probe coverage. GPU validation remains open. #93, #108, #110, #112, and #116 remain CPU-only evidence; #111, #113, and #115 are docs-only. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker
 | **P0** | **Cold CUDA/Triton tile/staging validation** | **Landed `opt/triton-cold` + `opt/triton-cold-v2` + #93 CPU tile flattening + #108 `opt/triton-cold-v3` + #114 `opt/cuda-cold-v3`:** adaptive power-of-2 tiles (grow @T≥256 pair #75/#79), wide-head 64×64 bounds, fused strict-tril score×V, shared-V view fallback without `(B*H,T,D)` staging, CPU→blocked adaptive, and #114-aligned CUDA cold bounds; #93 CPU blocked bench is 1.25× @256 / 4.00× @512 / 5.87× @1024, but GPU measurement and cold CUDA/Triton validation remain open. | A100/H100 microbench; bit-identical | Env blocker |
-| **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn); optional `FULLGRAPH=1` (#84). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` + `FULLGRAPH` via `benchmarks/bench_train_step.py` | Low |
+| **P1** | **`torch.compile` GPU train-step next** | **Landed #117**: `BDH_COMPILE_PROBE=train_bwd` now probes the compiled forward/backward region; optimizer step and grad clearing remain eager. CPU smoke is honest but slower with the stronger probe (19.08 ms `COMPILE=0` vs 31.23 ms `COMPILE=1` on the cited tiny config). CPU guidance remains `COMPILE=1` **only with eager** + `MODE=default`; blocked/`reduce-overhead` warn. **GPU inductor / CUDA graphs still unmeasured.** | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` + `FULLGRAPH` via `benchmarks/bench_train_step.py` | Low
 | **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** + **`opt/prefill-blocked`** + **`opt/auto-tune`**: AUTO long-T cold+decode (adaptive blocked cold @T≥256), with optional independent cold threshold. CPU e2e AUTO **1.26×@1024 / 1.39×@2048**; IMPL=blocked ~1.23–1.43×; short A/B ~1.25× @1024. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 | **P1** | **CUDA prefetch H2D overlap** | **Landed #92** `BDH_PREFETCH_H2D=1`: one pinned batch staged on a side stream with event handoff; CPU is a no-op and the CPU bench has no throughput evidence. | CUDA host: measure H2D overlap, lifetime safety, and end-to-end train throughput; keep `BDH_PREFETCH_H2D=1` opt-in to measurement only | Env blocker |
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Landed #90** `opt/rope-fuse-v2` deepens `opt/rope-fuse`: no expand/stack, table-pair T=1, blocked Triton fallback; default remains eager. GPU validation is still open. | GPU Triton microbench still open | Low–medium |
@@ -176,6 +185,9 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Re-profile post-#110 | **Landed** #112 `opt/profile-v11` — source `4963b0f`, warmed forward `copy_`=12/call, isolated forward `copy_`=14, generate `copy_`=394/call (1,182/3; isolated 396), `cat`/`contiguous`=0; no GPU measurement
 | Docs matrix v25 | **Landed** #113 `opt/docs-matrix-v25` — refresh through #112; docs only
 | CUDA cold v3 | **Landed** #114 `opt/cuda-cold-v3` — #108-aligned wide-head CUDA/CPU tile bounds, CPU parity, clean CUDA skip, and C++20 build smoke; no GPU measurement
+| Docs matrix v26 | **Landed** #115 `opt/docs-matrix-v26` — refresh through #114; docs only
+| Online decode T=1 | **Landed** #116 `opt/online-decode-t1-v2` — direct inference/no-grad shared-V score×V epilogue for blocked/online oneshot and long-S decode, graph-safe autograd fallback, parity and cat-free generate; no GPU measurement
+| Compile train v2 | **Landed** #117 `opt/compile-train-v2` — backward-aware `train_bwd` compile probe default, missing-target eager fallback, explicit optimizer boundary, and CPU-only bench matrix; no GPU measurement
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
@@ -252,7 +264,7 @@ and `max|Δ|` vs eager. **Do not** claim wins from CPU medians; keep default
 ## GPU next step — `BDH_COMPILE` train-step (after CPU harness)
 
 CPU sandbox now has an **honest** A/B in `benchmarks/bench_train_step.py`
-(`BDH_COMPILE=0` vs `1`, plus `MODE=default` vs `reduce-overhead` via
+(`BDH_COMPILE=0` vs `1`, with the stronger `BDH_COMPILE_PROBE=train_bwd` default, plus `MODE=default` vs `reduce-overhead` via
 `train.maybe_compile`; soft-skip if inductor/CXX missing). On CPU,
 `reduce-overhead` is **not useful** (no CUDA graphs) — measured for honesty
 only (#63). **Do not** treat CPU medians as GPU / CUDA-graph wins.
@@ -295,7 +307,7 @@ python benchmarks/bench_generate.py --device cuda --warmup 5 --iters 20
 python benchmarks/bench_generate.py --mode auto-ab --device cuda
 ```
 
-**CPU honesty (this box / profile source `f10bdd4`; documented code tip `24f44a6`):**
+**CPU honesty (this box / profile source `f10bdd4`; documented code tip `bcf2458`):**
 - `--mode impls` short prompt: medians ~noise vs eager; match; `aten::cat=0`
 - `--mode auto-ab`: AUTO fires @ S>512; tokens match; cats=0; **e2e AUTO**
   **1.26× @1024 / 1.39× @2048** after `opt/prefill-blocked` (cold+decode);
