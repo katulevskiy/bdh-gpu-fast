@@ -6102,13 +6102,16 @@ behavior remain unchanged.
 ```text
 /workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
   tests/test_inc_decode.py tests/test_gen_sample.py tests/test_fuse_scorev.py -q
+# 111 passed, 3 skipped in 20.40s
+
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest -q
+# 533 passed, 19 skipped, 3 warnings in 121.09s
 ```
 
 Coverage includes eager-vs-blocked/online/triton/cuda-ref decode parity, exact
 position-zero zeros, the B=1 direct out-buffer epilogue, and generate token
-parity with `torch.cat` count zero. Full pytest is also required before opening
-the private PR. This CPU box has no GPU; no timing, kernel-on-hardware,
-correctness-on-GPU, or speedup claim is made.
+parity with `torch.cat` count zero. This CPU box has no GPU; no timing,
+kernel-on-hardware, correctness-on-GPU, or speedup claim is made.
 
 ### Non-goals
 
