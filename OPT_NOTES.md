@@ -5000,3 +5000,59 @@ python -m pytest tests/test_attn_bwd.py tests/test_attn_bwd_bench.py -q
 
 No GPU timing or speedup is claimed from this CPU-only box. Defaults remain
 `BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTOGRAD=0`, and no attention math changes.
+
+## opt/profile-v9 — re-profile copy-tax-v1 tip (2026-09-19)
+
+**Branch:** `opt/profile-v9` (private `katulevskiy/bdh-gpu-opt` only).
+**Profile source:** `8e7a4d2` (`#95` copy-tax-v1); the branch is rebased onto
+`06e25d2` (`#97` docs-v18, including #96's CUDA scaffold) before publication.
+The profile window itself was captured at the requested #95 tip, before that
+rebase; #96/#97 do not change the default short eval/generate path.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python \
+  benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The harness uses two warmups, one wait, and three active steps. Absolute CPU
+milliseconds are profiler-inflated; the table reports self-CPU percentages and
+aggregate calls over the three active steps. Chrome traces remain under
+`benchmarks/traces/` (gitignored).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators (calls) | Notes |
+|------|--------------------------------|-------|
+| Attention | `aten::mul` **30.78% (12)**, `aten::bmm` **30.50% (6)**, `aten::copy_` **19.45% (9)**, `aten::sub` **8.56% (3)**, `aten::add` **3.16% (3)**, `aten::tril_` **0.32% (3)** | Default eager still computes raw scores then applies strict `tril_(diagonal=-1)`; no softmax, scale, or SDPA. |
+| Forward | `aten::bmm` **34.12% (36)**, `aten::mm` **24.93% (27)**, `aten::mul` **17.69% (60)**, `aten::copy_` **9.09% (48)**, `aten::clamp_min_` **3.24% (24)**, `aten::sub` **2.56% (12)** | `aten::cat=0`, `aten::contiguous=0`; warmed harness active window is **48 copy_ / 3 = 16 per active call**. |
+| Generate | `aten::mm` **22.16% (795)**, `aten::bmm` **14.72% (1,188)**, `aten::mul` **3.00% (1,980)**, `aten::matmul` **2.45% (1,587)**, `aten::native_layer_norm` **2.36% (1,287)**, `aten::einsum` **2.02% (396)**, `aten::copy_` **1.14% (1,674)** | `aten::cat=0`, `aten::contiguous=0`; copy_ is **558 per active generate call**, and the preallocated cache path remains cat-free. |
+
+A separate one-forward CPU profiler check at the same cfg reports
+`aten::copy_=18`, `aten::cat=0`, and `aten::contiguous=0`, reproducing the
+#95 single-run claim of **24 → 18**. The default harness's warmed active
+window reports 16 per call because its counts are taken after the two warmups
+and one wait; both are CPU operator counts, not GPU performance evidence.
+
+### Smoke and verdict
+
+```text
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m pytest \
+  tests/test_copy_tax.py -q
+# 8 passed
+```
+
+Defaults are unchanged (`BDH_ATTN_IMPL=eager`, `BDH_ROPE_IMPL=eager`), and
+attention remains raw scores × strict lower-triangular `tril(-1)`. This box has
+no GPU, so no GPU timing, kernel win, or speedup is claimed. The main remaining
+question is real-GPU validation of fused score×V / RoPE / layout effects.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; private repo only; no public PR
+- No default attention/RoPE implementation change
+- No softmax / scale / SDPA / diagonal inclusion
+- No GPU claims from CPU profiler percentages or copy_ counts

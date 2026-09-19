@@ -7,9 +7,11 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile source tip `f10bdd4` / documented code tip `8e7a4d2` (post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile-v9 source tip `8e7a4d2` / rebased documented code tip `06e25d2` (post #85 cache-page-bench, #86 docs, #87 zerograd; #88 docs-v15; #89 profile-v8; #90 rope-fuse-v2; #91 docs-v16; #92 prefetch-h2d; #93 blocked-tile-v2; #94 docs-v17; #95 copy-tax-v1; #96 attn-bwd scaffold; #97 docs-v18; #84 compile-fullgraph and earlier profile-v7 follow-ups), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
+
+Post-#95 re-profile (`opt/profile-v9`, source `8e7a4d2`, rebased onto `06e25d2`): forward warmed harness `aten::copy_` is 48 over three active calls (16/call), while an isolated one-forward check reproduces #95's **18**; forward and generate remain `aten::cat=0` and `aten::contiguous=0`. Generate `aten::copy_` is 1,674 over three active calls. CPU-only evidence; **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v9.
 
 Post-#85–#87 re-profile (`opt/profile-v8`, #89): attention `bmm` 23.43% / `mul` 21.92% / `copy_` 20.66%; forward `copy_` 23.63% / `mm` 22.79% / `bmm` 22.45% / `mul` 12.39%; generate `mm` 15.28% / `bmm` 15.27%. Generate remains **0× `aten::cat`**; forward and generate remain **0× `aten::contiguous`**; default eager still full T×T `bmm`+`tril`. #85–#90 do not alter this short default eval/generate window; #92 CUDA staging is not exercised on CPU, #93 is an opt-in cold path at T≥256, and #95 adds only CPU copy-call evidence (forward `copy_` 24→18; QR contig copies 8→0). No GPU timing or speedup claim was added. **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v8.
 
