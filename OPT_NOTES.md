@@ -5348,7 +5348,7 @@ off.
 ## opt/triton-cold-v4 — actionable CPU-safe Triton skip diagnostics (2026-09-19)
 
 **Branch:** `opt/triton-cold-v4` (private `katulevskiy/bdh-gpu-opt` only).
-**Base tip:** `4e01e38` (`main`, after #146 cuda-cold-v4).
+**Base tip:** `c557b55` (`main`, after #148 docs through #147).
 
 ### Audit / deepen
 
