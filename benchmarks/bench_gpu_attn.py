@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 8
+SUMMARY_SCHEMA_VERSION = 9
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -164,6 +164,7 @@ def _skip_summary(
                 "reason": "cuda_unavailable",
                 "detail": "torch.cuda.is_available() is false",
                 "timing_scope": "none",
+                "cuda_available": False,
                 "cuda_runtime_state": cuda_runtime["cuda_runtime_state"],
                 "cuda_built": cuda_runtime["cuda_built"],
                 "cuda_device_count": cuda_runtime["cuda_device_count"],
