@@ -92,6 +92,25 @@ def test_run_auto_ab_sweep_preserves_explicit_cold_threshold(monkeypatch):
     ]
 
 
+def test_run_auto_ab_sweep_rejects_invalid_values_before_model_setup(
+    monkeypatch, capsys
+):
+    """Malformed threshold sweeps fail closed before any AUTO run starts."""
+    monkeypatch.setattr(
+        bench_generate,
+        "run_auto_ab",
+        lambda args, device: pytest.fail("invalid sweep must not start an AUTO run"),
+    )
+    args = argparse.Namespace(
+        auto_threshold=512,
+        auto_cold_threshold=None,
+        auto_threshold_sweep="256,,512",
+    )
+
+    assert bench_generate.run_auto_ab_sweep(args, None) == 2
+    assert "empty item" in capsys.readouterr().out
+
+
 def test_run_impls_rejects_invalid_selection_before_model_setup(
     monkeypatch, capsys
 ):
