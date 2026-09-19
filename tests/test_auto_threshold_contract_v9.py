@@ -1,0 +1,37 @@
+"""CPU-safe coverage for blank AUTO cold-threshold overrides."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from kernels.attention_dispatch import (  # noqa: E402
+    attn_auto_cold_threshold,
+    attn_auto_threshold,
+    resolve_cold_impl,
+)
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_blank_cold_threshold_tracks_decode_threshold(monkeypatch, raw):
+    """Blank cold overrides mirror the live decode threshold at both gates."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raw)
+
+    assert attn_auto_threshold() == 4
+    assert attn_auto_cold_threshold() == 4
+    assert resolve_cold_impl(4) == "eager"
+    assert resolve_cold_impl(5) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "8")
+    assert attn_auto_threshold() == 8
+    assert attn_auto_cold_threshold() == 8
+    assert resolve_cold_impl(8) == "eager"
+    assert resolve_cold_impl(9) != "eager"
