@@ -6977,3 +6977,16 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
 - No softmax, scaling, diagonal inclusion, or change to raw score × strict
   `tril(diagonal=-1)` semantics.
 - No GPU claim, timing, or public PR.
+## opt/blocked-tile-v4 — deepen CPU wide-head cold parity (2026-09-19)
+
+**Branch:** `opt/blocked-tile-v4` on the private repository. **Base tip:**
+`bc3967b` (#174).
+
+The blocked cold-path parity matrix now includes a wider, batched shape at the
+128-row tile boundary: `B=2, H=3, T=257, N=160, D=192`. Both shared-V
+(`value_heads=1`) and head-matched-V (`value_heads=3`) layouts are compared
+with the eager raw-score reference, including the partial final tile and exact
+zero output at position 0.
+
+Validation is CPU-only. Defaults remain eager, attention remains raw
+`(Q @ K.T).tril(diagonal=-1) @ V`, and no GPU timing or win claim is made.

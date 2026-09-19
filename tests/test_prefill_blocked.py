@@ -85,6 +85,21 @@ def test_cpu_flattened_bmm_wide_head_parity(value_heads):
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
+@pytest.mark.parametrize("value_heads", [1, 3])
+def test_cpu_wide_head_partial_tile_parity(value_heads):
+    """Wide heads keep CPU cold parity across a partial 128-row tile."""
+    T, B, H, N, D = 257, 2, 3, 160, 192
+    g = torch.Generator().manual_seed(41 + value_heads)
+    Q = torch.randn(B, H, T, N, generator=g)
+    K = torch.randn(B, H, T, N, generator=g)
+    V = torch.randn(B, value_heads, T, D, generator=g)
+
+    ref = eager_tril_attn(Q, K, V)
+    got = blocked_tril_attn(Q, K, V, block_size=128)
+    assert torch.allclose(got, ref, rtol=1e-3, atol=1e-3)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 def test_pick_cold_block_size_adaptive():
     assert pick_cold_block_size(64) == DEFAULT_BLOCK_COLD
     assert pick_cold_block_size(255) == DEFAULT_BLOCK_COLD
