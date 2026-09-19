@@ -5944,3 +5944,57 @@ this CPU-only box; no GPU timing, kernel-correctness, or speedup claim is made.
 - No softmax, scaling, diagonal inclusion, or full score materialization.
 - No public PR and no PRs to `pathwaycom/*`; private repo only.
 - No GPU claims from CPU tests.
+
+
+## opt/profile-v13 — CPU re-profile after #128 (2026-09-19)
+
+**Branch:** `opt/profile-v13` (private `katulevskiy/bdh-gpu-opt` only; no public
+PR).
+**Profile source:** `45b4afe` (`#128`, packed Triton decode KR/V strides), after
+`#127` profile CI scaffolding and `#126` docs update. The profile does not make
+GPU claims and does not alter attention semantics.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /workspace/bdh-gpu-opt/.venv/bin/python \
+  benchmarks/profile_forward.py --device cpu --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The harness uses two warmups, one wait, and three active steps. Percentages are
+self-CPU percentages from the three active steps; operator counts below are the
+aggregate counts followed by the per-active-call count. `cat` and `contiguous`
+were absent from all three CPU traces (zero calls).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators | copy_ / cat / contiguous |
+|------|-------------------------|---------------------------|
+| Attention | `aten::bmm` **26.82%**, `aten::mul` **25.20%**, `aten::complex` **15.25%**, `aten::copy_` **11.32%**, `aten::add` **6.48%**, `aten::sub` **6.40%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
+| Forward | `aten::bmm` **28.14%**, `aten::mm` **22.93%**, `aten::mul` **16.48%**, `aten::complex` **11.82%**, `aten::copy_` **7.20%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
+| Generate | `aten::mm` **21.81%**, `aten::bmm` **14.39%**, `aten::mul` **3.06%**, `aten::matmul` **2.41%**, `aten::native_layer_norm` **2.28%**, `aten::einsum` **2.00%**, `aten::copy_` **0.83%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
+
+Attention remains raw scores × strict `tril(diagonal=-1)`: no softmax, scale,
+or SDPA. CPU profiler percentages and copy counts are not GPU performance
+measurements.
+
+### Smoke and verdict
+
+```text
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_cache_pack.py tests/test_inc_decode.py tests/test_attention_mask.py \
+  tests/test_gen_copy_tax.py tests/test_gen_sample.py tests/test_cuda_decode.py -q
+# 130 passed, 7 skipped in 7.55s
+```
+
+The post-#128 CPU profile preserves the prior cat-free/contiguous-free forward
+and generate paths. No GPU timing, kernel win, correctness, or speedup claim is
+made on this CPU-only box.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; private repo only; no public PR.
+- No softmax, scale, diagonal inclusion, or SDPA substitution.
+- No GPU claims from CPU profiler percentages or copy counts.
