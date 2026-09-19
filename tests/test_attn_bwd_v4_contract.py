@@ -201,6 +201,38 @@ def test_self_attn_aliases_preserve_raw_strict_tril_backward(impl):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_noncontiguous_self_attn_alias_preserves_backward_contract(impl):
+    """Aliased noncontiguous Q/K views preserve duplicate-path gradients."""
+    generator = torch.Generator().manual_seed(2044)
+    Q_storage = torch.randn(
+        2, 3, 5, 8, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    Q = Q_storage[..., ::2]
+    V = torch.randn(
+        2, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO = torch.randn(2, 3, 5, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, Q, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, Q_ref, V_ref)
+
+    assert not Q.is_contiguous()
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+
+    assert torch.allclose(
+        Q_storage.grad[..., ::2], Q_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.equal(
+        Q_storage.grad[..., 1::2], torch.zeros_like(Q_storage.grad[..., 1::2])
+    )
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 def test_self_attn_single_query_accumulates_only_valid_qk_paths(impl):
     """A selected output row exposes duplicate-Q strict-tril gradient routing."""
     Q = torch.tensor(
