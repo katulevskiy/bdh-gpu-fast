@@ -1,3 +1,4 @@
+
 # Private BDH-GPU optimization sandbox
 
 Forked from pathwaycom/bdh for local kernel/perf work.
@@ -6802,7 +6803,6 @@ and profiler dependent; these are not GPU performance measurements.
 - P0 remains real GPU measurement, including cold CUDA/Triton validation.
 - No PRs to `pathwaycom/*`; private repository only.
 
-
 ## opt/decode-gemm-v3 — preserve packed T=1 decode views (2026-09-19)
 
 **Base tip:** `7a9b14f` (main after #162).
@@ -6818,3 +6818,29 @@ just above the decode oneshot score budget.
 Attention remains raw score × `tril(diagonal=-1)` × V with no softmax or scale;
 eager remains the default. Validation is CPU-only and reports no GPU timing or
 GPU win. P0 remains real CUDA/Triton measurement.
+## opt/scorev-fuse-v4 — B>1 shared-V decode epilogue (2026-09-19)
+
+**Branch:** `opt/scorev-fuse-v4` on the private repository. This is a small
+follow-up to the shared-V decode work and keeps eager defaults unchanged.
+
+### Change
+
+The CPU-safe blocked decode helper now handles accumulated B>1 shared-V tiles
+by reshaping the score/output rows to `(B, H*Bi, *)` and using `baddbmm(...,
+out=...)`. The `(B,1,S,D)` cache view stays unexpanded, and beta=1 tiles no
+longer allocate a separate score×V product before accumulation. The beta=0
+oneshot case keeps the existing broadcast `matmul(..., out=...)` path.
+
+The grad-enabled path still avoids `out=` operators and uses the existing
+matmul-plus-add fallback, so autograd remains graph-safe. Raw scores × strict
+`tril(diagonal=-1)` semantics and eager defaults are unchanged.
+
+### CPU validation
+
+```bash
+pytest -q tests/test_scorev_fuse_v4.py
+pytest -q tests/test_fuse_scorev.py tests/test_inc_decode.py
+```
+
+These tests are CPU parity/graph-safety checks only. No GPU timing or hardware
+correctness claim is made.

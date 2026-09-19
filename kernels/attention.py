@@ -1,3 +1,4 @@
+
 """Strict lower-triangular BDH attention: tril(Q @ K.T, diagonal=-1) @ V.
 
 No softmax, no 1/sqrt(d). Position i attends only to j < i.
@@ -365,10 +366,11 @@ def _broadcast_t1_score_v_into(
 
     ``baddbmm`` has no head broadcast, so the B=1 inference path batches one
     zero-stride value view across heads and writes directly into ``target``.
-    For B>1, one broadcast ``matmul`` handles the whole batch (avoiding a
-    Python loop); only its small T=1 output tile is added for beta=1. This
-    keeps the CacheManager layout ``(B,1,S,D)`` unexpanded and removes any
-    repeated B*H staging. Training keeps the graph-safe matmul fallback
+    For B>1, beta=1 batches samples with ``H*Bi`` rows so ``baddbmm``
+    accumulates directly into the output; beta=0 retains broadcast ``matmul``
+    with ``out=``. This keeps the CacheManager layout ``(B,1,S,D)``
+    unexpanded and removes repeated B*H staging. Training keeps the graph-safe
+    matmul fallback
     because ``out=`` operators do not participate in autograd.
     """
     # Accept either the cache-shaped (B,1,Bj,D) view or the reused
@@ -396,13 +398,25 @@ def _broadcast_t1_score_v_into(
             )
             return
 
-        # For B>1, an ordinary broadcast matmul removes the per-sample Python
-        # loop. beta=0 can write directly; beta=1 pays only one small T=1
-        # product tile before adding it to the accumulated output.
+        # For B>1, batch over samples with H*Bi rows. This keeps the
+        # shared (B,Bj,D) value view unexpanded and lets the accumulated
+        # beta=1 tiles use the output buffer directly instead of staging a
+        # separate 4-D score×V product.
         V4 = Vshared.unsqueeze(1)
         if beta == 0:
             torch.matmul(scores4, V4, out=target4)
+        elif not torch.is_grad_enabled():
+            # Batch samples with H*Bi rows in inference mode. This keeps the
+            # shared (B,Bj,D) value view unexpanded and writes accumulated
+            # tiles directly into the output, with no score×V staging.
+            scores_b = scores4.reshape(B, H * Bi, Bj)
+            target_b = target4.reshape(B, H * Bi, Vshared.size(-1))
+            torch.baddbmm(
+                target_b, scores_b, Vshared, beta=1, out=target_b
+            )
         else:
+            # Preserve the graph-safe, parity-stable fallback when grad mode
+            # is enabled, even if the inputs do not currently require grad.
             target4.add_(torch.matmul(scores4, V4))
         return
 
