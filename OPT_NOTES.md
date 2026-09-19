@@ -7026,3 +7026,36 @@ Added focused CPU-safe AMP contract coverage for the explicit
 is unavailable, and a parametrized GradScaler gate: only float16 on a live CUDA
 device may enable scaling. Defaults remain fp32 / AMP-off; this CPU-only box
 adds no GPU timing or throughput claim.
+
+
+## opt/cache-bench-v3 — expose starting packed footprint (2026-09-19)
+
+**Branch:** `opt/cache-bench-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `0983326` (`main`, #179 amp-train-v4).
+
+### Goal
+
+Deepen the post-#160 CPU-only packed-cache page report without changing cache,
+attention, or `generate` defaults. The page sweep now shows both the initial
+page allocation and the final packed KR+V allocation, next to the capacity
+transition and geometric-versus-linear grow/copy accounting.
+
+### What changed
+
+- `benchmarks/bench_cache_page.py`: assert that the packed allocation equals
+  `capacity × bytes-per-sequence-slot`; report `start_KiB → alloc_KiB` for each
+  page size and for the opt-in generate smoke.
+- `tests/test_cache_pack.py`: verify the same capacity/allocation invariant
+  before and after CPU page growth.
+- No model, attention, page-growth policy, or default behavior changed.
+
+### CPU evidence
+
+```bash
+OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/test_cache_pack.py -q
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_cache_page.py --smoke
+```
+
+The benchmark is CPU accounting only: allocation and grow-copy bytes are not
+GPU memory or GPU timing measurements. Defaults remain unchanged, and attention
+semantics remain raw scores × `tril(diagonal=-1)`.

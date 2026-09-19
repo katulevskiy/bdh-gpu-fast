@@ -269,6 +269,32 @@ def test_page_growth_then_decode():
     assert cm.capacity <= 16
 
 
+def test_paged_capacity_matches_packed_footprint():
+    """Page capacity and packed KR/V allocation stay in the same slot units."""
+    cfg = _small_cfg()
+    page, max_seq = 4, 16
+    cm = CacheManager.from_config(
+        cfg, batch_size=1, max_seq=max_seq, device="cpu", page_size=page
+    )
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    elem_stride = cfg.n_layer * (cfg.n_head * N + cfg.n_embd) * 4
+    assert cm.capacity == page
+    assert cm.bytes_allocated == page * elem_stride
+
+    for _ in range(max_seq):
+        for level in range(cfg.n_layer):
+            cm.append(
+                level,
+                torch.zeros(1, cfg.n_head, 1, N),
+                torch.zeros(1, 1, 1, cfg.n_embd),
+            )
+        cm.commit()
+
+    assert cm.capacity == max_seq
+    assert cm.bytes_allocated == max_seq * elem_stride
+    assert cm.bytes_allocated == cm.capacity * elem_stride
+
+
 def test_stage_returns_contiguous_past_plus_new():
     cfg = _small_cfg()
     cm = CacheManager.from_config(cfg, 1, max_seq=32, device="cpu")
