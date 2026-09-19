@@ -38,6 +38,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + CUDA/Triton scaffolds in-tree; **no CUDA on this box**. | A100/H100 microbench vs eager; bit-identical | Env blocker |
+| **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU parity / train bench** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. Compile path hardened (#22); **GPU inductor / CUDA graphs unmeasured**. | GPU compile train step vs eager | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). Remaining: incremental score×V kernel + fewer host copies. | GPU decode kernel bench; keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul` ~19% + `copy_` ~11% + `sub`/`add` (RoPE). **Cached tables landed** (#18); fused rotate kernel still open. | Optional fused RoPE on GPU | Low–medium |

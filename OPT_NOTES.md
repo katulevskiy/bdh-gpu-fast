@@ -1521,3 +1521,65 @@ Observed on this box (tiny cfg, torch 2.14 CPU): bf16 logits max ~4e-3, grads
 - No default AMP on (stays float32 until env set)
 - No attention math changes
 - No pathwaycom PRs
+
+## opt/triton-cold — cold-path Triton fused tril score×V (2026-09-19)
+
+**Branch:** `opt/triton-cold` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `3d3ed2b` (main after compile-harden).
+
+### Goal
+
+Improve the **cold / full-T** Triton fused `tril(diagonal=-1)` score×V path
+(not only decode): better tiles, less host staging, share helpers with the
+online blocked path from `opt/fuse-scorev`. Keep **default `BDH_ATTN_IMPL=eager`**.
+
+### What changed (`kernels/attention.py`)
+
+| Piece | Change |
+|-------|--------|
+| `_as_contiguous` | Contiguous copy only when needed (shared cold + decode host) |
+| `_pick_triton_cold_tiles` | Power-of-2 `BLOCK_M/N/D/K`; defaults track `DEFAULT_BLOCK_COLD=64` (was fixed 32×32) |
+| `_bdh_attn_fwd_kernel` | `V_BROADCAST` — heads share values via `bh // H` (host stages `B×T×D`, not `B×H×T×D`) |
+| `triton_tril_attn` | Adaptive tiles; conditional contig; V squeeze+broadcast; CPU → `blocked_tril_attn(..., DEFAULT_BLOCK_COLD)` |
+| `blocked_tril_attn` / `online_tril_attn` | Default BS = `DEFAULT_BLOCK_COLD`; use shared `_expand_v_heads` |
+| Decode host | Uses `_as_contiguous` / `_expand_v_heads` (same helpers; no behavior change on CPU) |
+
+Dispatch / default unchanged: unset `BDH_ATTN_IMPL` → **eager**.
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K.T).tril(diagonal=-1) @ V   # no softmax, no 1/√d, diagonal excluded
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 223 passed, 7 skipped (CUDA/native/Triton GPU paths)
+# tests/test_triton_attn.py — tile picker, V broadcast view, triton→online
+#   blocked fallback ≡ eager tril(-1), default remains eager
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```bash
+.venv/bin/python benchmarks/bench_triton_attn.py
+# device=cpu  B=2 H=4 T=128 N=64 D=128  torch=2.14.0+cu130 cuda=False
+# correctness max|triton_path-eager|≈1.2e-4
+# score peak elems: eager T*T=16384  blocked/online bound=4096
+# eager   median: ~0.36 ms
+# blocked median: ~6.0 ms  (0.06× — Python tile/row loop)
+# triton  median: ~6.1 ms  (CPU → online blocked fallback; kernel not run)
+```
+
+**No GPU on this box** — cold Triton kernel is in-tree but unexecuted; measure
+on CUDA before claiming speedups. On CPU prefer **eager** (default). Staging
+win (no `B×H×T×D` V expand copy) and larger tiles matter on GPU.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal inclusion / SDPA
+- No change to default `BDH_ATTN_IMPL=eager`
+- No fake GPU speedups from CPU medians

@@ -48,6 +48,50 @@ def _expand_v_heads(V: torch.Tensor, B: int, H: int, S: int, D: int) -> torch.Te
     return V
 
 
+def _as_contiguous(t: torch.Tensor) -> torch.Tensor:
+    """Contiguous copy only when needed (shared cold/decode staging helper)."""
+    return t if t.is_contiguous() else t.contiguous()
+
+
+def _pick_triton_cold_tiles(
+    T: int,
+    N: int,
+    D: int,
+    *,
+    block_m: int | None = None,
+    block_n: int | None = None,
+) -> tuple[int, int, int, int]:
+    """Power-of-2 Triton tiles for cold strict-tril, aligned with online blocked.
+
+    Prefers ``DEFAULT_BLOCK_COLD``-sized query/key tiles (larger than the old
+    fixed 32×32) so each program covers more of the lower triangle. Caps keep
+    register pressure bounded; ``BLOCK_D``/``BLOCK_K`` track head dims.
+    """
+    def _p2_cap(x: int, lo: int, hi: int) -> int:
+        x = max(lo, min(int(x), hi))
+        # next_power_of_2 without requiring Triton at import time on CPU
+        p = 1
+        while p < x:
+            p <<= 1
+        return min(p, hi)
+
+    # Default query/key tile ~ online blocked BS (64), grow slightly for long T.
+    if block_m is None:
+        want_m = DEFAULT_BLOCK_COLD if T <= 256 else min(128, DEFAULT_BLOCK_COLD * 2)
+        block_m = _p2_cap(min(T, want_m) if T > 0 else want_m, 16, 128)
+    else:
+        block_m = _p2_cap(block_m, 16, 128)
+    if block_n is None:
+        want_n = DEFAULT_BLOCK_COLD if T <= 256 else min(128, DEFAULT_BLOCK_COLD * 2)
+        block_n = _p2_cap(min(max(T, 1), want_n), 16, 128)
+    else:
+        block_n = _p2_cap(block_n, 16, 128)
+
+    block_d = _p2_cap(D if D > 0 else 1, 16, 64)
+    block_k = _p2_cap(N if N > 0 else 1, 16, 64)
+    return block_m, block_n, block_d, block_k
+
+
 def _pick_tile_size(S: int, Tq: int, block_size: int) -> int:
     """Choose a past-axis tile width: larger tiles ⇒ fewer Python loop trips.
 
@@ -102,7 +146,7 @@ def _tiled_score_v(
 _STREAM_SCORE_ELEMS = 4096  # if Bi*Bj exceeds this, stream query rows (bound peak)
 
 
-def max_score_tile_elems(T: int, block_size: int = 64) -> int:
+def max_score_tile_elems(T: int, block_size: int = DEFAULT_BLOCK_COLD) -> int:
     """Upper bound on score elements materialized at once by blocked/online.
 
     Eager allocates ``T*T`` (full matrix). Blocked/online keeps at most one
@@ -184,7 +228,7 @@ def blocked_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = 64,
+    block_size: int = DEFAULT_BLOCK_COLD,
 ) -> torch.Tensor:
     """Pure-PyTorch strict-tril attention without a full T×T score matrix.
 
@@ -198,13 +242,13 @@ def blocked_tril_attn(
     Semantically identical to ``eager_tril_attn`` (up to fp roundoff on long T).
     Works on CPU and CUDA; used as the non-Triton ``triton`` path fallback and
     as a lower-peak-score-memory alternative to eager.
+
+    Shares ``_expand_v_heads`` / ``DEFAULT_BLOCK_COLD`` with the Triton cold
+    launcher so CPU fallback and CUDA tiles stay aligned.
     """
     B, H, T, N = Q.shape
     D = V.shape[-1]
-    if V.size(1) == 1 and H != 1:
-        Vh = V.expand(B, H, T, D)
-    else:
-        Vh = V
+    Vh = _expand_v_heads(V, B, H, T, D)
 
     # Accumulate in a stable float: widen half/bfloat16 to fp32; keep f32/f64
     # so gradcheck / analytic bwd on float64 stay exact-dtype.
@@ -244,7 +288,7 @@ def online_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = 64,
+    block_size: int = DEFAULT_BLOCK_COLD,
 ) -> torch.Tensor:
     """Alias for deepened blocked fusion (explicit name for OPT / benches)."""
     return blocked_tril_attn(Q, K, V, block_size=block_size)
@@ -268,66 +312,61 @@ if _HAS_TRITON:
         K_ptr,
         V_ptr,
         Out_ptr,
-        stride_qb,
         stride_qh,
         stride_qt,
         stride_qn,
-        stride_kb,
         stride_kh,
         stride_kt,
         stride_kn,
         stride_vb,
-        stride_vh,
         stride_vt,
         stride_vd,
-        stride_ob,
         stride_oh,
         stride_ot,
         stride_od,
         T,
         N,
         D,
+        H,
+        V_BROADCAST: tl.constexpr,
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_D: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
-        """Fused strict-tril score@V: out[i] = sum_{j<i} (q_i·k_j) * v_j.
+        """Fused strict-tril score×V: out[i] = sum_{j<i} (q_i·k_j) * v_j.
 
         Grid: (cdiv(T, BLOCK_M), B * H)
+
+        Host pairs this with larger power-of-2 tiles and optional V broadcast
+        (``V_BROADCAST``: values indexed by ``bh // H``, staging ``B×T×D`` only).
         """
         pid_m = tl.program_id(0)
-        pid_bh = tl.program_id(1)
-        # Unpack batch / head from linear bh index via host-passed H? We use
-        # flat BH and strides that already fold B*H — caller sets nh_total.
-        # Here pid_bh indexes the combined (B,H) plane; strides are per-plane.
-        bh = pid_bh
+        bh = tl.program_id(1)
 
         start_m = pid_m * BLOCK_M
         offs_m = start_m + tl.arange(0, BLOCK_M)
         mask_m = offs_m < T
 
-        # Base pointers for this (b,h)
-        q_bh = Q_ptr + bh * stride_qh  # stride_qh is actually stride over H within flat BH
+        q_bh = Q_ptr + bh * stride_qh
         k_bh = K_ptr + bh * stride_kh
-        v_bh = V_ptr + bh * stride_vh
         o_bh = Out_ptr + bh * stride_oh
+        if V_BROADCAST:
+            v_bh = V_ptr + (bh // H) * stride_vb
+        else:
+            v_bh = V_ptr + bh * stride_vb
 
-        # Accumulators over D in tiles
-        # We stream D in BLOCK_D chunks to keep registers bounded.
+        end_n = start_m + BLOCK_M
+
         for d0 in range(0, D, BLOCK_D):
             offs_d = d0 + tl.arange(0, BLOCK_D)
             mask_d = offs_d < D
             acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
 
-            # Iterate key blocks with j_end <= start_m + BLOCK_M, but only j < i
-            # For simplicity: all key blocks with j0 < start_m + BLOCK_M
-            end_n = start_m + BLOCK_M  # keys with j < end_n may contribute
             for j0 in range(0, end_n, BLOCK_N):
                 offs_n = j0 + tl.arange(0, BLOCK_N)
                 mask_n = offs_n < T
 
-                # Compute QK scores for this tile: (BLOCK_M, BLOCK_N)
                 qk = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
                 for k0 in range(0, N, BLOCK_K):
                     offs_k = k0 + tl.arange(0, BLOCK_K)
@@ -348,9 +387,11 @@ if _HAS_TRITON:
                     ).to(tl.float32)
                     qk += tl.dot(q, tl.trans(k))
 
-                # Strict lower: keep only j < i (exclude diagonal and above)
+                # Strict lower-triangular: j < i (exclude diagonal)
                 causal = offs_n[None, :] < offs_m[:, None]
-                qk = tl.where(causal & mask_m[:, None] & mask_n[None, :], qk, 0.0)
+                qk = tl.where(
+                    causal & mask_m[:, None] & mask_n[None, :], qk, 0.0
+                )
 
                 v = tl.load(
                     v_bh
@@ -374,81 +415,78 @@ def triton_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_m: int = 32,
-    block_n: int = 32,
+    block_m: int | None = None,
+    block_n: int | None = None,
 ) -> torch.Tensor:
-    """Triton fused strict-tril attention. Requires CUDA + Triton.
+    """Triton fused strict-tril attention (cold / full T). Requires CUDA.
 
-    Falls back to blocked_tril_attn if Triton cannot run.
+    Falls back to ``blocked_tril_attn`` (online fused, ``DEFAULT_BLOCK_COLD``)
+    when Triton cannot run — same helpers as ``BDH_ATTN_IMPL=blocked``.
+
+    Host staging: Q/K contiguous only if needed; V head-broadcast stages
+    ``(B,T,D)`` rather than materializing ``(B,H,T,D)``. Tiles from
+    ``_pick_triton_cold_tiles`` (aligned with online blocked BS=64).
     """
     if not _can_use_triton(Q):
-        return blocked_tril_attn(Q, K, V)
+        return blocked_tril_attn(Q, K, V, block_size=DEFAULT_BLOCK_COLD)
 
-    assert Q.is_contiguous() or True
     B, H, T, N = Q.shape
     D = V.shape[-1]
+    v_broadcast = bool(V.size(1) == 1 and H != 1)
 
-    # Expand V to (B,H,T,D) for uniform strides (head broadcast).
-    if V.size(1) == 1 and H != 1:
-        Vh = V.expand(B, H, T, D).contiguous()
-    else:
-        Vh = V.contiguous()
-
-    Qc = Q.contiguous()
-    Kc = K.contiguous()
+    Qc = _as_contiguous(Q)
+    Kc = _as_contiguous(K)
     out = torch.empty(B, H, T, D, device=Q.device, dtype=Q.dtype)
 
-    # Flatten (B,H) into one grid dimension; use H-stride as plane stride.
-    # Pointer arithmetic: element (b,h,t,n) at
-    #   b*stride_qb + h*stride_qh + t*stride_qt + n*stride_qn
-    # We launch pid_bh in [0, B*H) and treat stride_qh' = stride over consecutive
-    # (b,h) planes = stride_qh when scanning h innermost... easier: view as (BH,...)
     Qf = Qc.view(B * H, T, N)
     Kf = Kc.view(B * H, T, N)
-    Vf = Vh.view(B * H, T, D)
     Of = out.view(B * H, T, D)
 
-    BH = B * H
-    BLOCK_M = block_m
-    BLOCK_N = block_n
-    BLOCK_D = min(64, triton.next_power_of_2(D) if D > 0 else 1)
-    BLOCK_K = min(64, triton.next_power_of_2(N) if N > 0 else 1)
-    # Cap BLOCK_D/K to reasonable sizes
-    BLOCK_D = min(BLOCK_D, 64)
-    BLOCK_K = min(BLOCK_K, 64)
+    if v_broadcast:
+        V1 = _as_contiguous(V.squeeze(1))  # (B, T, D) — not B*H*T*D
+        V_ptr = V1
+        stride_vb, stride_vt, stride_vd = V1.stride(0), V1.stride(1), V1.stride(2)
+    else:
+        Vh = _as_contiguous(V)
+        Vf = Vh.view(B * H, T, D)
+        V_ptr = Vf
+        stride_vb, stride_vt, stride_vd = Vf.stride(0), Vf.stride(1), Vf.stride(2)
 
-    grid = (triton.cdiv(T, BLOCK_M), BH)
+    BLOCK_M, BLOCK_N, BLOCK_D, BLOCK_K = _pick_triton_cold_tiles(
+        T, N, D, block_m=block_m, block_n=block_n
+    )
+    BH = B * H
+    grid = (triton.cdiv(max(T, 1), BLOCK_M), max(BH, 1))
 
     _bdh_attn_fwd_kernel[grid](
         Qf,
         Kf,
-        Vf,
+        V_ptr,
         Of,
-        Qf.stride(0),
         Qf.stride(0),
         Qf.stride(1),
         Qf.stride(2),
         Kf.stride(0),
-        Kf.stride(0),
         Kf.stride(1),
         Kf.stride(2),
-        Vf.stride(0),
-        Vf.stride(0),
-        Vf.stride(1),
-        Vf.stride(2),
-        Of.stride(0),
+        stride_vb,
+        stride_vt,
+        stride_vd,
         Of.stride(0),
         Of.stride(1),
         Of.stride(2),
         T,
         N,
         D,
+        H,
+        V_BROADCAST=1 if v_broadcast else 0,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         BLOCK_K=BLOCK_K,
     )
     return out
+
 
 
 def tril_attn(
@@ -621,12 +659,13 @@ def triton_decode_attn(
         return Q.new_zeros(B, H, Tq, D)
 
     if V.size(1) == 1 and H != 1:
-        Vh = V.expand(B, H, S, D).contiguous()
+        # Broadcast expand is a view; contig only if the kernel needs it.
+        Vh = _as_contiguous(_expand_v_heads(V, B, H, S, D))
     else:
-        Vh = V.contiguous()
+        Vh = _as_contiguous(V)
 
-    Qc = Q.contiguous()
-    Kc = K.contiguous()
+    Qc = _as_contiguous(Q)
+    Kc = _as_contiguous(K)
     out = torch.empty(B, H, Tq, D, device=Q.device, dtype=Q.dtype)
 
     Qf = Qc.view(B * H, Tq, N)
