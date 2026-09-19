@@ -53,13 +53,69 @@ def _validate_rope_inputs(
             raise ValueError("rope out= must not alias v")
 
 
+def _is_t1_seq(v: torch.Tensor) -> bool:
+    """True when the sequence axis (dim -2) is length 1 — incremental decode."""
+    return v.dim() >= 2 and v.shape[-2] == 1
+
+
+def rope_rotate_t1(
+    v: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """T=1 decode rotate: pair-contiguous writes, no strided ``0::2`` stores.
+
+    Cos/sin are typically ``(1,1,1,N)`` narrows from the generate table. Pair
+    reshape lets mul broadcast without ``expand(v.shape)`` materialization.
+    Same math as ``eager_rope_rotate`` (bit-identical on CPU fp32 / cast path).
+    """
+    _validate_rope_inputs(v, cos, sin, out)
+    if not _is_t1_seq(v):
+        raise ValueError(
+            f"rope_rotate_t1 expects sequence length 1, got shape {tuple(v.shape)}"
+        )
+
+    # (..., 1, N) → (..., 1, N/2, 2). Cos/sin keep their leading 1s; mul broadcasts.
+    vp = v.reshape(*v.shape[:-1], -1, 2)
+    cp = cos.reshape(*cos.shape[:-1], -1, 2)
+    sp = sin.reshape(*sin.shape[:-1], -1, 2)
+
+    x0, x1 = vp[..., 0], vp[..., 1]
+    c0, c1 = cp[..., 0], cp[..., 1]
+    s0, s1 = sp[..., 0], sp[..., 1]
+
+    if v.dtype != cos.dtype:
+        y0 = (x0 * c0).to(v.dtype) + ((-x1) * s0).to(v.dtype)
+        y1 = (x1 * c1).to(v.dtype) + (x0 * s1).to(v.dtype)
+    else:
+        y0 = x0 * c0 - x1 * s0
+        y1 = x1 * c1 + x0 * s1
+
+    if out is None:
+        # stack→reshape is one alloc; avoid strided even/odd scatter into empty_like.
+        return torch.stack((y0, y1), dim=-1).reshape(v.shape)
+
+    op = out.reshape(*v.shape[:-1], -1, 2)
+    op[..., 0] = y0
+    op[..., 1] = y1
+    return out
+
+
 def eager_rope_rotate(
     v: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Reference rotate: strided even/odd slices (matches historical ``Attention.rope``)."""
+    """Reference rotate: strided even/odd slices (matches historical ``Attention.rope``).
+
+    When ``v`` has sequence length 1 (decode), uses ``rope_rotate_t1`` — same
+    math, pair-contiguous stores into ``out`` / one stack alloc when ``out`` is
+    None. Multi-token keeps the historical strided path.
+    """
+    if _is_t1_seq(v):
+        return rope_rotate_t1(v, cos, sin, out=out)
     _validate_rope_inputs(v, cos, sin, out)
     if out is None:
         out = torch.empty_like(v)
@@ -92,7 +148,11 @@ def fused_rope_rotate_pytorch(
     Reshapes ``(..., N) → (..., N/2, 2)`` so even/odd live in a contiguous pair
     axis, computes both outputs, then writes via a single ``stack→flatten`` (or
     into ``out``'s pair view). Same math as ``eager_rope_rotate``.
+
+    T=1 decode shares ``rope_rotate_t1`` (skips ``expand(v.shape)`` on cis).
     """
+    if _is_t1_seq(v):
+        return rope_rotate_t1(v, cos, sin, out=out)
     _validate_rope_inputs(v, cos, sin, out)
 
     # Contiguous last-dim helps reshape without an extra copy; leave non-contig
