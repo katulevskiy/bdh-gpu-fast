@@ -204,3 +204,20 @@ def test_disabled_auto_ignores_invalid_threshold_configuration(monkeypatch):
 
     assert resolve_cold_impl(99) == "eager"
     assert resolve_decode_impl(99) == "eager"
+
+
+@pytest.mark.parametrize("auto", ["true", "yes", "on"])
+def test_named_truthy_auto_values_enable_both_threshold_gates(monkeypatch, auto):
+    """Documented truthy AUTO spellings enable decode and cold switching."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", auto)
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "2")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "3")
+    monkeypatch.setattr(
+        "kernels.attention_dispatch.triton_decode_available", lambda: False
+    )
+
+    assert resolve_decode_impl(2) == "eager"
+    assert resolve_decode_impl(3) == "blocked"
+    assert resolve_cold_impl(3) == "eager"
+    assert resolve_cold_impl(4) == "blocked"
