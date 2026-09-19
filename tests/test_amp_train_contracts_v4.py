@@ -568,6 +568,58 @@ def test_injected_scaler_path_orders_hooks_and_clears_grads(monkeypatch):
     assert model.weight.grad is None
 
 
+def test_scaler_update_failure_still_clears_grads(monkeypatch):
+    """Scaler cleanup remains guaranteed when update fails after the step."""
+    events = []
+
+    class _ScaledLoss:
+        def __init__(self, loss):
+            self.loss = loss
+
+        def backward(self):
+            events.append("backward")
+            self.loss.backward()
+
+    class _FailingScaler:
+        def is_enabled(self):
+            return True
+
+        def scale(self, loss):
+            events.append("scale")
+            return _ScaledLoss(loss)
+
+        def step(self, optimizer):
+            events.append("step")
+            optimizer.step()
+
+        def update(self):
+            events.append("update")
+            raise RuntimeError("synthetic scaler update failure")
+
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", True)
+    monkeypatch.setattr(tr, "scaler", _FailingScaler())
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, 1))
+
+        def forward(self, x, y=None):
+            logits = x @ self.weight
+            return logits, logits.square().mean()
+
+    model = _TinyModel()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    with pytest.raises(RuntimeError, match="synthetic scaler update failure"):
+        tr.train_step(model, optimizer, torch.tensor([[2.0]]), torch.tensor([[0]]))
+
+    assert events == ["scale", "backward", "step", "update"]
+    assert model.weight.grad is None
+
+
 def test_disabled_scaler_falls_back_to_unscaled_step_and_clears_grads(monkeypatch):
     """A disabled scaler cannot intercept the CPU-safe unscaled optimizer path."""
     events = []
