@@ -47,7 +47,7 @@ def main():
     )
     tr.fetch_data()
     model = tr.bdh.BDH(tr.BDH_CONFIG).to(tr.device)
-    loader = tr.BatchPrefetcher("train")
+    loader = tr.make_batch_source("train")
     x, y = loader.next()
     model = tr.maybe_compile(model, example_x=x, example_y=y)
     optimizer = tr.make_optimizer(model)

@@ -98,9 +98,21 @@ def main():
 
     tb = timed(run_base)
     to = timed(run_opt)
+    th = timed(lambda: tr._gather_batch_host("train"))
+
+    # Optional DataLoader path (vectorized host gather inside; workers=0 on CPU)
+    tr.USE_DATALOADER = True
+    tr.NUM_WORKERS = 0
+    src = tr.DataLoaderBatchSource("train")
+    for _ in range(5):
+        src.next()
+    td = timed(lambda: src.next(), warmup=5, reps=50)
+
     print(f"device={device} BLOCK_SIZE={BLOCK_SIZE} BATCH_SIZE={BATCH_SIZE}")
     print(f"get_batch baseline (list/from_numpy) median: {tb*1000:.3f} ms")
     print(f"get_batch vectorized+pretensor median:       {to*1000:.3f} ms  ({tb/to:.2f}x)")
+    print(f"host gather only median:                     {th*1000:.3f} ms")
+    print(f"DataLoader (workers=0) median:               {td*1000:.3f} ms")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 # Copyright Pathway Technology, Inc.
-# Private opt (opt/train-fuse): sync-light loop + opt-in compile (see OPT_NOTES.md).
+# Private opt (opt/dataloader): pin/non_blocking + optional DataLoader workers (see OPT_NOTES.md).
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import bdh
 import numpy as np
 import requests
 import torch
+import torch.utils.data
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # On a Mac you can also try
@@ -51,6 +52,9 @@ LOG_FREQ = 100
 USE_COMPILE = os.environ.get("BDH_COMPILE", "0") in ("1", "true", "True")
 COMPILE_MODE = os.environ.get("BDH_COMPILE_MODE", "default")  # default|reduce-overhead|max-autotune
 USE_FUSED_ADAMW = os.environ.get("BDH_FUSED_ADAMW", "1") not in ("0", "false", "False")
+# Data path: default = vectorized get_batch + BatchPrefetcher; optional torch DataLoader
+USE_DATALOADER = os.environ.get("BDH_DATALOADER", "0") in ("1", "true", "True")
+NUM_WORKERS = int(os.environ.get("BDH_NUM_WORKERS", "2" if USE_DATALOADER else "0"))
 
 input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
 
@@ -80,11 +84,19 @@ def _load_splits():
     # Pre-tensorize int64 once; tiny Shakespeare is ~1MB → ~8MB resident.
     _train_data = torch.from_numpy(np.asarray(mm[:split], dtype=np.int64))
     _val_data = torch.from_numpy(np.asarray(mm[split:], dtype=np.int64))
+    # Page-lock corpus on CUDA so gather source is pinned (batch still pinned below).
+    if device.type == "cuda":
+        _train_data = _train_data.pin_memory()
+        _val_data = _val_data.pin_memory()
     _offsets = torch.arange(BLOCK_SIZE + 1)
 
 
-def get_batch(split):
-    # Vectorized window gather — no Python list of from_numpy per sample.
+def _gather_batch_host(split: str):
+    """Vectorized window gather on CPU — no Python list of from_numpy per sample.
+
+    Returns contiguous host tensors (B, T). Does not touch the device or call
+    .item() / .cpu() on CUDA tensors (no host sync).
+    """
     global _offsets
     _load_splits()
     if _offsets is None or _offsets.numel() != BLOCK_SIZE + 1:
@@ -95,13 +107,67 @@ def get_batch(split):
     # contiguous: windows[:, 1:] has stride (T+1,1) and breaks targets.view(-1) in CE
     x = windows[:, :-1].contiguous()
     y = windows[:, 1:].contiguous()
+    return x, y
+
+
+def _to_train_device(x: torch.Tensor, y: torch.Tensor):
+    """H2D with pin_memory + non_blocking on CUDA; plain .to on CPU."""
     if device.type == "cuda":
-        # pin → async H2D so the next step can overlap with compute when prefetched
-        x = x.pin_memory().to(device, non_blocking=True)
-        y = y.pin_memory().to(device, non_blocking=True)
+        # pin → async H2D so prefetch / DataLoader can overlap with compute
+        if not x.is_pinned():
+            x = x.pin_memory()
+        if not y.is_pinned():
+            y = y.pin_memory()
+        x = x.to(device, non_blocking=True)
+        y = y.to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
     return x, y
+
+
+def get_batch(split):
+    """Vectorized get_batch: host gather + pin/non_blocking H2D when CUDA."""
+    x, y = _gather_batch_host(split)
+    return _to_train_device(x, y)
+
+
+def _dataloader_worker_init(worker_id: int) -> None:
+    # Distinct RNG streams per worker (DataLoader shares base seed otherwise).
+    base = torch.initial_seed() % (2**32)
+    torch.manual_seed(base + worker_id)
+
+
+class _HostBatchIterable(torch.utils.data.IterableDataset):
+    """Yields full (x, y) host batches so collate stays vectorized (batch_size=None)."""
+
+    def __init__(self, split: str = "train"):
+        super().__init__()
+        self.split = split
+
+    def __iter__(self):
+        while True:
+            yield _gather_batch_host(self.split)
+
+
+def make_torch_dataloader(split: str = "train") -> torch.utils.data.DataLoader:
+    """Optional DataLoader around vectorized host gather.
+
+    Env: BDH_DATALOADER=1, BDH_NUM_WORKERS=N (persistent_workers when N>0).
+    pin_memory enabled on CUDA so callers can .to(..., non_blocking=True).
+    """
+    n_workers = max(0, NUM_WORKERS)
+    pin = device.type == "cuda"
+    kwargs = dict(
+        dataset=_HostBatchIterable(split),
+        batch_size=None,  # dataset already yields a full batch (keeps vectorized gather)
+        num_workers=n_workers,
+        pin_memory=pin,
+        persistent_workers=(n_workers > 0),
+    )
+    if n_workers > 0:
+        kwargs["prefetch_factor"] = 2
+        kwargs["worker_init_fn"] = _dataloader_worker_init
+    return torch.utils.data.DataLoader(**kwargs)
 
 
 class BatchPrefetcher:
@@ -133,6 +199,27 @@ class BatchPrefetcher:
         self._next = None
         self.preload()  # kick next copy/gather immediately
         return batch
+
+
+class DataLoaderBatchSource:
+    """Adapter with the same .next() API as BatchPrefetcher for the train loop."""
+
+    def __init__(self, split: str = "train"):
+        self.split = split
+        self._loader = make_torch_dataloader(split)
+        self._it = iter(self._loader)
+
+    def next(self):
+        x, y = next(self._it)
+        # DataLoader already pin_memory'd on CUDA; non_blocking H2D, no .item()
+        return _to_train_device(x, y)
+
+
+def make_batch_source(split: str = "train"):
+    """Default: BatchPrefetcher. Set BDH_DATALOADER=1 for DataLoader + workers."""
+    if USE_DATALOADER:
+        return DataLoaderBatchSource(split)
+    return BatchPrefetcher(split)
 
 
 def make_optimizer(model: torch.nn.Module) -> torch.optim.Optimizer:
@@ -216,7 +303,7 @@ if __name__ == "__main__":
     fetch_data()
 
     model = bdh.BDH(BDH_CONFIG).to(device)
-    loader = BatchPrefetcher("train")
+    loader = make_batch_source("train")
     x, y = loader.next()
     model = maybe_compile(model, example_x=x, example_y=y)
     optimizer = make_optimizer(model)

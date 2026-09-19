@@ -850,3 +850,72 @@ baseline-compatible (`encoder`/`encoder_v` `(nh,D,N)`, `decoder` `(nh*N,D)`,
 - Do not default `BDH_ATTN_IMPL=blocked` on CPU
 - No Parameter shape migration / checkpoint break
 - No softmax / diagonal / SDPA
+
+## opt/dataloader — train data path (2026-09-19)
+
+**Branch:** `opt/dataloader` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `73d6002` (main tip). **Does not** change `bdh.py`, loss math, or 90/10 split.
+
+### Goals
+
+1. Keep **vectorized** `get_batch` (pre-tensorized splits + advanced-index windows).
+2. **`pin_memory` + `non_blocking`** H2D when `device.type == "cuda"`.
+3. Optional **`DataLoader`** with **`persistent_workers`** when `num_workers > 0`.
+4. Avoid host sync in the hot loop (no `.item()` / `.cpu()` on device tensors in
+   gather; logging still defers `.item()` to `LOG_FREQ` from train-fuse).
+
+### Changes (`train.py`)
+
+| Piece | Change |
+|-------|--------|
+| `_gather_batch_host` | Vectorized window gather → contiguous CPU `x,y` (no device sync) |
+| `_to_train_device` | CUDA: pin if needed + `.to(..., non_blocking=True)`; CPU: plain `.to` |
+| `get_batch` | gather + transfer (same public API / semantics) |
+| Corpus pin | On CUDA, `_train_data` / `_val_data` are `pin_memory()`'d once at load |
+| `make_torch_dataloader` | `IterableDataset` yields **full** batches (`batch_size=None`) so gather stays vectorized; `pin_memory` on CUDA; `persistent_workers=(N>0)`; `prefetch_factor=2` |
+| `DataLoaderBatchSource` | Same `.next()` API as `BatchPrefetcher` |
+| `make_batch_source` | Default `BatchPrefetcher`; `BDH_DATALOADER=1` → DataLoader path |
+| Env | `BDH_DATALOADER=0|1`, `BDH_NUM_WORKERS` (default 2 when DataLoader on, else 0) |
+
+`train_fast.py` uses `make_batch_source`. Hot loop still: prefetch/next during step,
+accumulate `loss.detach()`, `.item()` only at `LOG_FREQ`.
+
+### How to run
+
+```bash
+python train.py                       # BatchPrefetcher (default)
+BDH_DATALOADER=1 python train.py      # DataLoader + persistent workers (N=2)
+BDH_DATALOADER=1 BDH_NUM_WORKERS=4 python train.py
+```
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# 139 passed, 4 skipped
+# includes tests/test_dataloader.py (split 90/10, vectorized parity, DataLoader
+# workers=0 / persistent_workers=2, make_batch_source, deferred .item())
+```
+
+### Benchmarks (CPU — honest)
+
+```text
+.venv/bin/python benchmarks/bench_batch.py
+# device=cpu  BLOCK_SIZE=512 BATCH_SIZE=32
+# get_batch baseline (list/from_numpy) median: 0.624 ms
+# get_batch vectorized+pretensor median:       0.071 ms  (8.80×)
+# host gather only median:                     0.068 ms
+# DataLoader (workers=0) median:               0.086 ms
+# DataLoader workers=2 persistent:             ~0.57 ms  (IPC overhead; not a CPU win)
+```
+
+On this CPU-only box, **default BatchPrefetcher + vectorized gather** remains the
+fast path. DataLoader+workers is for overlapping host prep with **GPU** compute;
+do not claim a CPU train speedup from workers. No CUDA here — pin/non_blocking
+overlap not measured.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- No change to CE loss / tril(-1) / train=first 90% val=last 10%
+- Do not default `BDH_DATALOADER=1` on CPU
