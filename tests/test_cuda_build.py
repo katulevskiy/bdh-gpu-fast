@@ -480,6 +480,33 @@ def test_forced_cpu_ext_precedes_valid_nvcc(tmp_path):
     assert "skipping CUDA extension build" not in output
 
 
+@pytest.mark.parametrize("value", ["0", "true", "yes", "01", " 1"])
+def test_non_exact_force_cpu_flag_does_not_override_cuda_opt_in(tmp_path, value):
+    """Only the exact BDH_FORCE_CPU_EXT=1 value may override CUDA setup."""
+    nvcc = tmp_path / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "BDH_FORCE_CPU_EXT": value,
+            "CUDA_HOME": str(tmp_path / "missing-cuda-home"),
+            "CUDA_PATH": str(tmp_path / "missing-cuda-path"),
+            "PATH": str(nvcc.parent),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext WITH CUDA" in output
+    assert "Building bdh_cuda_ext CPU-only" not in output
+    assert "skipping CUDA extension build" not in output
+
+
 @pytest.mark.parametrize("value", ["0", "true", "yes"])
 def test_non_one_cuda_flag_does_not_select_cuda_setup(value):
     """Only the exact BDH_BUILD_CUDA=1 value may select CUDA setup."""
