@@ -1182,8 +1182,10 @@ def triton_decode_attn(
     still get the #55 tight-oneshot / long-S tiled decode path. Dedicated
     decode kernel skips causal masking (past keys are all valid under
     tril(-1)) and supports broadcast-V staging (``(B,S,D)`` when ``V`` is
-    ``(B,1,S,D)``). Long-S tile picker + optional Q-hoist deepen the CUDA
-    scaffold; **no GPU wins are claimed from CPU boxes**.
+    ``(B,1,S,D)``). Its explicit strides also consume capacity-padded
+    CacheManager K/V views directly; only non-view-compatible shapes fall back
+    to a reshape allocation. Long-S tile picker + optional Q-hoist deepen the
+    CUDA scaffold; **no GPU wins are claimed from CPU boxes**.
     """
     if not _can_use_triton(Q):
         return blocked_decode_attn(Q, K, V, block_size=block_size)
@@ -1195,21 +1197,23 @@ def triton_decode_attn(
         return Q.new_zeros(B, H, Tq, D)
 
     v_broadcast = bool(V.size(1) == 1 and H != 1)
-    Qc = _as_contiguous(Q)
-    Kc = _as_contiguous(K)
     out = torch.empty(B, H, Tq, D, device=Q.device, dtype=Q.dtype)
 
-    Qf = Qc.view(B * H, Tq, N)
-    Kf = Kc.view(B * H, S, N)
+    # The decode kernel already receives explicit element strides. Preserve
+    # packed CacheManager views instead of staging a contiguous K/V copy on
+    # every T=1 step; reshape keeps the dense per-head matrices while retaining
+    # the capacity-padded batch stride. For a non-packed multi-token input,
+    # reshape may still materialize the ordinary contiguous fallback.
+    Qf = Q.reshape(B * H, Tq, N)
+    Kf = K.reshape(B * H, S, N)
     Of = out.view(B * H, Tq, D)
 
     if v_broadcast:
-        V1 = _as_contiguous(V.squeeze(1))  # (B, S, D) — not B*H*S*D
+        V1 = V.squeeze(1)  # (B, S, D), possibly capacity-strided
         V_ptr = V1
         stride_vb, stride_vt, stride_vd = V1.stride(0), V1.stride(1), V1.stride(2)
     else:
-        Vh = _as_contiguous(V)
-        Vf = Vh.view(B * H, S, D)
+        Vf = V.reshape(B * H, S, D)
         V_ptr = Vf
         stride_vb, stride_vt, stride_vd = Vf.stride(0), Vf.stride(1), Vf.stride(2)
 

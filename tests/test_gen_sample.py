@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 import torch.nn.functional as F
 
@@ -160,8 +161,9 @@ def test_generate_zero_torch_cat():
     assert cats["n"] == 0
 
 
-def test_generate_blocked_matches_eager_and_stays_cat_free(monkeypatch):
-    """The opt-in blocked decode preserves eager tokens and generate cat=0."""
+@pytest.mark.parametrize("impl", ["blocked", "triton", "cuda"])
+def test_generate_decode_impls_match_eager_and_stays_cat_free(monkeypatch, impl):
+    """Opt-in decode backends preserve eager tokens and generate cat=0."""
     cfg = _small_cfg()
     m = _model(cfg, seed=17)
     prompt = torch.randint(0, cfg.vocab_size, (1, 5))
@@ -170,7 +172,7 @@ def test_generate_blocked_matches_eager_and_stays_cat_free(monkeypatch):
     torch.manual_seed(101)
     eager = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
 
-    monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
+    monkeypatch.setenv("BDH_ATTN_IMPL", impl)
     cats = {"n": 0}
     orig = torch.cat
 
@@ -181,11 +183,11 @@ def test_generate_blocked_matches_eager_and_stays_cat_free(monkeypatch):
     torch.cat = hooked  # type: ignore[assignment]
     try:
         torch.manual_seed(101)
-        blocked = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
+        decoded = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
     finally:
         torch.cat = orig  # type: ignore[assignment]
 
-    assert torch.equal(blocked, eager)
+    assert torch.equal(decoded, eager)
     assert cats["n"] == 0
 
 

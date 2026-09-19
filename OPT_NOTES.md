@@ -5896,3 +5896,45 @@ is made on this CPU-only box.
   Triton availability, so CPU pytest stays clean.
 - The new CUDA test covers the zero-stride paired launch against eager when a
   CUDA+Triton environment is present.
+
+## opt/decode-gemm-v2 — strided packed KR/V views in T=1 Triton decode (2026-09-19)
+
+**Branch:** `opt/decode-gemm-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base:** `f16115c` (`origin/main`, tip #125).
+
+### Audit / deepen
+
+The T=1 Triton decode kernel already accepts explicit element strides, but its
+host launcher unconditionally staged `Q`, `K`, and `V` through contiguous
+tensors. With `CacheManager`, the live KR/V prefix is capacity-padded and
+therefore strided across batches; staging it every decode step adds a
+full-prefix device copy before the score GEMM.
+
+The launcher now flattens view-compatible Q/K/V shapes with `reshape` and
+passes their native strides to the existing kernel. Broadcast values remain
+`(B,1,S,D)` / `(B,S,D)` and per-head values retain their native batch stride;
+non-view-compatible inputs still use the normal reshape fallback. No kernel
+semantics change: decode remains raw `(Q @ K_past.T) @ V_past`, with packed past
+keys excluding the new token. Default eager dispatch is unchanged.
+
+### Correctness (CPU-only; no GPU claims)
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_inc_decode.py tests/test_cuda_decode.py tests/test_gen_sample.py -q
+# 87 passed, 7 skipped in 2.80s
+
+Full suite: 525 passed, 19 skipped, 3 warnings in 57.35s
+```
+
+Coverage includes eager/blocked/Triton/CUDA-ref parity, exact `pos0 == 0`,
+capacity-padded packed-cache T=1 views, and eager-vs-opt-in `generate()` with
+`torch.cat` count zero. CUDA/Triton hardware execution remains skip-gated on
+this CPU-only box; no GPU timing, kernel-correctness, or speedup claim is made.
+
+### Non-goals
+
+- Default eager behavior remains unchanged.
+- No softmax, scaling, diagonal inclusion, or full score materialization.
+- No public PR and no PRs to `pathwaycom/*`; private repo only.
+- No GPU claims from CPU tests.
