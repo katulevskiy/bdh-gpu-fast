@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#69)
+# OPT status — landed work (#1–#71+)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `0739807` (`#69` rope-decode on `main`; after `#68` profile-v6 / `#67` docs / `#66` log-sync). Profile source: tip of `#68` (post-#64–#66; default eager attn unchanged; #69 adds T=1 RoPE apply after the profile).
+Tip documented here: `962a3b6` (`#71` docs matrix on `main`; `#70` dropout-compile / `#69` rope-decode). Profile source: tip of `#68` (post-#64–#66). This branch adds long-S generate AUTO A/B harness (`opt/gen-long-bench`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -220,6 +220,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **68** | `opt/profile-v6` | Re-profile tip after #64–#66; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #64–#66 off short default window | No GPU measurements; defaults unchanged |
 | **69** | `opt/rope-decode` | Deepen T=1 RoPE apply (`rope_rotate_t1`); table pair cache + last-pos cis reuse; keep `BDH_ROPE_IMPL` default eager | t1≡strided; CPU wall ~0.83× (no win claim) | GPU fused/Triton T=1 open |
 | **70** | `opt/dropout-compile` | Harden dropout=0 / eval identity for compile; FX/Dynamo tests; COMPILE=1 dropout A/B bench | Identity + 0 Dynamo breaks; CPU dropout A/B ~noise | GPU compile still P1 |
+| **71** | `opt/docs-matrix` (through #69) | Refresh optimization matrix through #69 (`962a3b6`) | Docs only | — |
+| **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e AUTO ~parity (prefill dominates); IMPL=blocked 1.14–1.22× | GPU thr re-tune open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

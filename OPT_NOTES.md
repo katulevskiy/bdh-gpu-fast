@@ -3929,3 +3929,97 @@ BDH_BENCH_COMPILE_DROPOUT=1 python benchmarks/bench_train_step.py
 - No change to default `dropout` / `BDH_COMPILE` / `BDH_ATTN_IMPL`
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No GPU / CUDA-graph speedup claims from these CPU medians
+
+## opt/gen-long-bench — long-S generate AUTO A/B (2026-09-19)
+
+**Branch:** `opt/gen-long-bench` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `962a3b6` (main after `#71` docs matrix through #69).
+
+### Goal
+
+Validate `#55` / `#56` wins **outside** score×V microbench: end-to-end
+`BDH.generate` at long past lengths with `BDH_ATTN_AUTO=0` vs `1` (default
+threshold 512). Hard constraints unchanged: `tril(diagonal=-1)`, `aten::cat=0`,
+defaults stay eager / AUTO off. **No pathwaycom; no public PR.**
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `benchmarks/bench_generate.py` | New `--mode auto-ab`: prompt sweep × `BDH_ATTN_AUTO` 0/1; keeps existing `--mode impls` |
+| Docs | This note + light `OPT_STATUS` / `OPT_BACKLOG` |
+
+```bash
+# long-S AUTO A/B (CPU-feasible defaults: --new 8 if omitted)
+python benchmarks/bench_generate.py --mode auto-ab
+python benchmarks/bench_generate.py --mode auto-ab --prompts 256,1024,2048 --new 8
+python benchmarks/bench_generate.py --mode auto-ab --prompts 256,1024,2048 --new 64
+
+# prior impls sweep still default
+python benchmarks/bench_generate.py --impls eager,blocked --prompt 1024 --new 8
+```
+
+### Measured (this box, 2026-09-19 Europe/Podgorica / CEST)
+
+`OMP_NUM_THREADS=2`, `torch 2.14.0+cu130`, `cuda=False`, cfg `layers=4 d=128 nh=4 B=1`,
+`BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTO_THRESHOLD=512`, warmup=1 iters=3.
+
+#### AUTO 0 vs 1 — e2e generate (decode-only switch)
+
+| prompt | new | AUTO=0 ms | AUTO=1 ms | spd (0/1) | match | cats | decode@S AUTO1 |
+|--------|-----|-----------|-----------|-----------|-------|------|----------------|
+| 256 | 8 | 39.90 | 40.19 | 0.99× | yes | 0 | eager (S≤512; never fires) |
+| 1024 | 8 | 238.25 | 246.35 | 0.97× | yes | 0 | **blocked** |
+| 2048 | 8 | 880.61 | 898.62 | 0.98× | yes | 0 | **blocked** |
+| 256 | 64 | 138.99 | 139.55 | 1.00× | yes | 0 | eager (S+new-1≤512) |
+| 1024 | 64 | 384.52 | 392.30 | 0.98× | yes | 0 | **blocked** |
+| 2048 | 64 | 1066.03 | 1120.79 | 0.95× | yes | 0 | **blocked** |
+
+**Honesty:** on this CPU box, e2e `AUTO=1` is **~parity / slightly slower** than
+`AUTO=0` even at S=1024/2048. Cold/prefill stays **eager** (full `T×T` +
+`tril_`), so wall is dominated by prefill; decode-only AUTO (#56) does **not**
+reproduce the `#55` generate speedup by itself. Dispatch is correct
+(`resolve_decode_impl(S)` → blocked when `S>512`), tokens match AUTO=0, and
+`aten::cat=0`.
+
+#### Contrast — `IMPL=blocked` vs eager (AUTO off; cold+decode)
+
+Same cfg; `--mode impls --impls eager,blocked`:
+
+| prompt | new | eager ms | blocked ms | blk/eager | match | cats |
+|--------|-----|----------|------------|-----------|-------|------|
+| 1024 | 8 | 247.51 | 216.26 | **1.14×** | yes | 0 |
+| 2048 | 8 | 872.90 | 717.08 | **1.22×** | yes | 0 |
+
+This **does** recover the `#55` direction (blocked tiles prefill **and** decode).
+Tip numbers are lower than `#55`’s ~1.56× @ prompt=1024 (different tip / variance)
+but the structural story holds: long-S **IMPL=blocked** wins e2e; **AUTO alone**
+does not on CPU when new-token count is small relative to prefill.
+
+### Verdict
+
+| Claim | Result (CPU tip `962a3b6`) |
+|-------|----------------------------|
+| AUTO fires at long S | **Yes** — decode@S=blocked for S∈{1024,2048}; eager for S=256 |
+| Tokens / cat invariant | **Yes** — match AUTO=0; `aten::cat=0` |
+| E2E AUTO wall win | **No on this box** — ~0.95–1.00×; prefill dominates |
+| `#55` IMPL=blocked e2e | **Yes direction** — 1.14× @1024, 1.22× @2048 |
+| GPU | **Unmeasured** — re-tune `BDH_ATTN_AUTO_THRESHOLD` on A100/H100 |
+
+Defaults unchanged (`BDH_ATTN_AUTO` off, `BDH_ATTN_IMPL=eager`). Do **not** claim
+GPU wins from these CPU medians.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_attn_auto.py tests/test_gen_sample.py -q
+# 24 passed
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` / threshold
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No fake GPU speedups from CPU medians
+- No claiming AUTO e2e wall win when measured ~parity
