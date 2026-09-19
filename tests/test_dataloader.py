@@ -141,6 +141,49 @@ def test_batch_prefetcher_cpu_staging_opt_in_preserves_batch_identity(tr, monkey
         loader.close()
 
 
+def test_batch_prefetcher_cpu_staging_opt_in_preserves_async_identity(
+    tr, monkeypatch
+):
+    """CPU H2D opt-in stays identity-only across queued async batches."""
+    batches = [
+        (
+            torch.zeros((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64),
+            torch.ones((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64),
+        ),
+        (
+            torch.full((tr.BATCH_SIZE, tr.BLOCK_SIZE), 2, dtype=torch.int64),
+            torch.full((tr.BATCH_SIZE, tr.BLOCK_SIZE), 3, dtype=torch.int64),
+        ),
+        (
+            torch.full((tr.BATCH_SIZE, tr.BLOCK_SIZE), 4, dtype=torch.int64),
+            torch.full((tr.BATCH_SIZE, tr.BLOCK_SIZE), 5, dtype=torch.int64),
+        ),
+    ]
+    batch_iter = iter(batches)
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("CPU H2D path must not construct CUDA stream/event objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    monkeypatch.setattr(
+        tr.BatchPrefetcher,
+        "_gather_pinned_host",
+        lambda self: next(batch_iter),
+    )
+    loader = tr.BatchPrefetcher("train", async_host=True, cuda_staging=True)
+    try:
+        first_x, first_y = loader.next()
+        second_x, second_y = loader.next()
+        assert loader._cuda_staging is False
+        assert loader._stream is None
+        assert loader._device_next is None
+        assert first_x is batches[0][0] and first_y is batches[0][1]
+        assert second_x is batches[1][0] and second_y is batches[1][1]
+    finally:
+        loader.close()
+
+
 def test_batch_prefetch_defaults_unchanged(tr):
     """The H2D and host-prefetch defaults remain enabled; CPU still no-ops H2D."""
     assert tr.USE_PREFETCH_ASYNC is True
