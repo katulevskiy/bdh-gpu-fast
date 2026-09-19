@@ -21,6 +21,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 - Experimental sparse ReLU matmul (default off)
 - CUDA extension scaffold for tril score×V (optional build)
 - Weight layout: `(B,T,nh,N)` encoder einsum, decoder view+`F.linear`, optional bias fuse (`opt/weight-layout`)
+- CUDA/C++ decode vs packed KR/V under `BDH_ATTN_IMPL=cuda` (scaffold; CPU ref always)
 
 ## Ranked next work
 

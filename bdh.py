@@ -130,10 +130,10 @@ class Attention(torch.nn.Module):
         ``kernels.attention_dispatch.bdh_attn`` according to ``BDH_ATTN_IMPL``
         (``eager`` | ``blocked`` | ``triton`` | ``cuda``; default ``eager``).
 
-        Cached / incremental path: always eager PyTorch matmuls. Custom
-        kernels (blocked/triton/cuda) do not yet support incremental decode,
-        so ``generate()`` only applies ``BDH_ATTN_IMPL`` on the cold prefill
-        when the cache is empty; decode steps stay eager.
+        Cached / incremental T=1 decode: ``eager`` keeps the two-GEMM form;
+        ``blocked`` / ``triton`` / ``cuda`` use ``bdh_attn_decode`` against
+        packed past KR/V (``cuda`` → ``kernels.cuda_attn.tril_decode``).
+        Default remains ``eager``.
         """
         assert K is Q
         B, nh, T, _ = Q.size()
@@ -165,7 +165,7 @@ class Attention(torch.nn.Module):
 
         if T == 1:
             # Hot decode: attend only to past (j < i). New token does not attend
-            # to itself. blocked/triton use tiled decode vs packed KR/V slices
+            # to itself. blocked/triton/cuda use decode vs packed KR/V slices
             # (no full TxT); eager keeps the simple two-GEMM form.
             if impl == "eager":
                 scores = QR @ past_kr.mT  # (B, nh, 1, S)

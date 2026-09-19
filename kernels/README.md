@@ -26,8 +26,9 @@ export BDH_ATTN_IMPL=cuda
 ```
 
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
-The KV-cache / `generate()` decode path stays **eager** — custom kernels do not
-yet support incremental attention.
+T=1 decode against packed past KR/V uses `bdh_attn_decode` when
+`BDH_ATTN_IMPL` is `blocked` / `triton` / `cuda` (`cuda` → `tril_decode`).
+Default remains **eager**.
 
 ## Modules
 
@@ -36,14 +37,16 @@ yet support incremental attention.
 | `attention.py` | `eager_tril_attn`, `blocked_tril_attn`, `triton_tril_attn` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `resolve_attn_impl()` |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`) |
-| `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref |
+| `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU ref (full + decode) |
 
 ## Python API (`kernels/cuda_attn.py`)
 
 | Symbol | Role |
 |--------|------|
-| `tril_score_v_ref(q,k,v)` | Pure PyTorch reference — **always works** (CPU/CUDA tensors) |
+| `tril_score_v_ref(q,k,v)` | Pure PyTorch full tril score×V — **always works** |
 | `tril_score_v(q,k,v)` | Native ext if built, else reference |
+| `tril_decode_ref(q,k_past,v)` | Pure PyTorch decode vs packed past — **always** |
+| `tril_decode(q,k_past,v)` | Native decode ext if built, else reference |
 | `has_cuda_ext()` / `has_cuda_kernel()` | Capability probes |
 
 ## Optional native build (`csrc/`)

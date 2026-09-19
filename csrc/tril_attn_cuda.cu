@@ -90,3 +90,97 @@ torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
+
+// Decode scaffold: one thread per (b,h,i,d_v).
+// out[b,h,i,d] = sum_{j=0}^{S-1} (sum_e Q[b,h,i,e]*K[b,h,j,e]) * V[b,hv,j,d]
+// Q:(B,H,Tq,Dk) K:(B,H,S,Dk) V:(B,Hv,S,Dv). Past-only → no self-attend.
+template <typename scalar_t>
+__global__ void tril_decode_kernel(
+    const scalar_t* __restrict__ Q,
+    const scalar_t* __restrict__ K,
+    const scalar_t* __restrict__ V,
+    scalar_t* __restrict__ Out,
+    int B, int H, int Tq, int S, int Dk, int Dv, int Hv) {
+  const int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int64_t n = (int64_t)B * H * Tq * Dv;
+  if (idx >= n) return;
+
+  const int d = idx % Dv;
+  int tmp = idx / Dv;
+  const int i = tmp % Tq;
+  tmp /= Tq;
+  const int h = tmp % H;
+  const int b = tmp / H;
+
+  if (S == 0) {
+    Out[idx] = scalar_t(0);
+    return;
+  }
+
+  const int hv = (Hv == 1) ? 0 : h;
+  scalar_t acc = scalar_t(0);
+  const int64_t q_base = (((int64_t)b * H + h) * Tq + i) * Dk;
+
+  for (int j = 0; j < S; ++j) {
+    scalar_t score = scalar_t(0);
+    const int64_t k_base = (((int64_t)b * H + h) * S + j) * Dk;
+    for (int e = 0; e < Dk; ++e) {
+      score += Q[q_base + e] * K[k_base + e];
+    }
+    const int64_t v_base = (((int64_t)b * Hv + hv) * S + j) * Dv;
+    acc += score * V[v_base + d];
+  }
+  Out[idx] = acc;
+}
+
+torch::Tensor tril_decode_cuda(torch::Tensor q, torch::Tensor k_past, torch::Tensor v_past) {
+  TORCH_CHECK(q.is_cuda() && k_past.is_cuda() && v_past.is_cuda(), "CUDA tensors required");
+  TORCH_CHECK(q.dim() == 4 && k_past.dim() == 4 && v_past.dim() == 4, "q,k,v must be 4D");
+  TORCH_CHECK(q.size(0) == k_past.size(0) && q.size(1) == k_past.size(1),
+              "q and k_past batch/heads must match");
+  TORCH_CHECK(q.size(3) == k_past.size(3), "Dk must match");
+  TORCH_CHECK(v_past.size(0) == q.size(0) && v_past.size(2) == k_past.size(2),
+              "v_past batch/seq must match k_past");
+  TORCH_CHECK(v_past.size(1) == q.size(1) || v_past.size(1) == 1,
+              "v heads must match or broadcast");
+
+  const auto B = q.size(0);
+  const auto H = q.size(1);
+  const auto Tq = q.size(2);
+  const auto S = k_past.size(2);
+  const auto Dk = q.size(3);
+  const auto Dv = v_past.size(3);
+  const auto Hv = v_past.size(1);
+
+  auto qc = q.contiguous();
+  auto kc = k_past.contiguous();
+  auto vc = v_past.contiguous();
+  auto out = torch::empty({B, H, Tq, Dv}, qc.options());
+
+  if (S == 0) {
+    out.zero_();
+    return out;
+  }
+
+  const int64_t n = B * H * Tq * Dv;
+  const int threads = 256;
+  const int blocks = static_cast<int>((n + threads - 1) / threads);
+
+  const at::cuda::CUDAGuard guard(qc.device());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, qc.scalar_type(),
+      "tril_decode_cuda",
+      [&] {
+        tril_decode_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+            qc.data_ptr<scalar_t>(),
+            kc.data_ptr<scalar_t>(),
+            vc.data_ptr<scalar_t>(),
+            out.data_ptr<scalar_t>(),
+            (int)B, (int)H, (int)Tq, (int)S, (int)Dk, (int)Dv, (int)Hv);
+      });
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}

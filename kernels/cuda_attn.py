@@ -7,10 +7,19 @@ Semantics (must match bdh.Attention cold path):
 
 No softmax, no 1/sqrt(d) scale, diagonal EXCLUDED.
 
+Decode (packed past KR/V — matches incremental / CacheManager hot path)::
+
+    out = (Q @ K_past.transpose(-2, -1)) @ V_past
+
+Past slices exclude the new token, so the query never attends to itself
+(same as ``tril(diagonal=-1)``).
+
 Public API
 ----------
-tril_score_v_ref(q, k, v)  — pure PyTorch CPU/GPU reference (always available)
-tril_score_v(q, k, v)      — native ext if built+compatible, else reference
+tril_score_v_ref(q, k, v)       — pure PyTorch full tril score×V (always)
+tril_score_v(q, k, v)           — native ext if built+compatible, else ref
+tril_decode_ref(q, k_past, v)   — pure PyTorch decode vs packed past (always)
+tril_decode(q, k_past, v)       — native ext if built, else ref
 
 Optional native build (scaffold in ``csrc/``)::
 
@@ -87,9 +96,65 @@ def tril_score_v(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
     return tril_score_v_ref(q, k, v)
 
 
+def tril_decode_ref(
+    q: torch.Tensor, k_past: torch.Tensor, v_past: torch.Tensor
+) -> torch.Tensor:
+    """Pure PyTorch decode vs packed past KR/V (always available).
+
+    Shapes
+    ------
+    q      : (B, H, Tq, Dk)  — typically Tq=1 for autoregressive decode
+    k_past : (B, H, S, Dk)   — packed past keys (length S); excludes q positions
+    v_past : (B, H, S, Dv) or (B, 1, S, Dv)
+    out    : (B, H, Tq, Dv)
+
+    Computes ``(Q @ K_past.mT) @ V_past``. Because K/V are the live cache
+    prefix, every key is strictly earlier than the new queries → no self-attend
+    (same as ``tril(diagonal=-1)``).
+    """
+    if q.dim() != 4 or k_past.dim() != 4 or v_past.dim() != 4:
+        raise ValueError("q, k_past, v_past must be 4D")
+    B, H, Tq, Dk = q.shape
+    S = k_past.size(2)
+    if k_past.shape[:2] != (B, H) or k_past.size(-1) != Dk:
+        raise ValueError(
+            f"k_past shape {tuple(k_past.shape)} incompatible with q {tuple(q.shape)}"
+        )
+    if v_past.size(0) != B or v_past.size(2) != S:
+        raise ValueError(f"v_past shape {tuple(v_past.shape)} incompatible with k_past S={S}")
+    if v_past.size(1) not in (1, H):
+        raise ValueError("v_past heads must equal q heads or 1")
+
+    Dv = v_past.size(-1)
+    if S == 0:
+        return q.new_zeros(B, H, Tq, Dv)
+
+    if v_past.size(1) == 1 and H != 1:
+        vh = v_past.expand(B, H, S, Dv)
+    else:
+        vh = v_past
+    return (q @ k_past.transpose(-2, -1)) @ vh
+
+
+def tril_decode(
+    q: torch.Tensor, k_past: torch.Tensor, v_past: torch.Tensor
+) -> torch.Tensor:
+    """Dispatch decode: native CUDA/C++ ext when available, else ref."""
+    if _ext is not None and hasattr(_ext, "tril_decode"):
+        try:
+            if q.is_cuda and has_cuda_kernel():
+                return _ext.tril_decode(q, k_past, v_past)
+            if not q.is_cuda:
+                return _ext.tril_decode(q, k_past, v_past)
+        except Exception:
+            pass
+    return tril_decode_ref(q, k_past, v_past)
+
+
 def ext_status() -> str:
     """Human-readable status for logs / OPT_NOTES."""
     if _ext is None:
         return f"native=unavailable ({type(_ext_load_error).__name__}: {_ext_load_error})"
     cuda = "yes" if has_cuda_kernel() else "no"
-    return f"native=loaded has_cuda_kernel={cuda}"
+    decode = "yes" if hasattr(_ext, "tril_decode") else "no"
+    return f"native=loaded has_cuda_kernel={cuda} has_decode={decode}"
