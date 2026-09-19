@@ -88,6 +88,32 @@ def test_online_blocked_grad_matches_eager_for_distinct_qk():
             assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
 
 
+def test_online_blocked_grad_matches_eager_for_aliased_self_qk():
+    """Score×V must accumulate Q and K gradients when Q is K."""
+    Q, _, V = _make_qkv(
+        B=2, H=3, T=19, N=7, D=5, seed=51, dtype=torch.float64
+    )
+    g = torch.Generator(device="cpu").manual_seed(52)
+    dO = torch.randn(2, 3, 19, 5, generator=g, dtype=Q.dtype)
+
+    def run(fn):
+        q = Q.detach().clone().requires_grad_(True)
+        v = V.detach().clone().requires_grad_(True)
+        if fn is eager_tril_attn:
+            out = fn(q, q, v)
+        else:
+            out = fn(q, q, v, block_size=7)
+        out.backward(dO)
+        return out.detach(), q.grad.detach(), v.grad.detach()
+
+    ref, ref_q_grad, ref_v_grad = run(eager_tril_attn)
+    for fn in (blocked_tril_attn, online_tril_attn):
+        got, got_q_grad, got_v_grad = run(fn)
+        assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10)
+        assert torch.allclose(got_q_grad, ref_q_grad, rtol=1e-9, atol=1e-9)
+        assert torch.allclose(got_v_grad, ref_v_grad, rtol=1e-9, atol=1e-9)
+
+
 def test_pos0_zero_and_no_softmax():
     Q, K, V = _make_qkv(T=12, seed=11)
     out = online_tril_attn(Q, K, V, block_size=5)
