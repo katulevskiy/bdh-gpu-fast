@@ -235,6 +235,60 @@ def _tiled_score_v(
 _STREAM_SCORE_ELEMS = 4096  # if Bi*Bj exceeds this, stream query rows (bound peak)
 
 
+def _blocked_cpu_bmm(
+    Qf: torch.Tensor,
+    Kf: torch.Tensor,
+    Vhf: torch.Tensor,
+    *,
+    B: int,
+    H: int,
+    T: int,
+    D: int,
+    BS: int,
+    score_budget: int,
+) -> torch.Tensor:
+    """CPU cold path using one flattened ``B*H`` bmm batch.
+
+    4-D ``matmul`` is convenient, but on CPU it can pay a broadcast/head
+    iterator cost for every score and score×V tile. Long cold inputs are
+    already staging tiles, so flattening heads once makes both GEMMs use the
+    same dense bmm batch. A broadcast V is expanded once here (rather than
+    once per tile); the score tile is still ephemeral and never ``T×T``.
+    """
+    BH = B * H
+    Qb = Qf.reshape(BH, T, Qf.size(-1))
+    Kb = Kf.reshape(BH, T, Kf.size(-1))
+    Vb = Vhf.expand(B, H, T, D).reshape(BH, T, D)
+    out = torch.zeros(BH, T, D, device=Qf.device, dtype=Qf.dtype)
+
+    for i0 in range(0, T, BS):
+        i1 = min(i0 + BS, T)
+        Qi = Qb[:, i0:i1, :]
+        Bi = i1 - i0
+        target = out[:, i0:i1, :]
+
+        if i0 > 0:
+            if Bi * i0 <= score_budget:
+                scores = torch.bmm(Qi, Kb[:, :i0, :].transpose(1, 2))
+                target.copy_(torch.bmm(scores, Vb[:, :i0, :]))
+            else:
+                tile = max(BS, score_budget // max(Bi, 1))
+                for j0 in range(0, i0, tile):
+                    j1 = min(j0 + tile, i0)
+                    scores = torch.bmm(
+                        Qi, Kb[:, j0:j1, :].transpose(1, 2)
+                    )
+                    target.add_(torch.bmm(scores, Vb[:, j0:j1, :]))
+
+        if Bi > 1:
+            scores = torch.bmm(Qi, Kb[:, i0:i1, :].transpose(1, 2))
+            # Fuse the mask in-place: scores is consumed immediately by ×V.
+            scores.tril_(diagonal=-1)
+            target.add_(torch.bmm(scores, Vb[:, i0:i1, :]))
+
+    return out.view(B, H, T, D)
+
+
 def pick_cold_block_size(T: int, block_size: int | None = None) -> int:
     """Cold blocked/online query-tile width.
 
@@ -384,7 +438,8 @@ def blocked_tril_attn(
       ``(Qi @ K[:,:,:i0].mT) @ V[:,:,:i0]`` when ``Bi·i0`` fits the score
       budget; otherwise chunked bmm under the same budget. Ephemeral scores
       are ``Bi × chunk``, never ``T × T``. Broadcast ``V=(B,1,T,D)`` stays
-      unexpanded (matmul broadcasts heads — same as decode-online).
+      unexpanded on the device-generic path; the CPU long-T bmm path expands
+      it once while flattening heads.
     * **Diagonal** — ``Bi × Bi`` scores with ``tril(diagonal=-1)`` then ``@ Vi``
       (torch ops, not a Python row loop); ``out.add_`` into the past accum.
 
@@ -404,7 +459,7 @@ def blocked_tril_attn(
     """
     B, H, T, N = Q.shape
     D = V.shape[-1]
-    # Keep broadcast V as (B,1,T,D) — matmul broadcasts heads; no expand copy.
+    # Keep broadcast V as (B,1,T,D) until the CPU long-T bmm path stages it.
     Vh = V if (V.size(1) == 1 or V.size(1) == H) else _expand_v_heads(V, B, H, T, D)
 
     # Accumulate in a stable float: widen half/bfloat16 to fp32; keep f32/f64
@@ -417,12 +472,29 @@ def blocked_tril_attn(
     Qf = Q if Q.dtype == acc_dtype else Q.to(dtype=acc_dtype)
     Kf = K if K.dtype == acc_dtype else K.to(dtype=acc_dtype)
     Vhf = Vh if Vh.dtype == acc_dtype else Vh.to(dtype=acc_dtype)
-    out = torch.zeros(B, H, T, D, device=Q.device, dtype=acc_dtype)
     BS = pick_cold_block_size(T, block_size)
     # Allow a Bi×past score tile up to this many elems before chunking.
     # Still ≪ T×T for mid/long T (adaptive budget at T>=256).
     score_budget = _cold_score_budget(T, BS)
 
+    # On CPU, flatten the head batch for long cold inputs. This removes the
+    # repeated 4-D broadcast iterator from the critical path; short inputs
+    # stay on the existing path so staging cannot dominate their wall time.
+    if Q.device.type == "cpu" and T >= 256:
+        out = _blocked_cpu_bmm(
+            Qf,
+            Kf,
+            Vhf,
+            B=B,
+            H=H,
+            T=T,
+            D=D,
+            BS=BS,
+            score_budget=score_budget,
+        )
+        return out.to(dtype=Q.dtype) if out.dtype != Q.dtype else out
+
+    out = torch.zeros(B, H, T, D, device=Q.device, dtype=acc_dtype)
     for i0 in range(0, T, BS):
         i1 = min(i0 + BS, T)
         Qi = Qf[:, :, i0:i1, :]

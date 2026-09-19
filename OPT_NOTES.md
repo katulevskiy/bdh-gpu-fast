@@ -4854,3 +4854,54 @@ CPU.
 → gather 0.069 ms, synthetic overlap 1.56×, tiny train loop sync 1.999 ms vs
 async 2.180 ms. These are CPU smoke/noise measurements; GPU H2D overlap and
 throughput remain unmeasured.
+
+## opt/blocked-tile-v2 — flatten long CPU cold heads (2026-09-19)
+
+**Branch:** `opt/blocked-tile-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `7ff9b15` (`main` / prefetch-h2d; rebased before PR).
+
+### Goal and audit
+
+The existing blocked/online cold path already avoided a full `T×T` score matrix,
+but its long-CPU critical path still used 4-D `matmul` for every past/diagonal
+tile. With broadcast `V=(B,1,T,D)`, each tile paid the head-broadcast iterator
+again; the score mask also allocated a second tensor.
+
+### What changed
+
+- `kernels/attention.py`: for CPU `T >= 256`, flatten `(B,H)` once and run
+  dense `torch.bmm` for score and score×V tiles; broadcast V is expanded once
+  for this staging path.
+- Chunked past accumulation uses in-place `add_`; diagonal scores use
+  `tril_(-1)` before the fused score×V bmm.
+- `T < 256` and CUDA retain the existing device-generic path; `BDH_ATTN_IMPL`,
+  `BDH_ATTN_AUTO`, and default eager behavior are unchanged.
+
+Strict `tril(diagonal=-1)` raw-score semantics remain unchanged; position 0 is
+zero and no softmax/scale/SDPA was introduced.
+
+### Correctness and honest CPU bench
+
+```text
+python -m pytest tests/test_prefill_blocked.py tests/test_fuse_scorev.py \
+  tests/test_attn_mem.py tests/test_attn_auto.py -q
+# 69 passed
+
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python benchmarks/bench_blocked_vec.py
+# torch 2.14.0+cu130, cuda=False, B=1 H=2 N=32 D=64
+# T=32:   eager 0.016 ms, blocked 0.029 ms (0.56x)
+# T=64:   eager 0.029 ms, blocked 0.042 ms (0.69x)
+# T=128:  eager 0.066 ms, blocked 0.119 ms (0.56x)
+# T=256:  eager 0.216 ms, blocked 0.174 ms (1.25x)
+# T=512:  eager 1.747 ms, blocked 0.437 ms (4.00x)
+# T=1024: eager 8.183 ms, blocked 1.395 ms (5.87x)
+```
+
+This is a CPU-only, single-thread microbench: blocked/online still loses on
+short T, and no GPU speedup is claimed. Default `BDH_ATTN_IMPL` remains eager.
+
+### Non-goals
+
+- No public or `pathwaycom/*` PRs
+- No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change
+- No full score materialization, softmax, scale, or diagonal inclusion
