@@ -6197,3 +6197,39 @@ hardware, GPU correctness, or speedup claim is made.
 
 - No default eager, attention math, cache, or generate behavior change.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+
+## opt/prefetch-h2d-v2 — make the CPU no-op contract explicit (2026-09-19)
+
+**Branch:** `opt/prefetch-h2d-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `da664ec` (`#138` rope-gpu-v2, after `#137`). No public PR.
+
+### Audit / deepen
+
+The H2D staging flag remains unchanged (`BDH_PREFETCH_H2D=1` and
+`BDH_PREFETCH_ASYNC=1`). `BatchPrefetcher` now documents and tests the CPU
+contract explicitly: the flag is gated by `device.type` before any CUDA stream
+or event is constructed, the staged-device lookahead stays absent, and the
+CPU transfer preserves the original tensor objects rather than adding a copy or
+synchronization point. The constructor override is covered for unset/default,
+`False`, and `True` values.
+
+No attention or training math changed: attention remains raw scores × strict
+`tril(diagonal=-1)`. Prefetch remains opt-in to the existing harness; no GPU
+throughput, overlap, or correctness claim is made.
+
+### CPU-safe validation
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/test_dataloader.py -q
+# 17 passed, 1 skipped
+
+OMP_NUM_THREADS=2 /workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/ -q
+# 539 passed, 19 skipped, 3 warnings in 69.09s
+```
+
+### Non-goals
+
+- No default prefetch or H2D flag changes.
+- No GPU timing or throughput claims.
+- No public PR and no PRs to `pathwaycom/*`.

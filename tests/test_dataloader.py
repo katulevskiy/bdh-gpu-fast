@@ -81,17 +81,28 @@ def test_to_train_device_cpu_passthrough(tr):
     assert torch.equal(x, xd) and torch.equal(y, yd)
 
 
-def test_batch_prefetcher_cuda_staging_is_cpu_noop(tr):
-    """The CUDA opt-in must not create streams or alter CPU semantics."""
-    loader = tr.BatchPrefetcher("train", cuda_staging=True)
+@pytest.mark.parametrize("cuda_staging", [None, False, True])
+def test_batch_prefetcher_cuda_staging_is_cpu_noop(tr, cuda_staging):
+    """Every H2D setting is a CPU identity path with no stream/lookahead."""
+    loader = tr.BatchPrefetcher("train", cuda_staging=cuda_staging)
     try:
         assert loader._cuda_staging is False
         assert loader._stream is None
+        assert loader._device_next is None
+        host_x, host_y = tr._gather_batch_host("val")
+        device_x, device_y = loader._to_device(host_x, host_y)
+        assert device_x is host_x and device_y is host_y
         x, y = loader.next()
         assert x.device.type == "cpu" and y.device.type == "cpu"
         assert torch.equal(x[:, 1:], y[:, :-1])
     finally:
         loader.close()
+
+
+def test_batch_prefetch_defaults_unchanged(tr):
+    """The H2D and host-prefetch defaults remain enabled; CPU still no-ops H2D."""
+    assert tr.USE_PREFETCH_ASYNC is True
+    assert tr.USE_PREFETCH_H2D is True
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for H2D staging")

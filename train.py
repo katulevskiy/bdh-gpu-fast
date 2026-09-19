@@ -366,7 +366,9 @@ class BatchPrefetcher:
     the async path keeps one device batch staged ahead on a side stream and
     waits on a recorded event only when that batch is consumed. Set the flag to
     ``0`` to retain host prefetch but use the caller stream for H2D.
-    CPU: producer does gather; caller ``.to(device)`` (no-op copy elision).
+    CPU: producer does gather; caller ``.to(device)`` is an identity transfer.
+    The H2D opt-in is deliberately a no-op here: no CUDA stream/event or
+    staged device tuple is created, and the CPU tensors stay on the CPU.
 
     Sync mode (``BDH_PREFETCH_ASYNC=0`` or ``async_host=False``): same one-slot
     API but preload runs on the caller thread (A/B / debug).
@@ -389,8 +391,9 @@ class BatchPrefetcher:
         requested_cuda_staging = (
             USE_PREFETCH_H2D if cuda_staging is None else bool(cuda_staging)
         )
-        # Never create a CUDA stream merely because the opt-in flag is set: CPU
-        # tests and CPU-only deployments must remain a clean no-op.
+        # Gate the opt-in by the actual device before constructing any CUDA
+        # object. On CPU this keeps the stream/event path and device lookahead
+        # as clean no-ops, even when BDH_PREFETCH_H2D=1 (the default).
         self._cuda_staging = bool(requested_cuda_staging and device.type == "cuda")
         self._stream = (
             torch.cuda.Stream(device=device) if self._cuda_staging else None
@@ -481,7 +484,12 @@ class BatchPrefetcher:
     def _to_device(
         self, x: torch.Tensor, y: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Caller-thread transfer; CUDA staging is enabled only when requested."""
+        """Caller-thread transfer; CUDA staging is opt-in and CPU is identity.
+
+        Keeping the CPU branch on ``_to_train_device`` is intentional: its
+        same-device ``.to`` calls preserve tensor identity, so enabling the
+        CUDA flag cannot add a CPU copy or synchronization point.
+        """
         if self._cuda_staging:
             return self._wait_staged(self._stage_to_device(x, y))
         return _to_train_device(x, y)
