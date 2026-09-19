@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#152)
+# OPT status — landed work (#1–#154)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `d60380f` (`#152` generate copy-ceiling probe after `#151` docs refresh through #149 and `#150` Triton cold-v4 CPU-safe skip diagnostics; `#150` Triton cold-v4; `#149` AUTO threshold sweep smoke; `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #152; #150 reports the import/device gate without allocating CUDA tensors or launching kernels during pytest collection, with this CPU box reporting `CUDA unavailable: torch.cuda.is_available() is false`; #151 is docs-only; and #152 confirms the remaining default-eager generate copy ceiling without changing cache ownership, RNG behavior, or strict raw `tril` semantics. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. #150, #151, and #152 add no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `6d2dff9` (`#154` rope-fuse-v3 reuses warmed T>1 table-backed RoPE narrows after `#153` docs refresh through #152; `#152` generate copy-ceiling probe after `#151` docs refresh through #149 and `#150` Triton cold-v4 CPU-safe skip diagnostics; `#150` Triton cold-v4; `#149` AUTO threshold sweep smoke; `#148` docs refresh through #147; `#147` online-decode; `#146` cuda-cold-v4 CPU-safe skip clarification; `#145` sparse probe exit codes; `#144` profile-v14). The landed matrix below is aligned through #154; #150 reports the import/device gate without allocating CUDA tensors or launching kernels during pytest collection, with this CPU box reporting `CUDA unavailable: torch.cuda.is_available() is false`; #151 and #153 are docs-only; #152 confirms the remaining default-eager generate copy ceiling without changing cache ownership, RNG behavior, or strict raw `tril` semantics; and #154 reuses the warmed T>1 RoPE table narrow while preserving the eager default and CPU parity. Profile-v14 remains flat versus profile-v13 on the short CPU window: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #145 makes sparse-probe success and guardrail-failure outcomes scriptable without enabling sparse production behavior. #150–#154 add no GPU timing or speedup evidence, so real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#152)
+## Landed opts (#1–#154)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -331,6 +331,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **150** | `opt/triton-cold-v4` | Add `triton_cold_skip_reason()` for actionable CPU-safe cold Triton import/device diagnostics without CUDA allocation or launch; preserve strict raw `tril(-1)`, eager defaults, AUTO-off behavior, and CPU blocked fallback | CPU targeted: 127 passed, 6 skipped; full suite: 548 passed, 19 skipped, 3 warnings; cold skips report `CUDA unavailable: torch.cuda.is_available() is false` | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **151** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #149 on the #150 tip | Docs only | —
 | **152** | `opt/gen-copy-v2` | Confirm the post-#110 default-eager generate copy ceiling: packed V snapshots, RoPE pair stores, prompt ownership, and ATen multinomial internals remain accounted for; preserve cat-free output, token parity, and strict raw `tril` semantics | CPU: 554 passed, 19 skipped, 3 warnings; focused copy/parity suite: 91 passed, 2 skipped; generate remains ~394 `copy_`/call with `cat=0` | **P0** GPU measure / copy-tax impact remains open |
+| **153** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #152 on the #154 code tip | Docs only | — |
+| **154** | `opt/rope-fuse-v3` | Reuse the warmed T>1 table-backed `(cos, sin)` narrow for callers that do not hoist `cos_sin`; invalidate the view cache when the generate table rebuilds; preserve eager defaults and CPU parity | CPU cache-hit/rebuild parity coverage; no GPU timing | **P0** GPU fused-RoPE validation remains open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
