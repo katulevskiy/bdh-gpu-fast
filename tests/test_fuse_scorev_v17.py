@@ -1,6 +1,7 @@
 """Focused v17 contract coverage for distinct per-head score×V dispatch.
 
-This stays CPU-safe: it exercises only the blocked/online PyTorch paths.
+This stays CPU-safe: it exercises PyTorch paths and CPU fallbacks for every
+public dispatch alias.
 """
 
 from __future__ import annotations
@@ -17,9 +18,9 @@ sys.path.insert(0, str(ROOT))
 from kernels.attention_dispatch import bdh_attn  # noqa: E402
 
 
-@pytest.mark.parametrize("impl", ["blocked", "online"])
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
 def test_dispatch_preserves_raw_score_contract_for_distinct_qk_and_per_head_v(impl):
-    """Dispatch must preserve distinct Q/K and per-head V without softmax."""
+    """Dispatch fallbacks must preserve distinct Q/K and per-head V."""
     Q = torch.tensor(
         [
             [
