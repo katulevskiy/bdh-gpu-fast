@@ -129,6 +129,47 @@ def test_backward_probe_without_targets_preserves_training_grads(
     assert "no backward probe was attempted" in captured
 
 
+def test_unknown_probe_name_defaults_to_backward_contract(monkeypatch, capsys):
+    """An unknown probe setting keeps the safe backward-probe contract."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "unexpected")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    class UnexpectedProbe(torch.nn.Module):
+        def forward(self, *args, **kwargs):
+            raise AssertionError("the backward probe should require targets")
+
+    def compile_spy(model, **kwargs):
+        compile_kwargs.update(kwargs)
+        return UnexpectedProbe()
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    model = bdh.BDH(_small_cfg()).train()
+    x = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert out is model
+    assert out.training
+    assert "probe=train_bwd requires example_y" in captured
+    assert "probe=train_bwd" in captured
+    assert "probe=unexpected" not in captured
+    assert "no backward probe was attempted" in captured
+
+
 @pytest.mark.parametrize("fullgraph", [False, True])
 @pytest.mark.parametrize("caller_training", [False, True])
 def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
