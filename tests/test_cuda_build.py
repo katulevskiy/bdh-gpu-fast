@@ -433,6 +433,48 @@ def test_forced_cpu_ext_smoke_is_explicit():
     assert "pure-Python install" not in output
 
 
+def test_forced_cpu_ext_overrides_detected_cuda(tmp_path):
+    """CPU-only mode must win even when torch reports CUDA availability."""
+    torch = tmp_path / "torch"
+    cpp_extension = torch / "utils" / "cpp_extension.py"
+    cpp_extension.parent.mkdir(parents=True)
+    (torch / "__init__.py").write_text(
+        "class _Cuda:\n"
+        "    @staticmethod\n"
+        "    def is_available():\n"
+        "        return True\n"
+        "cuda = _Cuda()\n",
+        encoding="utf-8",
+    )
+    (torch / "utils" / "__init__.py").write_text("", encoding="utf-8")
+    cpp_extension.write_text(
+        "from setuptools import Extension\n"
+        "class BuildExtension: ...\n"
+        "def CppExtension(*args, **kwargs):\n"
+        "    return Extension(*args, **kwargs)\n"
+        "def CUDAExtension(*args, **kwargs):\n"
+        "    raise AssertionError('CUDAExtension should not be selected')\n",
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    pythonpath = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_FORCE_CPU_EXT": "1",
+            "PYTHONPATH": pythonpath,
+        }
+    )
+    env.pop("BDH_BUILD_CUDA", None)
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "Building bdh_cuda_ext WITH CUDA" not in output
+    assert "pure-Python install" not in output
+
+
 def test_forced_cpu_ext_takes_precedence_over_cuda_flag():
     """The explicit CPU-only request wins when both native flags are set."""
     env = os.environ.copy()
