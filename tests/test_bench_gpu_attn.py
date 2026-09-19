@@ -35,6 +35,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert summary["schema_version"] == 4
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
+    assert summary["mode"] == "cold"
     assert summary["skips"] == [
         {
             "scope": "run",
@@ -397,6 +398,32 @@ def test_no_cuda_skip_includes_native_cuda_handoff(tmp_path):
     assert "median ms" not in result.stdout
 
 
+def test_no_cuda_decode_skip_preserves_requested_mode(tmp_path):
+    """Decode handoff diagnostics must not silently report the cold default."""
+    summary_path = tmp_path / "decode-summary.json"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--mode",
+            "decode",
+            "--json-out",
+            str(summary_path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    summary = json.loads(summary_path.read_text())
+    assert summary["status"] == "skip"
+    assert summary["mode"] == "decode"
+    assert summary["timing_scope"] == "none"
+    assert "median ms" not in result.stdout
+
+
 def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
     """Cold CUDA skips expose diagnostics without implying a CPU measurement."""
     summary_path = tmp_path / "gpu-summary.json"
@@ -426,6 +453,7 @@ def test_no_cuda_skip_prints_structured_cold_diagnostics(tmp_path):
     assert len(summary_lines) == 1
     assert json.loads(summary_lines[0]) == summary
     assert summary["device"] == "cpu"
+    assert summary["mode"] == "cold"
     assert summary["timing_scope"] == "none"
     assert summary["cuda_available"] is False
     assert summary["gpu_name"] is None
