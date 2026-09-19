@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 10
+    assert summary["schema_version"] == 11
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -48,6 +48,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
             "cuda_built": summary["cuda_built"],
             "cuda_device_count": summary["cuda_device_count"],
             "cuda_device_probe_error": summary["cuda_device_probe_error"],
+            "cuda_available_probe_error": summary["cuda_available_probe_error"],
         }
     ]
     assert summary["timing_scope"] == "none"
@@ -120,6 +121,57 @@ def test_cuda_runtime_diagnostics_survives_device_probe_failure(monkeypatch):
     assert result["cuda_device_count"] == 0
     assert result["cuda_device_probe_error"] == "RuntimeError: driver query failed"
     assert result["cuda_runtime_state"] == "runtime_unavailable"
+
+
+def test_no_cuda_skip_stays_structured_when_availability_probe_fails(
+    monkeypatch, tmp_path, capsys
+):
+    """A failing availability probe remains an honest CPU-safe skip."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+
+    def fail_availability_probe():
+        raise RuntimeError("driver availability failed")
+
+    monkeypatch.setattr(torch.cuda, "is_available", fail_availability_probe)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    summary_path = tmp_path / "availability-failure-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--json-out", str(summary_path)],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    output = capsys.readouterr().out
+
+    assert summary["status"] == "skip"
+    assert summary["reason"] == "cuda_unavailable"
+    assert summary["timing_scope"] == "none"
+    assert summary["cuda_available"] is False
+    assert summary["cuda_available_probe_error"] == (
+        "RuntimeError: driver availability failed"
+    )
+    assert summary["cuda_runtime_state"] == "runtime_unavailable"
+    assert summary["skips"][0]["detail"] == (
+        "torch.cuda.is_available() raised RuntimeError: driver availability failed"
+    )
+    assert summary["skips"][0]["cuda_available_probe_error"] == (
+        "RuntimeError: driver availability failed"
+    )
+    assert summary["backend_info"] == {
+        "status": "unavailable",
+        "detail": "RuntimeError: driver availability failed",
+    }
+    assert "results" not in summary
+    assert "cuda_available_probe_error=RuntimeError: driver availability failed" in output
+    assert "median ms" not in output
 
 
 def test_no_cuda_skip_stays_structured_when_device_probe_fails(
@@ -199,7 +251,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 10
+    assert summary["schema_version"] == 11
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"

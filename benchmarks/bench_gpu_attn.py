@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 10
+SUMMARY_SCHEMA_VERSION = 11
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -120,7 +120,9 @@ def _select_device(*, cuda_available: bool, force_cpu: bool) -> torch.device:
 
 
 def _cuda_runtime_diagnostics(
-    *, cuda_available: bool | None = None
+    *,
+    cuda_available: bool | None = None,
+    cuda_available_probe_error: str | None = None,
 ) -> dict[str, Any]:
     """Return CPU-safe CUDA build/device diagnostics for skip handoffs."""
     cuda_built = bool(torch.backends.cuda.is_built())
@@ -147,8 +149,20 @@ def _cuda_runtime_diagnostics(
         "cuda_built": cuda_built,
         "cuda_device_count": cuda_device_count,
         "cuda_device_probe_error": cuda_device_probe_error,
+        "cuda_available_probe_error": cuda_available_probe_error,
         "cuda_runtime_state": runtime_state,
     }
+
+
+def _backend_info_safe() -> dict[str, Any]:
+    """Keep backend diagnostics from turning a CUDA skip into a crash."""
+    try:
+        return backend_info()
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _skip_summary(
@@ -162,8 +176,18 @@ def _skip_summary(
     dtype: str,
     warmup: int,
     iters: int,
+    cuda_available_probe_error: str | None = None,
 ) -> dict[str, Any]:
-    cuda_runtime = _cuda_runtime_diagnostics(cuda_available=False)
+    cuda_runtime = _cuda_runtime_diagnostics(
+        cuda_available=False,
+        cuda_available_probe_error=cuda_available_probe_error,
+    )
+    skip_detail = "torch.cuda.is_available() is false"
+    if cuda_available_probe_error is not None:
+        skip_detail = (
+            "torch.cuda.is_available() raised "
+            f"{cuda_available_probe_error}"
+        )
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": "skip",
@@ -173,13 +197,16 @@ def _skip_summary(
                 "scope": "run",
                 "status": "skip",
                 "reason": "cuda_unavailable",
-                "detail": "torch.cuda.is_available() is false",
+                "detail": skip_detail,
                 "timing_scope": "none",
                 "cuda_available": False,
                 "cuda_runtime_state": cuda_runtime["cuda_runtime_state"],
                 "cuda_built": cuda_runtime["cuda_built"],
                 "cuda_device_count": cuda_runtime["cuda_device_count"],
                 "cuda_device_probe_error": cuda_runtime["cuda_device_probe_error"],
+                "cuda_available_probe_error": cuda_runtime[
+                    "cuda_available_probe_error"
+                ],
             }
         ],
         "mode": mode,
@@ -200,7 +227,7 @@ def _skip_summary(
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         **cuda_runtime,
-        "backend_info": backend_info(),
+        "backend_info": _backend_info_safe(),
         "commands": {key: list(value) for key, value in BACKLOG_COMMANDS.items()},
     }
 
@@ -286,7 +313,13 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    cuda_ok = torch.cuda.is_available()
+    cuda_available_probe_error: str | None = None
+    try:
+        cuda_ok = bool(torch.cuda.is_available())
+    except Exception as exc:
+        # A failing availability probe must remain a CPU-safe skip handoff.
+        cuda_ok = False
+        cuda_available_probe_error = f"{type(exc).__name__}: {exc}"
     if not cuda_ok and not args.force_cpu:
         summary = _skip_summary(
             mode=args.mode,
@@ -298,6 +331,7 @@ def main() -> int:
             dtype=args.dtype,
             warmup=args.warmup,
             iters=args.iters,
+            cuda_available_probe_error=cuda_available_probe_error,
         )
         print(
             "GPU_ATTN_SKIP status=skip reason=cuda_unavailable device=cpu\n"
@@ -314,6 +348,7 @@ def main() -> int:
             f"cuda_built={summary['cuda_built']}  "
             f"cuda_device_count={summary['cuda_device_count']}  "
             f"cuda_device_probe_error={summary['cuda_device_probe_error']}  "
+            f"cuda_available_probe_error={summary['cuda_available_probe_error']}  "
             f"cuda_runtime_state={summary['cuda_runtime_state']}  "
             f"timing_scope={summary['timing_scope']}  "
             f"backend_info={summary['backend_info']}"
@@ -346,8 +381,11 @@ def main() -> int:
         shape_note = f"cold T={T} N={N} D={D}"
         ref_fn = eager_tril_attn
 
-    info = backend_info()
-    cuda_runtime = _cuda_runtime_diagnostics(cuda_available=cuda_ok)
+    info = _backend_info_safe()
+    cuda_runtime = _cuda_runtime_diagnostics(
+        cuda_available=cuda_ok,
+        cuda_available_probe_error=cuda_available_probe_error,
+    )
     props = torch.cuda.get_device_properties(0) if device.type == "cuda" else None
     gpu_name = props.name if props else "cpu"
     print(f"device={device}  gpu={gpu_name!r}  dtype={dtype}  mode={mode}")
