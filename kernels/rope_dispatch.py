@@ -102,11 +102,16 @@ def bdh_rope_rotate_paired(
 def backend_info(device: torch.device | None = None) -> dict:
     """Small diagnostic for notes / tests."""
     dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    probe = torch.empty(1, device=dev)
+    # Do not ask PyTorch to initialize an unavailable CUDA runtime just to
+    # report that Triton is skipped. This keeps diagnostics CPU-safe on hosts
+    # where Triton is importable but CUDA is not usable.
+    triton_usable = False
+    if dev.type == "cuda" and torch.cuda.is_available():
+        triton_usable = _can_use_triton_rope(torch.empty(1, device=dev))
     return {
         "BDH_ROPE_IMPL": resolve_rope_impl(),
         "has_triton": _HAS_TRITON,
-        "triton_usable": _can_use_triton_rope(probe),
+        "triton_usable": triton_usable,
         "device": str(dev),
     }
 

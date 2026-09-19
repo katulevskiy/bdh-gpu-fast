@@ -288,13 +288,37 @@ def fused_rope_rotate_blocked(
     return out
 
 
-def _can_use_triton_rope(v: torch.Tensor) -> bool:
+_TRITON_ROPE_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
+
+
+def _can_use_triton_rope(
+    v: torch.Tensor,
+    *aux: Optional[torch.Tensor],
+) -> bool:
+    """Return whether the Triton entry is safe for this tensor set.
+
+    The old gate only inspected ``v``. That was sufficient for the CPU
+    scaffold, but a CUDA ``v`` with CPU cis (or an unsupported cis/output
+    dtype) would get as far as the kernel launch and fail with a less useful
+    device/dtype error. Keep the gate conservative: the pure-PyTorch fused
+    path remains the safe fallback until the caller supplies matching CUDA
+    tensors in a Triton-supported dtype.
+    """
     if not _HAS_TRITON:
         return False
-    if not v.is_cuda:
+    if not isinstance(v, torch.Tensor) or not v.is_cuda:
         return False
     if not torch.cuda.is_available():
         return False
+    if v.dtype not in _TRITON_ROPE_DTYPES:
+        return False
+    for tensor in aux:
+        if tensor is None:
+            continue
+        if not isinstance(tensor, torch.Tensor):
+            return False
+        if tensor.device != v.device or tensor.dtype not in _TRITON_ROPE_DTYPES:
+            return False
     return True
 
 
@@ -527,7 +551,7 @@ def fused_rope_rotate_triton(
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """CUDA Triton fused rotate; CPU → blocked tile scaffold (then same math)."""
-    if not _can_use_triton_rope(v):
+    if not _can_use_triton_rope(v, cos, sin, out):
         # Scaffold deepen: tile-structured CPU path mirrors kernel BLOCK loop.
         return fused_rope_rotate_blocked(v, cos, sin, out=out)
     # out= + autograd: run Function then copy if needed
@@ -551,7 +575,7 @@ def fused_rope_rotate_paired(
     CPU and unavailable-Triton paths intentionally reuse ``rope_rotate_paired``
     for exact parity. This is opt-in; the default eager backend does not call it.
     """
-    if not _can_use_triton_rope(v):
+    if not _can_use_triton_rope(v, cos_p, sin_p, out):
         return rope_rotate_paired(v, cos_p, sin_p, out=out)
     if v.requires_grad or (isinstance(v, torch.Tensor) and v.grad_fn is not None):
         y = _TritonRopePairedFn.apply(v, cos_p, sin_p)
@@ -574,6 +598,6 @@ def fused_rope_rotate(
     (no expand / no stack). Triton entry falls back to ``blocked`` for tile
     parity when CUDA is unavailable.
     """
-    if _can_use_triton_rope(v):
+    if _can_use_triton_rope(v, cos, sin, out):
         return fused_rope_rotate_triton(v, cos, sin, out=out)
     return fused_rope_rotate_pytorch(v, cos, sin, out=out)
