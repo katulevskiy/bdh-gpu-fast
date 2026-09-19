@@ -481,6 +481,29 @@ def test_forced_cpu_ext_precedes_valid_nvcc(tmp_path):
 
 
 @pytest.mark.parametrize("value", ["0", "true", "yes"])
+def test_non_one_cuda_flag_does_not_select_cuda_setup(value):
+    """Only the exact BDH_BUILD_CUDA=1 value may select CUDA setup."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": value,
+            "CUDA_HOME": str(ROOT / ".missing-cuda-home"),
+            "CUDA_PATH": str(ROOT / ".missing-cuda-path"),
+            # Keep this contract deterministic on hosts with a visible GPU.
+            "CUDA_VISIBLE_DEVICES": "",
+        }
+    )
+    env.pop("BDH_FORCE_CPU_EXT", None)
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "Building bdh_cuda_ext WITH CUDA" not in output
+    assert "skipping CUDA extension build" not in output
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes"])
 def test_non_one_extension_flag_remains_pure_python_noop(value):
     """Only the exact opt-in value may enter native extension setup."""
     env = os.environ.copy()
