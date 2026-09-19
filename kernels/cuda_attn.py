@@ -395,6 +395,9 @@ def tril_score_v(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
     for large T (mirrors CUDA scaffold; avoids full T×T staging). Small T uses
     the golden eager ref (bit-identical, fewer Python trips).
     """
+    # Validate before optional native dispatch so malformed inputs have the
+    # same CPU-safe contract regardless of extension availability.
+    _check_cold_shapes(q, k, v)
     if _ext is not None:
         try:
             if q.is_cuda and has_cuda_kernel():
