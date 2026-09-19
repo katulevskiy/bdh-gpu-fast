@@ -32,9 +32,16 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 2
+    assert summary["schema_version"] == 3
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
+    assert summary["skips"] == [
+        {
+            "scope": "run",
+            "reason": "cuda_unavailable",
+            "detail": "torch.cuda.is_available() is false",
+        }
+    ]
     assert summary["timing_scope"] == "none"
     assert summary["cuda_available"] is False
     assert summary["commands"]["cold"]
@@ -78,12 +85,15 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 2
+    assert summary["schema_version"] == 3
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
     assert summary["timing_scope"] == "cpu"
     assert summary["gpu_name"] is None
+    assert summary["skips"] == []
+    assert all(item["status"] == "ok" for item in summary["results"])
+    assert all(item["reason"] is None for item in summary["results"])
     assert "do not claim GPU wins" in result.stdout
 
 
@@ -104,3 +114,21 @@ def test_backend_matrix_includes_online_decode():
         "triton",
         "cuda",
     ]
+
+
+def test_backend_skip_result_has_no_timing_claim():
+    namespace: dict[str, object] = {"__name__": "bench_gpu_attn_test", "__file__": str(SCRIPT)}
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    skip = namespace["_backend_skip"]("triton", phase="correctness", exc=RuntimeError("not available"))
+    assert skip == {
+        "backend": "triton",
+        "status": "skip",
+        "reason": "backend_unavailable",
+        "phase": "correctness",
+        "detail": "RuntimeError: not available",
+        "bit_identical": None,
+        "allclose_at_1e-4": None,
+        "max_abs_delta": None,
+        "max_rel_delta": None,
+        "median_ms": None,
+    }
