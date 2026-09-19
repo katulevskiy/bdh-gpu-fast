@@ -153,6 +153,8 @@ def test_paired_rope_shape_contract_rejects_malformed_inputs():
         fused_rope_rotate_paired(v, cos_p, sin_p[..., :-1, :])
     with pytest.raises(ValueError, match="must be even"):
         fused_rope_rotate_paired(v[..., :3], cos_p, sin_p)
+    with pytest.raises(ValueError, match="alias"):
+        fused_rope_rotate_paired(v, cos_p, sin_p, out=v)
 
 
 
