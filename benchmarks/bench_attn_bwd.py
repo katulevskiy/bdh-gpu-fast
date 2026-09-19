@@ -207,12 +207,18 @@ def _label(autograd: str, impl: str) -> str:
     return "tiled analytic backward"
 
 
-def _expected_nograd_skip(autograd: str, impl: str, exc: RuntimeError) -> bool:
-    """Native Triton/CUDA forwards may intentionally expose no autograd graph."""
+def _nograd_skip_reason(autograd: str, impl: str, exc: RuntimeError) -> str | None:
+    """Explain an expected non-differentiable native forward skip."""
     text = str(exc).lower()
-    return autograd == "0" and impl in ("triton", "cuda") and (
-        "grad" in text or "derivative" in text
-    )
+    if autograd != "0" or impl not in ("triton", "cuda"):
+        return None
+    if "grad" not in text and "derivative" not in text:
+        return None
+    return f"{impl} forward exposes no autograd graph with AUTOGRAD=0: {exc}"
+
+
+def _expected_nograd_skip(autograd: str, impl: str, exc: RuntimeError) -> bool:
+    return _nograd_skip_reason(autograd, impl, exc) is not None
 
 
 def bench_combo(
@@ -241,8 +247,9 @@ def bench_combo(
         torch.cuda.reset_peak_memory_stats(device)
         elapsed = timed(step, warmup=warmup, reps=reps)
     except RuntimeError as exc:
-        if _expected_nograd_skip(autograd, impl, exc):
-            return {"status": "skip", "reason": str(exc), "impl": impl, "autograd": autograd}
+        skip_reason = _nograd_skip_reason(autograd, impl, exc)
+        if skip_reason is not None:
+            return {"status": "skip", "reason": skip_reason, "impl": impl, "autograd": autograd}
         raise
     info = backend_info()
     return {

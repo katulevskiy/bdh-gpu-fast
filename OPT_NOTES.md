@@ -6921,3 +6921,25 @@ unmodified.
 CPU validation covers B>1 long-S tiles, capacity-strided cache parity,
 non-flattenable key views, autograd, incremental decode, and generate. This
 box has no GPU; no GPU timing, correctness, or win claim is made.
+
+
+## opt/attn-bwd-v3 — deepen CPU analytic parity matrix (2026-09-19)
+
+**Branch:** `opt/attn-bwd-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `1d12071` (#170).
+
+The post-#130 CPU contract now crosses `eager|blocked|online|triton|cuda`
+with `AUTOGRAD` off/on across shared-V and full-head-V layouts, a non-tile
+sequence shape, and randomized output gradients. The CUDA-only harness now
+labels expected native `triton`/`cuda` + `AUTOGRAD=0` skips explicitly instead
+of printing only the raw autograd exception.
+
+```text
+python -m pytest tests/test_attn_bwd.py tests/test_attn_bwd_bench.py -q
+python benchmarks/bench_attn_bwd.py
+# CPU: SKIP: CUDA unavailable; ... (exit 0)
+```
+
+No GPU timing or training claim is made on this CPU-only box. Defaults remain
+`BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTOGRAD=0`, and raw scores ×
+`tril(diagonal=-1)`.
