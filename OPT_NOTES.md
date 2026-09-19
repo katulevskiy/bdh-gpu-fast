@@ -7153,3 +7153,21 @@ python benchmarks/bench_generate.py --mode auto-ab --prompts 4,8 --new 1 \
 
 Validation is CPU-only: no GPU timing or win claim is recorded. Defaults remain
 eager, and attention remains raw scores × strict `tril(diagonal=-1)`.
+
+## opt/layout-v4 — deepen CPU sampler layout probe (2026-09-19)
+
+**Branch:** `opt/layout-v4` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `2088c90` (#187 docs).
+
+The post-#156 layout probe now covers the remaining sampler-owned signatures
+in addition to the default warm-path evidence. `tests/test_layout_v3.py`
+profiles one decode step for scaled sampling (`temperature=0.7`), narrow
+`top_k=8`, and the `top_k=vocab` fallback. Each remains cat-free and shows
+only the expected one `(B,)` index materialization; the opt-in branches own
+the first-step logits buffer, so they do not add the default `(B,V)` sampler
+contiguous signature.
+
+This is CPU profiler coverage only. It does not flip an activation layout,
+change defaults, or alter sampler/RNG behavior. Raw scores × strict
+`tril(diagonal=-1)` attention is preserved; no GPU layout win is claimed.
