@@ -44,6 +44,25 @@ def _qkv(T, *, B=1, H=4, N=32, D=64, seed=0):
     return Q, Q.clone(), V
 
 
+def test_strict_tril_raw_score_contract_at_tile_boundary():
+    """Blocked tiles use raw scores and exclude diagonal/future keys."""
+    Q = torch.tensor([2.0, 3.0, 5.0, 7.0, 11.0], dtype=torch.float64).view(
+        1, 1, 5, 1
+    )
+    K = torch.tensor([13.0, 17.0, 19.0, 23.0, 29.0], dtype=torch.float64).view(
+        1, 1, 5, 1
+    )
+    V = torch.tensor(
+        [[[[1.0, -1.0], [2.0, -2.0], [4.0, -4.0], [8.0, -8.0], [16.0, -16.0]]]],
+        dtype=torch.float64,
+    )
+    expected = torch.tril(Q @ K.transpose(-2, -1), diagonal=-1) @ V
+
+    for impl in (blocked_tril_attn, online_tril_attn):
+        got = impl(Q, K, V, block_size=2)
+        assert torch.equal(got, expected)
+
+
 @pytest.mark.parametrize("T", [256, 512, 1024])
 def test_blocked_online_parity_long_t(T):
     Q, K, V = _qkv(T, seed=T)
