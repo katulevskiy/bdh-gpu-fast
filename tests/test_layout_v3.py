@@ -343,3 +343,54 @@ def test_sampler_idx_out_accepts_unit_batch_stride_view():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1, :].transpose(0, 1), ref), name
+
+
+def test_sampler_idx_out_accepts_zero_singleton_stride_view():
+    """A singleton output axis may have zero stride without aliasing batches."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-one", dict(scale=0.7, do_topk=True, top_k_n=1)),
+        ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        destination = torch.full((2, 3, 2), -123, dtype=torch.long)
+        before = destination.clone()
+        # Expand a singleton axis before narrowing it back to (B, 1).  The
+        # zero stride is harmless for the size-one axis but catches kernels
+        # that assume a conventional positive output stride.
+        idx_out = destination[:, 1:2, :1].expand(-1, 2, -1)[:, :1, 0]
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (6, 0), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        target = torch.zeros_like(destination, dtype=torch.bool)
+        target[:, 1, 0] = True
+        assert torch.equal(
+            destination.masked_select(~target), before.masked_select(~target)
+        ), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1, 0].reshape(2, 1), ref), name
