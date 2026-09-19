@@ -37,6 +37,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - BatchPrefetcher v2: host-thread queue double-buffer + numpy producer gather (`opt/prefetch-v2` #42); synthetic overlap ~1.7×; e2e CPU ~noise; GPU pin/H2D overlap open
 - Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked still < eager after `opt/blocked-vec`; GPU unmeasured
 - Experimental sparse ReLU matmul (default off); **short-train density + CPU crossover** (`opt/sparse-probe`) — keep OFF
+- Peak-mem probe eager vs blocked vs online (`opt/attn-mem-probe`): mid-T peak↓ even when wall slower; default eager unchanged
 - CUDA extension scaffold for tril score×V (optional build)
 - Weight layout: `(B,T,nh,N)` encoder einsum, decoder view+`F.linear`, optional bias fuse (#13)
 - Contiguous vocab proj + optional `tie_weights` (`opt/embed-tie` #16)
