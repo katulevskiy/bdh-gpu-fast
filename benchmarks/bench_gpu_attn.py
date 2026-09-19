@@ -124,9 +124,17 @@ def _cuda_runtime_diagnostics(
 ) -> dict[str, Any]:
     """Return CPU-safe CUDA build/device diagnostics for skip handoffs."""
     cuda_built = bool(torch.backends.cuda.is_built())
-    cuda_device_count = int(torch.cuda.device_count())
+    device_probe_ok = True
+    try:
+        cuda_device_count = int(torch.cuda.device_count()) if cuda_built else 0
+    except Exception:
+        # A broken CUDA runtime must still produce a structured skip handoff.
+        device_probe_ok = False
+        cuda_device_count = 0
     if not cuda_built:
         runtime_state = "not_built"
+    elif not device_probe_ok:
+        runtime_state = "runtime_unavailable"
     elif cuda_device_count == 0:
         runtime_state = "no_visible_device"
     elif cuda_available is False:
