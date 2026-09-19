@@ -434,3 +434,46 @@ def test_disabled_gate_overrides_enforcement_without_probe_work(monkeypatch, cap
     assert "density_guardrail" not in captured.out
     assert "CPU sparse vs dense crossover" not in captured.out
     assert "exit_code=0 reason=probe_disabled" in captured.out
+
+
+def test_density_probe_forwards_cli_sampling_options(monkeypatch, capsys):
+    """The CPU probe must pass its sampling options through to training."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    calls = []
+
+    def fake_short_train_density(**kwargs):
+        calls.append(kwargs)
+        return [{"x": 0.20, "y": 0.25, "xy": 0.08}]
+
+    def unexpected_crossover(**_):
+        raise AssertionError("density-only mode must not run crossover work")
+
+    monkeypatch.setattr(probe, "short_train_density", fake_short_train_density)
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_crossover)
+    assert (
+        probe.main(
+            [
+                "--density-only",
+                "--enforce-density-guardrail",
+                "--steps",
+                "7",
+                "--log-every",
+                "3",
+                "--batch",
+                "2",
+                "--block",
+                "16",
+                "--seed",
+                "42",
+            ]
+        )
+        == probe.EXIT_OK
+    )
+
+    assert calls == [
+        {"steps": 7, "log_every": 3, "B": 2, "T": 16, "seed": 42}
+    ]
+    captured = capsys.readouterr()
+    assert "density_guardrail=pass" in captured.out
+    assert "CPU sparse vs dense crossover" not in captured.out
+    assert "exit_code=0 reason=probe_complete" in captured.out
