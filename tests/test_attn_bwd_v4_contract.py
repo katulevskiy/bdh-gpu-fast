@@ -151,3 +151,24 @@ def test_self_attn_aliases_preserve_raw_strict_tril_backward(impl):
     assert torch.allclose(Q_impl.grad, Q_ref.grad, rtol=1e-10, atol=1e-10)
     assert torch.allclose(V_impl.grad, V_ref.grad, rtol=1e-10, atol=1e-10)
     assert torch.equal(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_self_attn_single_query_accumulates_only_valid_qk_paths(impl):
+    """A selected output row exposes duplicate-Q strict-tril gradient routing."""
+    Q = torch.tensor(
+        [[[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]]], requires_grad=True
+    )
+    V = torch.tensor([[[[2.0], [3.0], [100.0]]]], requires_grad=True)
+    dO = torch.zeros(1, 1, 3, 1)
+    dO[:, :, 2, :] = 1.0
+
+    out = strict_tril_attn(Q, Q, V, impl=impl, use_fn=True)
+    assert torch.equal(out, torch.tensor([[[[0.0], [22.0], [151.0]]]]))
+    out.backward(dO)
+
+    # Q[2] is query-only; Q[0:2] are key-only; Q[2] is not a diagonal key.
+    assert torch.equal(
+        Q.grad, torch.tensor([[[[10.0, 12.0], [15.0, 18.0], [11.0, 16.0]]]])
+    )
+    assert torch.equal(V.grad, torch.tensor([[[[17.0], [39.0], [0.0]]]]))
