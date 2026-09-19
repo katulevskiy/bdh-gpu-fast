@@ -955,3 +955,48 @@ def test_sampler_padded_nonunit_probability_buffer_preserves_zero_stride_output(
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1, 0].reshape(2, 1), ref), name
+
+
+def test_sampler_padded_nonunit_logits_preserves_neighbors():
+    """Sampling must stay inside an offset, non-unit-vocab logits view."""
+    torch.manual_seed(0)
+    logits_storage = torch.randn(2, 34, 2)
+    logits = logits_storage[:, 1:-1, 0]
+    before = logits_storage.clone()
+    assert logits.shape == (2, 32)
+    assert logits.stride() == (68, 2)
+    assert logits.storage_offset() == 2
+
+    for name, kwargs in (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    ):
+        logits_storage.copy_(before)
+        destination = torch.empty(2, 1, dtype=torch.long)
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits,
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=destination,
+        )
+        assert got is destination, name
+
+        # The padded boundary and the adjacent storage channel are not owned.
+        assert torch.equal(logits_storage[:, 0], before[:, 0]), name
+        assert torch.equal(logits_storage[:, -1], before[:, -1]), name
+        assert torch.equal(logits_storage[..., 1], before[..., 1]), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            before[:, 1:-1, 0].contiguous(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
