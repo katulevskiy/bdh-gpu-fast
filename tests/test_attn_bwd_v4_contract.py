@@ -523,10 +523,10 @@ def test_zero_stride_batch_head_upstream_gradient_preserves_backward_contract(im
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
-def test_backward_preserves_strict_past_at_default_tile_boundary(impl):
-    """A query at the first row after the 64-row tile still excludes self/future."""
+@pytest.mark.parametrize("query", [63, 64])
+def test_backward_preserves_strict_past_at_default_tile_boundary(impl, query):
+    """Rows on both sides of the 64-row tile boundary exclude self/future."""
     generator = torch.Generator().manual_seed(2031)
-    query = 64
     Q = torch.randn(
         1, 2, 65, 3, generator=generator, dtype=torch.float64, requires_grad=True
     )
