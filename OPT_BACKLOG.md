@@ -42,7 +42,8 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). Remaining: incremental score×V kernel + fewer host copies. | GPU decode kernel bench; keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul` ~19% + `copy_` ~11% + `sub`/`add` (RoPE). **Cached tables landed** (#18); fused rotate kernel still open. | Optional fused RoPE on GPU | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
-| **P3** | **Hardware / dtype** | No GPU here; bf16/fp16 train optional later. | GPU box | Env |
+| **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; embed/lm_head path: see `opt/embed-tie`; CPU wall ~noise vs tip | Low |
+| **P3** | **Hardware / dtype** | **Landed `opt/bf16-train`:** opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA only; CPU parity tests. GPU train bench still open. | GPU box microbench | Env |
 | **P3** | **Profiler CI artifact** | Traces gitignored; optional nightly upload. | CI | N/A |
 
 ### Done (struck from ranked queue)

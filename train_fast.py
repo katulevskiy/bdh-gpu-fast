@@ -43,7 +43,8 @@ def main():
     print(
         "train_fast: "
         f"compile={tr.USE_COMPILE} mode={tr.COMPILE_MODE} "
-        f"fused_adamw={tr.USE_FUSED_ADAMW} device={tr.device}"
+        f"fused_adamw={tr.USE_FUSED_ADAMW} device={tr.device} "
+        f"amp_dtype={tr.dtype} scaler={tr._use_scaler}"
     )
     tr.fetch_data()
     model = tr.bdh.BDH(tr.BDH_CONFIG).to(tr.device)

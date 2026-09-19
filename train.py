@@ -1,5 +1,5 @@
 # Copyright Pathway Technology, Inc.
-# Private opt (opt/dataloader): pin/non_blocking + optional DataLoader workers (see OPT_NOTES.md).
+# Private opt (opt/bf16-train): optional BDH_AMP_DTYPE bf16/fp16 + GradScaler fp16+CUDA only.
 
 from __future__ import annotations
 
@@ -16,27 +16,96 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 # On a Mac you can also try
 # device=torch.device('mps')
 
-dtype = (
-    "bfloat16"
-    if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    else "float16"
-)  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
-ptdtype = {
+# Optional AMP via BDH_AMP_DTYPE (default float32 / unset = no autocast).
+# Values: float32|fp32|off|"" , bfloat16|bf16 , float16|fp16|half
+# GradScaler is enabled ONLY for float16 + CUDA (bf16 needs no loss scaling).
+_AMP_NAME_ALIASES = {
+    "": "float32",
+    "off": "float32",
+    "fp32": "float32",
+    "float32": "float32",
+    "bf16": "bfloat16",
+    "bfloat16": "bfloat16",
+    "fp16": "float16",
+    "half": "float16",
+    "float16": "float16",
+}
+_PTDTYPE = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
     "float16": torch.float16,
-}[dtype]
-ctx = (
-    torch.amp.autocast(device_type=device.type, dtype=ptdtype)
-    if "cuda" in device.type
-    else nullcontext()
-)
-_use_scaler = dtype == "float16" and device.type == "cuda"
-scaler = torch.amp.GradScaler(device=device.type, enabled=_use_scaler)
+}
+
+dtype = "float32"
+ptdtype = torch.float32
+ctx = nullcontext()
+_use_scaler = False
+scaler = None  # set in configure_amp()
+
+
+def parse_amp_dtype(raw: str | None) -> str:
+    """Normalize BDH_AMP_DTYPE string → float32|bfloat16|float16."""
+    if raw is None:
+        return "float32"
+    key = raw.strip().lower()
+    if key not in _AMP_NAME_ALIASES:
+        raise ValueError(
+            f"BDH_AMP_DTYPE must be float32|bfloat16|float16 (or aliases), got {raw!r}"
+        )
+    return _AMP_NAME_ALIASES[key]
+
+
+def cpu_bf16_available() -> bool:
+    """True if CPU autocast(bfloat16) works (torch.cpu.is_bf16_supported or smoke)."""
+    check = getattr(getattr(torch, "cpu", None), "is_bf16_supported", None)
+    if callable(check):
+        try:
+            return bool(check())
+        except Exception:
+            pass
+    try:
+        a = torch.randn(2, 2)
+        with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+            _ = a @ a
+        return True
+    except Exception:
+        return False
+
+
+def configure_amp(amp_name: str | None = None) -> str:
+    """Set module-level dtype / autocast ctx / GradScaler from name or env.
+
+    Returns the resolved dtype name (float32|bfloat16|float16).
+    GradScaler: enabled only when dtype==float16 and device is CUDA.
+    CPU: bf16/fp16 enable autocast when requested (smoke / parity); no scaler.
+    """
+    global dtype, ptdtype, ctx, _use_scaler, scaler
+    if amp_name is None:
+        amp_name = os.environ.get("BDH_AMP_DTYPE", "float32")
+    dtype = parse_amp_dtype(amp_name)
+    ptdtype = _PTDTYPE[dtype]
+    if dtype == "float32":
+        ctx = nullcontext()
+        _use_scaler = False
+    else:
+        # Prefer bdh helper (CPU/CUDA/MPS); keeps generate AMP consistent.
+        ctx = bdh._autocast_context(device, ptdtype)
+        _use_scaler = dtype == "float16" and device.type == "cuda"
+        if dtype == "bfloat16" and device.type == "cpu" and not cpu_bf16_available():
+            raise RuntimeError(
+                "BDH_AMP_DTYPE=bfloat16 requested but CPU bf16 autocast unavailable"
+            )
+    # GradScaler device arg is the amp device type; keep constructed even when
+    # disabled so train_step branches stay simple.
+    scaler = torch.amp.GradScaler(device=device.type, enabled=_use_scaler)
+    return dtype
+
+
+configure_amp()
 torch.manual_seed(1337)
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
-print(f"Using device: {device} with dtype {dtype}")
+# Quiet at import for pytest; __main__ / train_fast print explicitly.
 
 
 # Configuration
@@ -364,6 +433,10 @@ def train_step(model, optimizer, x, y):
 
 
 if __name__ == "__main__":
+    print(
+        f"Using device: {device} amp_dtype={dtype} "
+        f"scaler={_use_scaler} (BDH_AMP_DTYPE)"
+    )
     fetch_data()
 
     model = bdh.BDH(BDH_CONFIG).to(device)
