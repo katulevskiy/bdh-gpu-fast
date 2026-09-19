@@ -6801,3 +6801,20 @@ and profiler dependent; these are not GPU performance measurements.
 - No GPU timing, kernel-on-hardware result, correctness, or speedup claim.
 - P0 remains real GPU measurement, including cold CUDA/Triton validation.
 - No PRs to `pathwaycom/*`; private repository only.
+
+
+## opt/decode-gemm-v3 — preserve packed T=1 decode views (2026-09-19)
+
+**Base tip:** `7a9b14f` (main after #162).
+
+The Triton T=1 decode launcher now makes its packed-layout contract explicit: it
+tries a no-copy `view` when flattening batch/head dimensions and keeps the prior
+`reshape` fallback only for layouts that cannot be viewed directly. This preserves
+capacity-strided `CacheManager` KR/V views without an unconditional recontiguous
+step. CPU coverage now runs the fake-launcher stride contract even without Triton
+and checks blocked/online/triton fallback parity for B=1 and B=2 exactly at and
+just above the decode oneshot score budget.
+
+Attention remains raw score × `tril(diagonal=-1)` × V with no softmax or scale;
+eager remains the default. Validation is CPU-only and reports no GPU timing or
+GPU win. P0 remains real CUDA/Triton measurement.
