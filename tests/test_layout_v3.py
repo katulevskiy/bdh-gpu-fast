@@ -208,3 +208,42 @@ def test_sampler_idx_out_accepts_noncontiguous_full_vocab_topk_fallback():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1:2], ref), name
+
+
+def test_sampler_idx_out_accepts_noncontiguous_column_stride():
+    """Sampler output may be a (B, 1) view with a strided last dimension."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk", dict(scale=0.7, do_topk=True, top_k_n=8)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+    )
+
+    for name, kwargs in cases:
+        destination = torch.empty(2, 3, 2, dtype=torch.long)
+        idx_out = destination[:, 1:2, 0]
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (6, 2), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1:2, 0], ref), name
