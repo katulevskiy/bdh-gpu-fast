@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#66)
+# OPT status — landed work (#1–#68)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `b126d77` (`#66` log-sync on `main`; after `#65` docs matrix refresh and `#64` cuda-decode-v3 / `#63` compile-reduce). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
+Tip documented here: `8439c06` (`#67` docs matrix refresh on `main`; after `#66` log-sync / `#65` docs / `#64` cuda-decode-v3). Profile source: `b126d77` (post-#64–#66; default eager attn unchanged by #64–#66; re-profiled in `opt/profile-v6`).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -146,7 +146,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#66)
+## Landed opts (#1–#68)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -216,6 +216,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **64** | `opt/cuda-decode-v3` | Deepen CUDA T=1 decode tiles (adaptive DECODE_TILE_N 32/64/128 + TQ1 Q-hoist); ≡ blocked parity | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode decode` open |
 | **65** | `opt/docs-matrix-v6` | Refresh optimization matrix through #64; update documented tip/profile metadata | Docs only | — |
 | **66** | `opt/log-sync` | Further cut train logging host sync (`TrainLossLogger`; CUDA deferred D2H; `BDH_LOG_FREQ`/`BDH_LOG_ASYNC`) | CPU: sync path tested; e2e ~noise | CUDA defer unmeasured |
+| **67** | `opt/docs-matrix-v7` | Refresh OPT matrix / backlog through #66; documented tip/profile metadata | Docs only | — |
+| **68** | `opt/profile-v6` | Re-profile tip after #64–#66; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #64–#66 off short default window | No GPU measurements; defaults unchanged |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
