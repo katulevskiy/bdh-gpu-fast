@@ -6604,3 +6604,50 @@ speedup claim is made. Attention remains raw scores × strict
 
 - No default eager, attention math, cache table contents, or generate behavior change.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+## opt/layout-v3 — CPU probe remaining layout materializations (2026-09-19)
+
+**Branch:** `opt/layout-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `3d96337` (`main`, after #155 docs for #154).
+
+### Audit / verdict
+
+After layout-v2 and the warmed T>1 RoPE-table narrow cache, the remaining
+contiguous/layout work was probed on CPU without flipping any default layout.
+The eval encoder cache intentionally materializes one contiguous `(nh*N, D)`
+weight during `eval()`/cache refresh; it is outside the forward hot path. Once
+warmed, the default eager forward probe reports **0 `aten::contiguous`** and
+**0 `aten::cat`**. It still reports two clone-backed layout materializations
+per layer at the current CPU build, with shapes `(B, nh, T, D)` and
+`(nh, B, T, D, 1)` from eager score×V/broadcast handling. These are retained
+as an evidence boundary rather than “fixed” with an unsafe activation-layout
+flip.
+
+The default packed generate probe reports the remaining explicit contiguous
+hotspots inside ATen sampling: one `(B, V)` materialization under softmax and
+one `(B,)` materialization per sampled token under index selection. The model
+path remains cat-free. Removing those would require a custom sampler/RNG or
+other contract change, so no default-safe view reuse was found.
+
+### CPU validation
+
+```text
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+  python -m pytest tests/test_layout_v2.py tests/test_layout_v3.py \
+    tests/test_rope_cache.py tests/test_rope_fuse.py tests/test_gen_copy_tax.py -q -rs
+# 45 passed, 2 skipped in 6.92s
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest -q -rs
+# 557 passed, 19 skipped, 3 warnings in 62.35s
+```
+
+`tests/test_layout_v3.py` is a small `torch.profiler` probe that checks the
+one-time eval-cache materialization, the warm forward clone signature, and the
+generate sampler contiguous shapes. It makes no GPU timing, CUDA/Triton
+execution, kernel correctness, or speedup claim.
+
+### Non-goals
+
+- No default eager, cache, generate, or attention math change.
+- No unsafe layout flip, sampler rewrite, custom RNG path, or channels-last path.
+- No GPU claims and no repository/public-PR scope beyond the private target.
