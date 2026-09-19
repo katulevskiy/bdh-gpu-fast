@@ -219,3 +219,11 @@ def test_cpu_amp_throughput_claim_ignores_cuda_runtime(monkeypatch):
         tr.configure_amp("bfloat16", forward_only=True)
         assert tr._use_scaler is False
         assert tr.amp_throughput_claim_device() == "none"
+
+
+def test_cuda_amp_throughput_claim_requires_live_runtime(monkeypatch):
+    """A stale CUDA device selection cannot claim throughput without CUDA."""
+    with monkeypatch.context() as mp:
+        mp.setattr(tr, "device", torch.device("cuda"))
+        mp.setattr(torch.cuda, "is_available", lambda: False)
+        assert tr.amp_throughput_claim_device() == "none"

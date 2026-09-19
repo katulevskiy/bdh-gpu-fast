@@ -115,7 +115,7 @@ def amp_throughput_claim_device() -> str:
     Returns 'cuda' when a CUDA device is present (Tensor Core / HBM path), else
     'none' — CPU AMP is correctness/smoke, not a throughput claim.
     """
-    return "cuda" if device.type == "cuda" else "none"
+    return "cuda" if device.type == "cuda" and torch.cuda.is_available() else "none"
 
 
 def configure_amp(amp_name: str | None = None, *, forward_only: bool | None = None) -> str:
