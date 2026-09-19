@@ -780,3 +780,61 @@ def test_sampler_probability_buffer_preserves_padded_nonunit_vocab_neighbors():
             multinomial=torch.multinomial,
         )
         assert torch.equal(got, ref), name
+
+def test_sampler_padded_nonunit_probability_buffer_preserves_strided_output():
+    """Padded scratch and strided decode output may be combined safely."""
+    torch.manual_seed(0)
+    logits_storage = torch.randn(2, 32, 2)
+    logits = logits_storage[..., 0]
+    probs_storage = torch.full((2, 34, 2), -777.0)
+    probs_buf = probs_storage[:, 1:-1, 0]
+    probs_before = probs_storage.clone()
+    assert logits.stride() == (64, 2)
+    assert probs_buf.stride() == (68, 2)
+    assert probs_buf.storage_offset() == 2
+
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        probs_storage.copy_(probs_before)
+        destination = torch.full((1, 3, 2), -123, dtype=torch.long)
+        destination_before = destination.clone()
+        idx_out = destination[:, 1, :].transpose(0, 1)
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (1, 6), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=probs_buf,
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out, name
+
+        target = torch.zeros_like(destination, dtype=torch.bool)
+        target[:, 1, :] = True
+        assert torch.equal(
+            destination.masked_select(~target),
+            destination_before.masked_select(~target),
+        ), name
+        assert torch.equal(probs_storage[..., 1], probs_before[..., 1]), name
+        assert torch.equal(probs_storage[:, 0], probs_before[:, 0]), name
+        assert torch.equal(probs_storage[:, -1], probs_before[:, -1]), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.contiguous(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1, :].transpose(0, 1), ref), name
