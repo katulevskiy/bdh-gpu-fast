@@ -257,6 +257,36 @@ def test_pick_cuda_cold_tiles_long_t():
     assert tm_e == 16 and tn_e == 16
 
 
+def test_pick_cuda_cold_tiles_wide_head_bound():
+    """cuda-cold-v3 mirrors Triton #108's bounded wide-head policy."""
+    # CPU mirror keeps long wide-head tiles at the Triton 64x64 bound rather
+    # than applying the normal 128x128 long-T preference.
+    tm, tn = pick_cuda_cold_tiles(512, Dk=128, Dv=256)
+    assert (tm, tn) == (64, 64)
+    # CUDA smem mirror keeps the mid-size 32x32 policy and remains bounded.
+    tm_s, tn_s = pick_cuda_cold_tiles(512, Dk=128, Dv=256, for_smem=True)
+    assert (tm_s, tn_s) == (32, 32)
+    # Explicit overrides remain authoritative for wide heads.
+    assert pick_cuda_cold_tiles(
+        512, Dk=128, Dv=256, tile_m=16, tile_n=16
+    ) == (16, 16)
+
+
+def test_tiled_ref_wide_head_matches_eager(device):
+    """Wide-head CPU tile bound preserves strict tril score×V parity."""
+    torch.manual_seed(24)
+    B, H, T, Dk, Dv = 1, 1, 260, 128, 256
+    q = torch.randn(B, H, T, Dk, device=device)
+    k = torch.randn(B, H, T, Dk, device=device)
+    v = torch.randn(B, 1, T, Dv, device=device)
+    tm, tn = pick_cuda_cold_tiles(T, Dk, Dv=Dv)
+    assert (tm, tn) == (64, 64)
+    tiled = tril_score_v_tiled_ref(q, k, v)
+    gold = tril_score_v_ref(q, k, v)
+    assert torch.allclose(tiled, gold, rtol=1e-4, atol=1e-4)
+    assert torch.count_nonzero(tiled[:, :, 0, :]) == 0
+
+
 def test_tiled_ref_long_t_adaptive_matches_eager(device):
     """Long-T adaptive tiled CPU ref ≡ eager; diagonal excluded; no full T×T claim."""
     torch.manual_seed(20)

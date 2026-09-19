@@ -5443,3 +5443,47 @@ kernel win, or speedup is claimed.
 - No default attention/RoPE implementation change
 - No softmax / scale / SDPA / diagonal inclusion
 - No GPU claims from CPU profiler percentages or copy_ counts
+
+## opt/cuda-cold-v3 — bounded wide-head CUDA tiles (2026-09-19)
+
+**Branch:** `opt/cuda-cold-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `acf6e09` (`main`, #111 docs-v24); pair with merged #79
+`opt/cuda-cold-v2` and #108 `opt/triton-cold-v3`.
+
+### Audit / deepen
+
+- The CUDA cold kernel already stages only the active `K`/`V` tiles in shared
+  memory. Broadcast `V=(B,1,T,Dv)` selects `hv=0` per head; it does not
+  materialize a `(B*H,T,Dv)` copy. The CPU tiled reference likewise keeps the
+  broadcast value tensor unexpanded.
+- The missing #108 parity was the dimension-aware long-T tile guard. The
+  picker now treats `Dk > 64` or `Dv > 128` as a wide head: default long-T
+  tiles stay at 32×32 for CUDA shared memory and 64×64 for the CPU mirror,
+  while normal heads retain 32×64 CUDA / 128×128 CPU preferences. Explicit
+  tile overrides remain authoritative.
+- C++ and Python pickers receive the value width so the CUDA launch and CPU
+  reference make the same wide-head decision. Strict raw-score × strict
+  `tril(diagonal=-1)` semantics and default eager dispatch are unchanged.
+
+### Smoke / correctness
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_cuda_attn.py tests/test_cuda_decode.py -q
+# 37 passed, 9 skipped (CUDA unavailable)
+
+BDH_BUILD_EXT=1 BDH_FORCE_CPU_EXT=1 \
+  /workspace/bdh-gpu-opt/.venv/bin/python setup.py build_ext --inplace
+# succeeded with the PyTorch 2.14 C++20 headers
+```
+
+The full CPU suite and the native CUDA tests are the final checks for this
+branch. This box has no CUDA device, so CUDA tests soft-skip and no GPU timing,
+kernel correctness on hardware, or speedup claim is made.
+
+### Non-goals
+
+- No public or `pathwaycom/*` PRs; private repo only.
+- No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change.
+- No softmax, scale, diagonal inclusion, or full-score materialization.
+- No GPU claims from CPU reference parity or build smoke.
