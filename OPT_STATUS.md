@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#198; #160 docs scope retained)
+# OPT status — landed work (#1–#201; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `9ad9015` (`opt/attn-bwd-v4`, #198) follows #197 docs refresh through #196, #196 missing-nvcc setup guidance, #195 compile-probe diagnostics, #194 B=1 shared-V epilogue coverage, #193 docs refresh through #191, #191 RoPE cache narrows, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, #188 adds CPU-only sampler-layout probe coverage, #189 adds CPU-only packed shared-V decode parity coverage, #190 is docs-only, #191 adds CPU-only RoPE cache correctness/parity coverage, #193 is docs-only, #194 adds CPU-only B=1 shared-V epilogue coverage, #195 adds CPU-only compile-probe fallback diagnostics, #196 adds CPU-only missing-nvcc setup-skip coverage, #197 is docs-only, and #198 adds CPU-only T=1 strict-tril backward contract coverage; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `c25aa9f` (`opt/gpu-measure-v3`, #201) follows #200 docs refresh through #198 and #199 packed per-head decode GEMM parity. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, #188 adds CPU-only sampler-layout probe coverage, #189 adds CPU-only packed shared-V decode parity coverage, #190 is docs-only, #191 adds CPU-only RoPE cache correctness/parity coverage, #193 is docs-only, #194 adds CPU-only B=1 shared-V epilogue coverage, #195 adds CPU-only compile-probe fallback diagnostics, #196 adds CPU-only missing-nvcc setup-skip coverage, #197 is docs-only, #198 adds CPU-only T=1 strict-tril backward contract coverage, #199 adds CPU-only packed per-head decode GEMM parity coverage, #200 is docs-only, and #201 marks forced-CPU smoke output with an explicit CPU timing scope; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#198)
+## Landed opts (#1–#201)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -375,6 +375,9 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **196** | `opt/cuda-build-v3` | Check CUDA_HOME/CUDA_PATH and PATH before constructing the optional CUDA extension; keep missing-nvcc setup a clear CPU-safe no-op and retain explicit CPU-only setup smoke | CPU-only setup/test coverage; no GPU build or timing claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **197** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #196 while preserving profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
 | **198** | `opt/attn-bwd-v4` | Add T=1 strict-tril backward contract coverage across eager, blocked, online, Triton fallback, and CUDA-reference dispatch for shared-V and full-head-V layouts; assert exact zero output and Q/K/V gradients when no past key exists | CPU-only contract coverage; no GPU timing or speedup claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **199** | `opt/decode-gemm-v4` | Add CPU parity coverage for T=1 packed, capacity-strided per-head K/V views at and just above the decode oneshot boundary; lock the per-head decode GEMM flattening shape/stride and view-preserving contract | CPU-only parity/stride coverage; no GPU timing or performance claim | **P0** GPU decode measure / cold CUDA-Triton validation remains open |
+| **200** | `opt/docs-v50` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #198 while preserving profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
+| **201** | `opt/gpu-measure-v3` | Distinguish real CUDA summaries from `--force-cpu` smoke output in schema version 2; report actual device, timing scope, and reason, with CPU contract coverage and an explicit measurement boundary | CPU-only smoke/contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 
 ### Concurrent main updates
 
@@ -412,7 +415,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#196** `opt/cuda-build-v3` is at `4e9d3e4`; clarifies missing-nvcc setup discovery and keeps the CPU-safe setup smoke explicit, with no GPU build or timing claim.
 - **#197** docs refresh merged as `ccadc3a`; carries the matrix through #196 and preserves profile-v17 counts plus the real-GPU P0 blocker.
 - **#198** `opt/attn-bwd-v4` is at `9ad9015`; adds CPU-only T=1 strict-tril backward contract coverage across eager, blocked, online, Triton-fallback, and CUDA-reference dispatch for shared-V and full-head-V layouts, with no GPU timing or speedup claim.
-- **Current tip #198** `opt/attn-bwd-v4` is at `9ad9015`; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#199** `opt/decode-gemm-v4` merged as `269eb2d`; adds CPU-only packed per-head T=1 decode GEMM parity and stride/view contract coverage, with no GPU timing or performance claim.
+- **#200** docs refresh merged as `e253bba`; carries the matrix through #198 while preserving profile-v17 counts and the real-GPU P0 blocker.
+- **#201** `opt/gpu-measure-v3` merged as `c25aa9f`; marks forced-CPU smoke summaries with schema version 2, actual device, timing scope, and reason, with no GPU timing or speedup claim.
+- **Current tip #201** `opt/gpu-measure-v3` is at `c25aa9f`; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
