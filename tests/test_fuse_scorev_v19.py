@@ -314,3 +314,48 @@ def test_dispatch_preserves_feature_strided_v_storage_gradients(impl, v_heads):
     assert torch.allclose(
         got_storage_grad, ref_storage_grad, rtol=1e-9, atol=1e-9
     )
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_feature_strided_qk_storage_gradients(impl, v_heads):
+    """Dispatch aliases accumulate feature-strided Q/K gradients in storage."""
+    B, H, T, N, D = 2, 3, 29, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1927)
+    Q_storage = torch.randn(
+        B, H, T, 2 * N + 1, generator=generator, dtype=torch.float64
+    )
+    K_storage = torch.randn(
+        B, H, T, 2 * N + 1, generator=generator, dtype=torch.float64
+    )
+    Q = Q_storage[..., 1 : 2 * N : 2]
+    K = K_storage[..., 1 : 2 * N : 2]
+    V = torch.randn(B, v_heads, T, D, generator=generator, dtype=torch.float64)
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    assert not Q.is_contiguous()
+    assert not K.is_contiguous()
+    assert Q.stride(-1) == 2
+    assert K.stride(-1) == 2
+
+    def run(name):
+        q_storage = Q_storage.detach().clone().requires_grad_(True)
+        k_storage = K_storage.detach().clone().requires_grad_(True)
+        q = q_storage[..., 1 : 2 * N : 2]
+        k = k_storage[..., 1 : 2 * N : 2]
+        out = bdh_attn(q, k, V, impl=name)
+        out.backward(dO)
+        return out.detach(), q_storage.grad.detach(), k_storage.grad.detach()
+
+    ref, ref_q_storage_grad, ref_k_storage_grad = run("eager")
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_q_storage_grad, got_k_storage_grad = run(impl)
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    assert torch.allclose(
+        got_q_storage_grad, ref_q_storage_grad, rtol=1e-9, atol=1e-9
+    )
+    assert torch.allclose(
+        got_k_storage_grad, ref_k_storage_grad, rtol=1e-9, atol=1e-9
+    )
