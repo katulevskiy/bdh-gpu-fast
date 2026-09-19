@@ -74,7 +74,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v5): attn `mul`~29% `bmm`~24% `copy_`~21% `tril`~1%; forward `copy_`~25% `bmm`~24% `mm`~23% `mul`~12%. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
-| **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** (#46/#49; blocked warns). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` (+ `reduce-overhead`) via `benchmarks/bench_train_step.py` | Low |
+| **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** scaffold (AUTO→triton when CUDA). CPU long-S blocked win; opt-in AUTO thr=512. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | **Density measured** `opt/sparse-probe`: short-train x~27% xy~12% @150 steps (≫ paper 5%); CPU sparse **never reliably beat dense** → **keep OFF**. GPU sparse still open. | GPU sparse bench if density ≪10% | Speculative |
@@ -100,7 +100,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | OPT status docs refresh | **Landed** #43 `opt/docs-matrix-v2` — matrix through #40 |
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21; **CPU vectorized** `opt/blocked-vec` (~18–36× vs old blocked wall; still slower than eager) |
-| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49; matrix showed COMPILE+eager only win on CPU; warn on COMPILE+blocked; remaining = **GPU** measure (P1) |
+| `torch.compile` / inductor CPU harden | **Landed** #17+#22+#31+#46+#49+#63; COMPILE+eager only win on CPU; warn on COMPILE+blocked; **CPU `reduce-overhead` not useful** (no CUDA graphs); remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Decode-mm T=1 / lm_head mv | **Landed** `opt/decode-mm` — `_two_gemm_decode`, CUDA Tq=1 + `DECODE_TILE_N`, B=1 `mv`; CPU wall ~noise; GPU open |
@@ -119,6 +119,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Claiming GPU speedups from CPU profiler absolute times
 - Defaulting `BDH_ATTN_IMPL=blocked` on CPU (still slower than eager after `opt/blocked-vec`; use for peak-score memory / parity)
 - Recommending `BDH_COMPILE=1` with `blocked`/`online`/`triton` on CPU (#46 regression; #49 warns)
+- Recommending `BDH_COMPILE_MODE=reduce-overhead` on CPU (no CUDA graphs; #63 documents)
 - Re-introducing `aten::cat` in `generate` / packed cache path
 
 ## Suggested order
@@ -162,8 +163,10 @@ and `max|Δ|` vs eager. **Do not** claim wins from CPU medians; keep default
 ## GPU next step — `BDH_COMPILE` train-step (after CPU harness)
 
 CPU sandbox now has an **honest** A/B in `benchmarks/bench_train_step.py`
-(`BDH_COMPILE=0` vs `1` via `train.maybe_compile`; soft-skip if inductor/CXX
-missing). **Do not** treat CPU medians as GPU wins.
+(`BDH_COMPILE=0` vs `1`, plus `MODE=default` vs `reduce-overhead` via
+`train.maybe_compile`; soft-skip if inductor/CXX missing). On CPU,
+`reduce-overhead` is **not useful** (no CUDA graphs) — measured for honesty
+only (#63). **Do not** treat CPU medians as GPU / CUDA-graph wins.
 
 On an A100/H100 box:
 
@@ -171,13 +174,16 @@ On an A100/H100 box:
 # eager vs compiled train-step (default mode=default, probe=train)
 BDH_BENCH_COMPILE=1 python benchmarks/bench_train_step.py
 
-# CUDA-graph-oriented (static B×T; see train_fast.py)
+# MODE matrix (default vs reduce-overhead; CUDA graphs need GPU + static B×T)
+BDH_BENCH_COMPILE_MODE=1 python benchmarks/bench_train_step.py
+
+# Force reduce-overhead arm only via env (still runs full harness sections)
 BDH_BENCH_COMPILE=1 BDH_COMPILE_MODE=reduce-overhead python benchmarks/bench_train_step.py
 ```
 
-Record: GPU name, torch/CUDA, median ms for `BDH_COMPILE=0` and `=1`, whether
-`_orig_mod` stuck (true compile) vs soft fallback, and `reduce-overhead` note.
-Private repo only — never `pathwaycom/*`.
+Record: GPU name, torch/CUDA, median ms for `BDH_COMPILE=0` and `=1`,
+`MODE=default` vs `reduce-overhead`, whether `_orig_mod` stuck (true compile)
+vs soft fallback. Private repo only — never `pathwaycom/*`.
 
 ## Generate microbench — CacheManager × attn impls (`opt/gen-bench`)
 

@@ -541,3 +541,153 @@ def test_compile_eager_autograd_smoke_zero_graph_breaks(monkeypatch):
     opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
     loss = tr.train_step(m, opt, x, y)
     assert torch.isfinite(loss)
+
+
+# --- opt/compile-reduce: MODE=default vs reduce-overhead on CPU ---
+
+
+def test_maybe_compile_warns_reduce_overhead_on_cpu(monkeypatch, capsys):
+    """COMPILE=1 + MODE=reduce-overhead on non-CUDA must warn (no CUDA graphs).
+
+    Advisory only — still attempts compile; defaults unchanged.
+    """
+    import importlib
+    import train as tr
+
+    if torch.cuda.is_available():
+        pytest.skip("this warning is for non-CUDA devices")
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "reduce-overhead")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    importlib.reload(tr)
+    assert tr.USE_COMPILE is True
+    assert tr.COMPILE_MODE == "reduce-overhead"
+
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert "reduce-overhead" in captured
+    assert "CUDA graphs" in captured or "not useful" in captured.lower()
+    assert out is not None
+
+
+def test_maybe_compile_reduce_overhead_soft_or_runs(monkeypatch):
+    """MODE=reduce-overhead must soft-fallback or produce a usable module.
+
+    Soft-skips neither path hard-fails. No throughput / CUDA-graph claims.
+    """
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "reduce-overhead")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    importlib.reload(tr)
+
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(11)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+    try:
+        out = tr.maybe_compile(m, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+        importlib.reload(tr)
+
+    assert out is not None
+    out.train()
+    logits, loss = out(x, y)
+    assert logits.shape[-1] == cfg.vocab_size
+    assert loss is not None and torch.isfinite(loss)
+
+
+def test_compile_mode_default_vs_reduce_overhead_parity(monkeypatch):
+    """Compiled forward @ dropout=0: default mode matches reduce-overhead logits.
+
+    Soft-skips if either mode cannot compile. No speed / GPU claims.
+    """
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(0)
+    base = bdh.BDH(cfg).eval()
+    state = base.state_dict()
+
+    def _compile_mode(mode: str):
+        src = bdh.BDH(cfg).eval()
+        src.load_state_dict(state)
+        return _compile_or_skip(src, mode=mode)
+
+    m_default = _compile_mode("default")
+    m_reduce = _compile_mode("reduce-overhead")
+
+    torch.manual_seed(42)
+    x = torch.randint(0, cfg.vocab_size, (2, 12))
+    y = torch.randint(0, cfg.vocab_size, (2, 12))
+
+    def _warm(m):
+        with torch.no_grad():
+            return m(x, y)
+
+    _probe_or_skip(m_default, lambda: _warm(m_default))
+    _probe_or_skip(m_reduce, lambda: _warm(m_reduce))
+
+    with torch.no_grad():
+        ld, lossd = m_default(x, y)
+        lr, lossr = m_reduce(x, y)
+    assert torch.allclose(ld, lr, rtol=0, atol=1e-5), (
+        f"logits maxdiff={(ld - lr).abs().max().item()}"
+    )
+    assert torch.allclose(lossd, lossr, rtol=0, atol=1e-5)
+
+
+def test_compile_reduce_overhead_train_step_smoke(monkeypatch):
+    """One train_step under COMPILE=1 MODE=reduce-overhead must finish (CPU).
+
+    Soft-skips if inductor/probe falls back. Finite loss only — no speed claim.
+    """
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "0")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "reduce-overhead")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    importlib.reload(tr)
+
+    cfg = _small_cfg(dropout=0.0)
+    torch.manual_seed(4)
+    m = bdh.BDH(cfg).train()
+    x = torch.randint(0, cfg.vocab_size, (2, 10))
+    y = torch.randint(0, cfg.vocab_size, (2, 10))
+
+    tr.USE_COMPILE = True
+    tr.COMPILE_MODE = "reduce-overhead"
+    try:
+        m = tr.maybe_compile(m, example_x=x, example_y=y)
+    finally:
+        tr.USE_COMPILE = False
+        tr.COMPILE_MODE = "default"
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+        importlib.reload(tr)
+
+    if getattr(m, "_orig_mod", None) is None:
+        pytest.skip("torch.compile unavailable or probe fell back to eager")
+
+    opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+    loss = tr.train_step(m, opt, x, y)
+    assert torch.isfinite(loss)

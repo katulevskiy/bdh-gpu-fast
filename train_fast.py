@@ -19,7 +19,7 @@
 #      the captured compute stream.
 #   6. Dynamic `generate()` / variable-T decode will graph-break; keep sample
 #      generation outside the hot train loop (already the case).
-# On CPU-only boxes, reduce-overhead has little benefit; inductor still needs
+# On CPU-only boxes, reduce-overhead is not useful (no CUDA graphs); inductor still needs
 # a working g++ + Python.h. Fall back with BDH_COMPILE=0 if compile fails.
 
 from __future__ import annotations

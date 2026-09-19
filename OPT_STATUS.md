@@ -85,22 +85,24 @@ export BDH_ROPE_IMPL=fused
 | `BDH_COMPILE_PROBE` | `train` | `eval` \| `train` \| `train_bwd` |
 | `BDH_COMPILE_FULLGRAPH` | `0` | `fullgraph=True` when set |
 
-`generate()` is `@torch.compiler.disable`. Changing `BDH_ATTN_IMPL` after compile → recompile. On CPU, `reduce-overhead` does **not** give CUDA graphs.
+`generate()` is `@torch.compiler.disable`. Changing `BDH_ATTN_IMPL` after compile → recompile. On CPU, `reduce-overhead` is **not useful** — CUDA graphs need a real GPU (`maybe_compile` warns; prefer `MODE=default`).
 
-**Operator guidance (CPU, after #46):** recommend `BDH_COMPILE=1` **only** with
-`BDH_ATTN_IMPL=eager` (optionally `BDH_ATTN_AUTOGRAD=1` — still 0 Dynamo graph
+**Operator guidance (CPU, after #46 / opt/compile-reduce):** recommend `BDH_COMPILE=1` **only** with
+`BDH_ATTN_IMPL=eager` and `BDH_COMPILE_MODE=default` (optionally `BDH_ATTN_AUTOGRAD=1` — still 0 Dynamo graph
 breaks). `maybe_compile` logs a clear warning if `COMPILE=1` with
-`IMPL∈{blocked,online,triton}` (measured CPU regression). Defaults unchanged
-(`COMPILE=0`, `IMPL=eager`). **GPU** inductor / CUDA graphs still unmeasured.
+`IMPL∈{blocked,online,triton}` (measured CPU regression) **or** `MODE=reduce-overhead` on non-CUDA.
+Defaults unchanged (`COMPILE=0`, `MODE=default`, `IMPL=eager`). **GPU** inductor / CUDA graphs still unmeasured.
 
 ```bash
 BDH_COMPILE=0 python train.py
 # recommended CPU compile train path:
-BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_PROBE=train python train.py
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_MODE=default BDH_COMPILE_PROBE=train python train.py
 # optional analytic bwd (still 0 graph breaks on eager):
 BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_ATTN_AUTOGRAD=1 python train.py
 # warns (CPU regression) — do not use as default train:
 BDH_COMPILE=1 BDH_ATTN_IMPL=blocked python train.py
+# warns on CPU (no CUDA graphs) — prefer default; try on GPU:
+BDH_COMPILE=1 BDH_COMPILE_MODE=reduce-overhead python train.py
 ```
 
 ### `BDH_PREFETCH_ASYNC` — host batch prefetch (default `1`)
@@ -207,7 +209,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **57** | `opt/cache-page` | Geometric CacheManager page growth + empty+prefix `copy_`; `ensure_capacity`; long-S grow stats | fewer grows/bytes vs linear; cats=0; defaults unchanged | GPU long-S peak still open |
 | **58** | `opt/layout-v2` | Eval cached contiguous encoder `(nh*N,D)` + `F.linear`; train einsum; compile traces einsum | T=1/32 eval ~1.3–1.4× vs train path; T=128 ~noise; gen uses cache | GPU layout still open |
 | **59** | `opt/profile-v5` | Re-profile tip after #55–#58; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #58 layout visible on generate | No GPU measurements; defaults unchanged |
-| *(pending)* | `opt/triton-decode-v3` | Deepen Triton T=1 decode scaffold (long-S tiles, Q-hoist); AUTO→triton when CUDA else #55 blocked | ≡ eager/blocked on CPU; CUDA tests skip; default eager | GPU `--mode decode` open |
+| **62** | `opt/triton-decode-v3` | Deepen Triton T=1 decode scaffold (long-S tiles, Q-hoist); AUTO→triton when CUDA else #55 blocked | ≡ eager/blocked on CPU; CUDA tests skip; default eager | GPU `--mode decode` open |
+| **63** | `opt/compile-reduce` | Document/measure `BDH_COMPILE_MODE=reduce-overhead` vs `default` on CPU; warn no CUDA graphs | CPU MODE A/B in `bench_train_step`; reduce-overhead not useful on CPU | GPU CUDA graphs still P1 |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
@@ -224,7 +227,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
 | `BDH_ATTN_AUTO` | off / unset | `1` for long-S decode→triton (CUDA) or blocked (#55 CPU); `THRESHOLD` default 512 (#55/#56/#triton-decode-v3) |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
-| `BDH_COMPILE` | `0` | CPU: `1` **only with `IMPL=eager`** (#46/#49); GPU inductor still open |
+| `BDH_COMPILE` / `BDH_COMPILE_MODE` | `0` / `default` | CPU: `COMPILE=1` **only with `IMPL=eager`** + `MODE=default` (#46/#49/#63); `reduce-overhead` needs GPU CUDA graphs; GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on **CUDA** train boxes (CPU = smoke only) |
 | `BDH_AMP_FORWARD_ONLY` | `0` | `1` for logits-only autocast + fp32 CE |
@@ -239,7 +242,7 @@ cd /workspace/bdh-gpu-opt   # or this worktree
 source .venv/bin/activate
 python -m pytest tests/ -q
 python benchmarks/profile_forward.py --mode all
-BDH_BENCH_COMPILE=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
+BDH_BENCH_COMPILE=1 BDH_BENCH_COMPILE_MODE=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
 python benchmarks/bench_sparse_probe.py
 # on a CUDA box:
 python benchmarks/bench_gpu_attn.py
@@ -255,5 +258,6 @@ python benchmarks/bench_gpu_attn.py --mode decode --T 512
 - Claiming GPU speedups from CPU medians or profiler-inflated absolute times
 - Defaulting `BDH_ATTN_IMPL=blocked` on CPU
 - Recommending `BDH_COMPILE=1` with `blocked`/`online`/`triton` on CPU (warns; #46/#49)
+- Recommending `BDH_COMPILE_MODE=reduce-overhead` on CPU (no CUDA graphs; #63)
 - Re-introducing `aten::cat` in packed `generate`
 - Wiring sparse ReLU into default `BDH.forward` without a measured win

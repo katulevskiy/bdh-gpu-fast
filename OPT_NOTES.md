@@ -3565,3 +3565,59 @@ out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
 - No re-introducing `aten::cat` in generate / CacheManager
 - No softmax / scale / SDPA
 
+## opt/compile-reduce — document `reduce-overhead` on CPU (2026-09-19)
+
+**Branch:** `opt/compile-reduce` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `4944952` (main after #62 triton-decode-v3; post #61 fix-gen-host).
+
+### Goal
+
+Measure and document `BDH_COMPILE=1` with `BDH_COMPILE_MODE=default` vs
+`reduce-overhead` on a tiny CPU cfg. Soft-skip if compile/probe unsupported.
+Warn clearly that **CUDA graphs need a GPU** — `reduce-overhead` is **not
+useful** on CPU. Defaults unchanged (`BDH_COMPILE=0`, `MODE=default`).
+
+### Code
+
+| Piece | Change |
+|-------|--------|
+| `train.maybe_compile` | Stronger non-CUDA warning when `MODE=reduce-overhead` (not useful without CUDA graphs) |
+| `benchmarks/bench_train_step.py` | New `bench_compile_mode_matrix` (`BDH_BENCH_COMPILE_MODE=1`, default on); soft-skip per mode |
+| `tests/test_compile.py` | Warning + soft/run smoke + default↔reduce-overhead parity + train_step smoke |
+| Docs | `OPT_STATUS` / `OPT_BACKLOG` / this note — OPT honesty |
+
+### Measured (this box, 2026-09-19 Europe/Podgorica)
+
+Tiny cfg: `layers=2 d=64 nh=2 B=4 T=64 dropout=0`, `probe=train`,
+`torch 2.14.0+cu130`, `cuda=False`. Warm inductor (focused MODE matrix):
+
+```text
+COMPILE=1 MODE=default:          median 6.75 ms
+COMPILE=1 MODE=reduce-overhead:  median 5.78 ms
+ratio default/reduce-overhead:   1.17×
+```
+
+**Honesty:** wall-clock only. `reduce-overhead` does **not** enable CUDA graphs
+on CPU — any small ratio is inductor-mode noise, **not** a graph-capture win.
+Under multi-agent CPU load medians can inflate/invert (e.g. hundreds of ms);
+do not cite noisy runs as speedups. Prefer `MODE=default` on CPU; try
+`reduce-overhead` on a real GPU with static B×T (`train_fast.py`). Soft-skip
+still applies if inductor/probe falls back.
+
+### Operator guidance
+
+```bash
+# recommended CPU compile path (unchanged defaults for train.py):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_MODE=default python train.py
+
+# MODE A/B harness (CPU documents "not useful"; GPU is the real target):
+BDH_BENCH_COMPILE_MODE=1 python benchmarks/bench_train_step.py
+```
+
+### Non-goals
+
+- No default flip of `BDH_COMPILE` / `BDH_COMPILE_MODE`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No PRs to `pathwaycom/*`
+- No CUDA-graph / GPU speedup claims from these CPU medians
+
