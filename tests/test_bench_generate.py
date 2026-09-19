@@ -30,6 +30,12 @@ def test_parse_threshold_sweep_rejects_invalid_values(raw):
         bench_generate._parse_threshold_sweep(raw)
 
 
+@pytest.mark.parametrize("raw", ["8,,16", "8,fast"])
+def test_parse_prompt_lengths_rejects_malformed_values(raw):
+    with pytest.raises(ValueError):
+        bench_generate._parse_prompt_lengths(raw)
+
+
 def test_run_auto_ab_sweep_deduplicates_and_mirrors_cold_threshold(monkeypatch):
     """Each unique decode threshold runs once with a mirrored cold gate."""
     calls = []
@@ -89,6 +95,14 @@ def test_run_auto_ab_rejects_invalid_inputs_before_model_setup(
 
     cases = (
         (dict(prompts="", auto_threshold=512, auto_cold_threshold=None), "--prompts"),
+        (
+            dict(prompts="8,fast", auto_threshold=512, auto_cold_threshold=None),
+            "invalid prompt length",
+        ),
+        (
+            dict(prompts="8,,16", auto_threshold=512, auto_cold_threshold=None),
+            "empty item",
+        ),
         (
             dict(prompts="8,-1", auto_threshold=512, auto_cold_threshold=None),
             "prompt lengths must be > 0",
