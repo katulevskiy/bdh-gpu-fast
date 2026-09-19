@@ -15,17 +15,18 @@ Opt-in long-S auto-select (does **not** change default)::
 
     export BDH_ATTN_AUTO=1                      # off unless set
     export BDH_ATTN_AUTO_THRESHOLD=512          # decode past_len > thr → prefer
-    export BDH_ATTN_AUTO_COLD_THRESHOLD=512     # optional; cold T > thr → prefer
-                                                # unset → same as AUTO_THRESHOLD
+    export BDH_ATTN_AUTO_COLD_THRESHOLD=256     # optional; cold T > cold_thr → prefer
+                                                # unset → mirrors AUTO_THRESHOLD
 
 When ``BDH_ATTN_AUTO`` is truthy and ``BDH_ATTN_IMPL`` resolves to ``eager``,
 long sequences switch once length exceeds the (path-specific) threshold:
 
-- **T=1 decode** (``past_len > AUTO_THRESHOLD``): **Triton** when
+- **T=1 decode** (strict ``past_len > AUTO_THRESHOLD``): **Triton** when
   ``triton_decode_available()`` (CUDA + Triton); else **blocked** (#55).
-- **Cold / prefill** (``T > COLD_THRESHOLD``): same prefer-triton-else-blocked
-  rule so long-S ``generate`` prefill is not stuck on eager ``T×T`` (#72/#75).
-  ``COLD_THRESHOLD`` defaults to ``AUTO_THRESHOLD`` when unset.
+- **Cold / prefill** (strict ``T > COLD_THRESHOLD``): same
+  prefer-triton-else-blocked rule so long-S ``generate`` prefill is not stuck
+  on eager ``T×T`` (#72/#75). ``COLD_THRESHOLD`` defaults to
+  ``AUTO_THRESHOLD`` when unset; equality stays eager on both gates.
 
 Default shared threshold stays **512** after #72/#73/#75: wall crossover ~
 T/S≥512 on CPU; mid-T (128–256) blocked wins peak mem but loses wall — use a
@@ -199,14 +200,22 @@ def attn_auto_cold_threshold() -> int:
     return _ATTN_AUTO_COLD_THR
 
 
+def _resolve_auto_impl(length: int, threshold: int) -> ImplName:
+    """Apply one strict AUTO gate and return its effective long-path backend."""
+    if int(length) <= int(threshold):
+        return "eager"
+    return "triton" if triton_decode_available() else "blocked"
+
+
 def resolve_decode_impl(
     past_len: int,
     requested: str | None = None,
 ) -> ImplName:
     """Resolve T=1 decode backend, applying optional long-S AUTO switch.
 
-    Cold/prefill uses the twin ``resolve_cold_impl(seq_len)`` (same AUTO
-    knobs). When AUTO is off, or ``BDH_ATTN_IMPL`` is already non-eager, this
+    Cold/prefill uses the twin ``resolve_cold_impl(seq_len)`` with the optional
+    independent cold threshold. When AUTO is off, or ``BDH_ATTN_IMPL`` is already
+    non-eager, this
     matches ``resolve_attn_impl``. When AUTO is on and the base impl is eager
     and ``past_len > threshold``:
 
@@ -219,11 +228,7 @@ def resolve_decode_impl(
         return name
     if not attn_auto_enabled():
         return "eager"
-    if int(past_len) > attn_auto_threshold():
-        if triton_decode_available():
-            return "triton"
-        return "blocked"
-    return "eager"
+    return _resolve_auto_impl(past_len, attn_auto_threshold())
 
 
 def resolve_cold_impl(
@@ -252,11 +257,7 @@ def resolve_cold_impl(
         return name
     if not attn_auto_enabled():
         return "eager"
-    if int(seq_len) > attn_auto_cold_threshold():
-        if triton_decode_available():
-            return "triton"
-        return "blocked"
-    return "eager"
+    return _resolve_auto_impl(seq_len, attn_auto_cold_threshold())
 
 
 def bdh_attn(

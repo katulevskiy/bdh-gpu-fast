@@ -8,9 +8,10 @@ Modes
   Soft-skips / labels fallbacks that cannot run on this device.
 * ``auto-ab``: validate ``#55``/``#56``/``#74`` wins **outside** score×V
   microbench — prompt lengths ``S ∈ {256, 1024, 2048}`` (configurable) with
-  ``BDH_ATTN_AUTO=0`` vs ``1`` (default threshold 512). With AUTO=1 and
-  ``S > thr``, cold/prefill **and** T=1 decode switch to triton|blocked
-  (``opt/prefill-blocked``); short S stays eager.
+  ``BDH_ATTN_AUTO=0`` vs ``1`` (default threshold 512). With AUTO=1, the
+  strict cold gate is ``T > cold_thr`` and the decode gate is
+  ``past_len > decode_thr``; each switches to triton|blocked independently
+  (``opt/prefill-blocked``). ``--auto-cold-threshold`` makes the split explicit.
 
 Honest CPU numbers: this sandbox is often ``cuda=False``. Report wall medians
 and tokens-match flags — **do not** claim GPU / kernel wins from CPU medians.
@@ -46,6 +47,7 @@ sys.path.insert(0, str(ROOT))
 import bdh  # noqa: E402
 from kernels.attention_dispatch import (  # noqa: E402
     DEFAULT_ATTN_AUTO_THRESHOLD,
+    attn_auto_cold_threshold,
     attn_auto_enabled,
     attn_auto_threshold,
     backend_info,
@@ -79,17 +81,24 @@ def _attn_impl(name: str):
 
 
 @contextmanager
-def _attn_auto(enabled: bool, threshold: int | None = None):
-    """Temporarily set BDH_ATTN_AUTO (+ optional THRESHOLD); restore on exit.
+def _attn_auto(
+    enabled: bool,
+    threshold: int | None = None,
+    cold_threshold: int | None = None,
+):
+    """Temporarily set AUTO plus decode/cold thresholds; restore on exit.
 
     Env-string caches in ``attention_dispatch`` re-resolve when the raw env
     string changes, so toggling here is enough for A/B without process restart.
     """
     prev_auto = os.environ.get("BDH_ATTN_AUTO")
     prev_thr = os.environ.get("BDH_ATTN_AUTO_THRESHOLD")
+    prev_cold_thr = os.environ.get("BDH_ATTN_AUTO_COLD_THRESHOLD")
     os.environ["BDH_ATTN_AUTO"] = "1" if enabled else "0"
     if threshold is not None:
         os.environ["BDH_ATTN_AUTO_THRESHOLD"] = str(int(threshold))
+    if cold_threshold is not None:
+        os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] = str(int(cold_threshold))
     try:
         yield
     finally:
@@ -102,6 +111,11 @@ def _attn_auto(enabled: bool, threshold: int | None = None):
                 os.environ.pop("BDH_ATTN_AUTO_THRESHOLD", None)
             else:
                 os.environ["BDH_ATTN_AUTO_THRESHOLD"] = prev_thr
+        if cold_threshold is not None:
+            if prev_cold_thr is None:
+                os.environ.pop("BDH_ATTN_AUTO_COLD_THRESHOLD", None)
+            else:
+                os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] = prev_cold_thr
 
 
 def timed(fn, *, warmup: int, iters: int) -> float:
@@ -308,6 +322,10 @@ def run_auto_ab(args, device: torch.device) -> int:
         return 2
 
     thr = int(args.auto_threshold)
+    cold_thr = thr if args.auto_cold_threshold is None else int(args.auto_cold_threshold)
+    if thr < 0 or cold_thr < 0:
+        print(f"ERROR: AUTO thresholds must be >= 0, got decode={thr} cold={cold_thr}")
+        return 2
     cfg = _cfg(args)
     torch.manual_seed(0)
     if device.type == "cuda":
@@ -318,15 +336,17 @@ def run_auto_ab(args, device: torch.device) -> int:
         device,
         cfg,
         args,
-        f"prompts={prompts} new={args.new} AUTO_THRESHOLD={thr}",
+        f"prompts={prompts} new={args.new} AUTO_THRESHOLD={thr} "
+        f"AUTO_COLD_THRESHOLD={cold_thr}",
     )
     print(
         "--- BDH.generate long-S AUTO A/B "
-        f"(IMPL=eager; AUTO 0 vs 1; thr={thr}) ---"
+        f"(IMPL=eager; AUTO 0 vs 1; decode_thr={thr}; cold_thr={cold_thr}) ---"
     )
     print(
-        "Semantics: AUTO=1 + length > thr → cold/prefill AND T=1 decode "
-        f"switch to blocked (or triton on CUDA); short S stays eager (thr={thr})."
+        "Semantics: AUTO=1 + cold T > cold_thr switches prefill; "
+        f"decode past_len > decode_thr switches T=1 decode; cold_thr={cold_thr}, "
+        f"decode_thr={thr}. Each gate is strict (equal stays eager)."
     )
 
     # Force eager IMPL for the whole A/B (AUTO only applies when base=eager).
@@ -336,31 +356,42 @@ def run_auto_ab(args, device: torch.device) -> int:
             prompt = torch.randint(
                 0, cfg.vocab_size, (args.batch, S), device=device
             )
-            # past_len at first decode step == S; report whether AUTO fires.
-            fires = S > thr
-            # Also note mid-generate crossover when S <= thr < S+new-1
-            crossover = (not fires) and (S + args.new - 1 > thr)
+            # The cold gate sees prompt T; decode sees past_len at each step.
+            fires_cold = S > cold_thr
+            fires_decode = S > thr
+            # A short prompt can cross the decode gate during generation.
+            crossover_decode = (not fires_decode) and (S + args.new - 1 > thr)
 
-            cell: dict = {"prompt": S, "fires_at_start": fires, "crossover": crossover}
+            cell: dict = {
+                "prompt": S,
+                "fires_cold_at_start": fires_cold,
+                "fires_decode_at_start": fires_decode,
+                "crossover_decode": crossover_decode,
+            }
 
             ref_tokens: torch.Tensor | None = None
             for auto_on in (False, True):
                 label = "AUTO=1" if auto_on else "AUTO=0"
-                with _attn_auto(auto_on, threshold=thr):
+                with _attn_auto(
+                    auto_on, threshold=thr, cold_threshold=cold_thr
+                ):
                     assert attn_auto_enabled() is auto_on
                     assert attn_auto_threshold() == thr
-                    # Sanity: cold + decode resolve at length=S
+                    assert attn_auto_cold_threshold() == cold_thr
+                    # Sanity: cold + decode resolve independently at length=S.
                     dec = resolve_decode_impl(S)
                     cold = resolve_cold_impl(S)
-                    if auto_on and fires:
+                    if auto_on and fires_decode:
                         # CUDA+Triton → triton; else #55 blocked (CPU / no Triton).
                         ok_dec = dec in ("blocked", "triton")
-                        ok_cold = cold in ("blocked", "triton")
-                        expected = dec  # whatever resolve picked is the contract
                     else:
                         ok_dec = dec == "eager"
+                    if auto_on and fires_cold:
+                        ok_cold = cold in ("blocked", "triton")
+                    else:
                         ok_cold = cold == "eager"
-                        expected = "eager"
+                    expected_dec = dec if ok_dec else "eager"
+                    expected_cold = cold if ok_cold else "eager"
 
                     def one_generate(seed: int = 0) -> torch.Tensor:
                         torch.manual_seed(seed)
@@ -397,17 +428,22 @@ def run_auto_ab(args, device: torch.device) -> int:
                     "cold_at_S": cold,
                     "decode_ok": ok_dec,
                     "cold_ok": ok_cold,
-                    "expected_decode": expected,
+                    "expected_decode": expected_dec,
+                    "expected_cold": expected_cold,
                 }
                 tok_s = (
                     (args.batch * args.new) / (med / 1000.0) if med > 0 else float("inf")
                 )
                 fire_note = (
                     f"cold@{S}={cold} decode@{S}={dec}"
-                    + (f" (expect {expected})" if not (ok_dec and ok_cold) else "")
+                    + (
+                        f" (expect cold={expected_cold} decode={expected_dec})"
+                        if not (ok_dec and ok_cold)
+                        else ""
+                    )
                 )
-                if crossover and auto_on:
-                    fire_note += f"; mid-gen may cross thr={thr}"
+                if crossover_decode and auto_on:
+                    fire_note += f"; decode may cross thr={thr}"
                 match_s = "yes" if match else "NO"
                 print(
                     f"  S={S:<5d} {label}  median={med:8.2f} ms  "
@@ -428,7 +464,8 @@ def run_auto_ab(args, device: torch.device) -> int:
     print("--- summary table ---")
     print(
         f"{'prompt':>6}  {'new':>4}  {'AUTO=0 ms':>10}  {'AUTO=1 ms':>10}  "
-        f"{'spd':>6}  {'match':>5}  {'cats':>4}  {'decode@S AUTO1':>14}  note"
+        f"{'spd':>6}  {'match':>5}  {'cats':>4}  {'cold@S':>8}  "
+        f"{'decode@S':>9}  note"
     )
     for r in rows:
         a0 = r["auto0"]
@@ -436,22 +473,26 @@ def run_auto_ab(args, device: torch.device) -> int:
         match = "yes" if a1["match"] else "NO"
         cats = a1["aten_cat"]
         note = []
-        if r["fires_at_start"]:
-            note.append(f"AUTO fires (S>{thr})")
-        elif r["crossover"]:
-            note.append(f"crossover during new tokens (thr={thr})")
+        if r["fires_cold_at_start"]:
+            note.append(f"cold fires (S>{cold_thr})")
+        elif r["fires_decode_at_start"]:
+            note.append(f"decode fires (S>{thr})")
+        elif r["crossover_decode"]:
+            note.append(f"decode crossover during new (thr={thr})")
         else:
-            note.append(f"S+new-1≤{thr}: AUTO never fires")
+            note.append(f"cold≤{cold_thr}; decode≤{thr} at S")
         print(
             f"{r['prompt']:6d}  {args.new:4d}  {a0['median_ms']:10.2f}  "
             f"{a1['median_ms']:10.2f}  {r['speedup']:5.2f}×  {match:>5}  "
-            f"{cats:4d}  {a1['decode_at_S']:>14}  {'; '.join(note)}"
+            f"{cats:4d}  {a1['cold_at_S']:>8}  "
+            f"{a1['decode_at_S']:>9}  {'; '.join(note)}"
         )
 
     print(
-        "NOTE: AUTO=1 + S>thr switches cold/prefill AND decode to "
-        "triton|blocked (opt/prefill-blocked); short S stays eager. "
-        f"Default BDH_ATTN_AUTO stays off (thr={thr})."
+        "NOTE: AUTO=1 uses independent strict gates: cold T>cold_thr and "
+        "decode past_len>decode_thr; each selects triton|blocked while short/equal "
+        f"lengths stay eager. Default AUTO stays off (decode_thr={thr}, "
+        f"cold_thr={cold_thr})."
     )
     if device.type != "cuda":
         print(
@@ -505,6 +546,12 @@ def main() -> int:
         type=int,
         default=DEFAULT_ATTN_AUTO_THRESHOLD,
         help=f"BDH_ATTN_AUTO_THRESHOLD for auto-ab (default {DEFAULT_ATTN_AUTO_THRESHOLD})",
+    )
+    p.add_argument(
+        "--auto-cold-threshold",
+        type=int,
+        default=None,
+        help="independent BDH_ATTN_AUTO_COLD_THRESHOLD (default: mirror --auto-threshold)",
     )
     p.add_argument(
         "--device",
