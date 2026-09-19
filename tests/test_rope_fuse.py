@@ -122,6 +122,34 @@ def test_fused_out_param_and_no_alias():
         fused_rope_rotate_pytorch(v, cos, sin, out=v)
 
 
+@pytest.mark.parametrize("T", [1, 7])
+def test_cpu_rope_out_param_mixed_dtype_preserves_parity(T):
+    """CPU RoPE entries cast fp16 math into fp32 cache-style output slots."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    cos, sin = attn.rope_cos_sin(T, 0, torch.device("cpu"))
+    torch.manual_seed(12 + T)
+    v = torch.randn(2, cfg.n_head, T, N, dtype=torch.float16)
+    assert cos.dtype == torch.float32 and sin.dtype == torch.float32
+
+    ref_out = torch.empty_like(v, dtype=torch.float32)
+    ref = eager_rope_rotate(v, cos, sin, out=ref_out)
+    fused_out = torch.empty_like(ref_out)
+    fused = fused_rope_rotate_pytorch(v, cos, sin, out=fused_out)
+    blocked_out = torch.empty_like(ref_out)
+    blocked = fused_rope_rotate_blocked(v, cos, sin, out=blocked_out, block=3)
+    triton_out = torch.empty_like(ref_out)
+    triton = fused_rope_rotate_triton(v, cos, sin, out=triton_out)
+
+    assert ref is ref_out and fused is fused_out
+    assert blocked is blocked_out and triton is triton_out
+    assert all(result.dtype == torch.float32 for result in (ref, fused, blocked, triton))
+    assert torch.equal(fused, ref)
+    assert torch.equal(blocked, ref)
+    assert torch.equal(triton, ref)
+
+
 def test_fused_backward_matches_eager():
     _, _, cos, sin, v, _ = _cis_and_v(seed=13)
     ve = v.detach().requires_grad_(True)
