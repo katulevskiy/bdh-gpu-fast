@@ -21,6 +21,11 @@ class BDHConfig:
     n_head: int = 4
     mlp_internal_dim_multiplier: int = 128
     vocab_size: int = 256
+    # Published / baseline BDH does NOT tie embed ↔ lm_head (separate
+    # Parameters: embed (V,D), lm_head (D,V)). Default False keeps checkpoints
+    # and vs-baseline bit-identical. Opt-in True shares embed for the vocab
+    # projection (GPT-style F.linear); changes trainable param count.
+    tie_weights: bool = False
 
 
 def get_freqs(n, theta, dtype):
@@ -281,15 +286,21 @@ class BDH(nn.Module):
         self.drop = nn.Dropout(config.dropout)
         self.encoder_v = nn.Parameter(torch.zeros((nh, D, N)).normal_(std=0.02))
 
-        self.lm_head = nn.Parameter(
-            torch.zeros((D, config.vocab_size)).normal_(std=0.02)
-        )
+        # Vocab projection: baseline stores untied lm_head (D, V). Optional
+        # tie_weights shares embed.weight via F.linear (no separate Parameter).
+        if config.tie_weights:
+            self.register_parameter("lm_head", None)
+        else:
+            self.lm_head = nn.Parameter(
+                torch.zeros((D, config.vocab_size)).normal_(std=0.02)
+            )
+        # Optional bias for F.linear epilogue; absent in baseline checkpoints.
+        self.register_parameter("lm_head_bias", None)
 
         # Optional fused biases (absent by default — not in baseline checkpoints).
         self.register_parameter("encoder_bias", None)
         self.register_parameter("encoder_v_bias", None)
         self.register_parameter("decoder_bias", None)
-        self.register_parameter("lm_head_bias", None)
 
         self.apply(self._init_weights)
 
@@ -309,6 +320,41 @@ class BDH(nn.Module):
     def _proj_relu(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
         """Encoder / encoder_v GEMM + in-place ReLU (one buffer, no 2nd ReLU alloc)."""
         return F.relu(x @ weight, inplace=True)
+
+    def _embed_tokens(self, idx: torch.Tensor) -> torch.Tensor:
+        """Token embed → LN → (B, 1, T, D) for the residual body.
+
+        LN runs on contiguous ``(B, T, D)`` from ``nn.Embedding`` (no cast), then
+        a size-1 unsqueeze for head-broadcast layout. Same last-dim LN math as
+        ``LN(embed(idx).unsqueeze(1))``.
+        """
+        x = self._ln(self.embed(idx))
+        return x.unsqueeze(1)
+
+    def _vocab_logits(self, x: torch.Tensor) -> torch.Tensor:
+        """Final hidden ``(B, 1, T, D)`` → contiguous ``(B, T, V)`` logits.
+
+        Untied (default): ``F.linear(h, lm_head.T)`` — transpose is a *view*;
+        no ``.contiguous()`` copy of a (V, D) clone. Bit-identical to
+        ``h @ lm_head`` for the stored ``(D, V)`` Parameter.
+
+        Tied (``tie_weights=True``): ``F.linear(h, embed.weight)`` sharing the
+        embedding matrix (published baseline does **not** tie).
+        """
+        # Squeeze singleton broadcast dim without copy when size == 1.
+        h = x.squeeze(1) if x.dim() == 4 and x.size(1) == 1 else x.reshape(
+            x.size(0), -1, x.size(-1)
+        )
+        if not h.is_contiguous():
+            h = h.contiguous()
+        bias = self.lm_head_bias
+        if self.lm_head is None:
+            return F.linear(h, self.embed.weight, bias)
+        w = self.lm_head
+        if not w.is_contiguous():
+            w = w.contiguous()
+        # F.linear wants (out, in)=(V, D); stored weight is (D, V).
+        return F.linear(h, w.transpose(0, 1), bias)
 
     def _residual_ln(self, x: torch.Tensor, y_mlp: torch.Tensor) -> torch.Tensor:
         """``LN(x + LN(y_mlp))`` reusing the inner LN buffer for the residual sum.
@@ -448,10 +494,13 @@ class BDH(nn.Module):
         if packed:
             cache.commit()
 
-        logits = self._linear(x, self.lm_head, self.lm_head_bias)
+        logits = self._vocab_logits(x)
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            # Contiguous (B*T, V) for CE; view is safe after _vocab_logits.
+            loss = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
+            )
 
         return logits, loss
 

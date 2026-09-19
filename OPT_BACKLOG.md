@@ -34,7 +34,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 | **P1** | **`torch.compile` / inductor** | Forward: `copy_` ~23%, `mul` ~16%, LN ~9%, ReLU ~7%. **train-fuse:** optional `BDH_COMPILE=1` + fused AdamW + sync-light loop landed; measure on GPU. | GPU compile parity | Low |
 | **P2** | **Fused / cached RoPE** | Attn: mul/copy/trig/neg ~60% combined self. | **Cached tables landed `opt/rope-cache`**; fused kernel still open | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
-| **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; CPU wall ~noise vs tip | Low |
+| **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; embed/lm_head path: see `opt/embed-tie`; CPU wall ~noise vs tip | Low |
 | **P3** | **Hardware / dtype** | No GPU here; bf16/fp16 train optional later. | GPU box | Env |
 | **P3** | **Profiler CI artifact** | Traces gitignored; optional nightly upload. | CI | N/A |
 
