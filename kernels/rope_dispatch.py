@@ -23,6 +23,7 @@ from .rope import (
     fused_rope_rotate,
     fused_rope_rotate_pytorch,
     fused_rope_rotate_triton,
+    rope_rotate_t1,
 )
 
 ImplName = Literal["eager", "fused"]
@@ -67,8 +68,10 @@ def bdh_rope_rotate(
 ) -> torch.Tensor:
     """Apply RoPE cos/sin to ``v`` with the selected backend.
 
-    - eager: historical strided even/odd path (bit-identical to prior ``Attention.rope``)
-    - fused: Triton on CUDA when usable; else pure-PyTorch pair-contiguous path
+    - eager: historical strided even/odd path (bit-identical to prior ``Attention.rope``);
+      T=1 decode uses ``rope_rotate_t1`` (pair stores; same math)
+    - fused: Triton on CUDA when usable; else pure-PyTorch pair-contiguous path;
+      T=1 shares ``rope_rotate_t1`` (skips cis ``expand``)
     """
     name = resolve_rope_impl(impl)
     if name == "eager":
@@ -96,4 +99,5 @@ __all__ = [
     "fused_rope_rotate",
     "fused_rope_rotate_pytorch",
     "fused_rope_rotate_triton",
+    "rope_rotate_t1",
 ]

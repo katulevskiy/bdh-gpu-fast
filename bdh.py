@@ -94,6 +94,14 @@ class Attention(torch.nn.Module):
         # (rope_start!=0) hit this instead of redoing arange+trig every step.
         self._rope_table_key = None
         self._rope_table = None
+        # Pair views of the generate table: (cos,sin) reshaped (..., N/2, 2).
+        # Built once in ensure_rope_table; T=1 decode apply can reuse without
+        # per-step full-N reshape of the cold table.
+        self._rope_table_pairs = None
+        # Last T=1 decode cis narrow: reuse across layers when rope_start matches
+        # (defensive if caller does not share cos_sin; zero-cost when shared).
+        self._rope_t1_cis_key = None
+        self._rope_t1_cis = None
         # Optional: generate hoists resolve_attn_impl() once per call.
         self._attn_impl_override = None
 
@@ -155,6 +163,15 @@ class Attention(torch.nn.Module):
         if not torch.compiler.is_compiling():
             self._rope_table_key = key
             self._rope_table = (cos, sin)
+            # Pair layout once — T=1 decode apply / tests can reuse without
+            # reshaping the full table every token.
+            self._rope_table_pairs = (
+                cos.reshape(*cos.shape[:-1], -1, 2),
+                sin.reshape(*sin.shape[:-1], -1, 2),
+            )
+            # Invalidate T=1 cis narrow cache (table identity changed).
+            self._rope_t1_cis_key = None
+            self._rope_t1_cis = None
             # Also warm the rope_start=0 single-T cache for max_T.
             self._rope_cis_key = self._rope_cis_cache_key(max_T, device)
             self._rope_cis = (cos, sin)
@@ -186,6 +203,30 @@ class Attention(torch.nn.Module):
                 if cos.device == device and cos.shape[-2] == max_T:
                     if rope_start == 0 and T == max_T:
                         return cos, sin
+                    # T=1 decode: reuse last narrow when rope_start unchanged
+                    # (cross-layer if caller omits shared cos_sin).
+                    if T == 1:
+                        t1_key = (
+                            int(rope_start),
+                            device.type,
+                            device.index,
+                            int(max_T),
+                        )
+                        hit_t1 = self._rope_t1_cis
+                        if (
+                            hit_t1 is not None
+                            and self._rope_t1_cis_key == t1_key
+                            and not torch.compiler.is_compiling()
+                        ):
+                            return hit_t1
+                        cis = (
+                            cos.narrow(-2, rope_start, 1),
+                            sin.narrow(-2, rope_start, 1),
+                        )
+                        if not torch.compiler.is_compiling():
+                            self._rope_t1_cis_key = t1_key
+                            self._rope_t1_cis = cis
+                        return cis
                     return cos.narrow(-2, rope_start, T), sin.narrow(-2, rope_start, T)
 
         if rope_start != 0:

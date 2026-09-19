@@ -3797,3 +3797,65 @@ on main — strike from “next.”
 - No softmax / diagonal / SDPA
 - No GPU speedup claims from these CPU % figures
 - No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1` on CPU
+
+## opt/rope-decode — deepen T=1 RoPE apply (2026-09-19)
+
+**Branch:** `opt/rope-decode` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `16b71f4` (`#68` profile-v6 on main; after `#67` docs / `#66` log-sync).
+
+### Goal
+
+Deepen RoPE **apply** on the incremental **T=1** decode path: fewer strided
+even/odd stores into packed KR, reuse generate-table pair views + last-position
+cis narrows. Keep `tril(diagonal=-1)`, defaults, and `BDH_ROPE_IMPL`.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/rope.py` | `rope_rotate_t1` — pair-contiguous T=1 rotate (no `0::2`/`1::2` stores; no cis `expand`). `eager_rope_rotate` / `fused_rope_rotate_pytorch` route T=1 here |
+| `kernels/rope_dispatch.py` | Export `rope_rotate_t1`; document T=1 routing under eager/fused |
+| `bdh.py` `Attention` | `_rope_table_pairs` built in `ensure_rope_table`; `_rope_t1_cis` single-slot reuse for T=1 `rope_cos_sin` narrows |
+| `tests/test_rope_decode.py` | Bit-identical vs strided/baseline; `out=` KR slot; cis reuse; pair table; generate tokens≡baseline |
+
+```bash
+export BDH_ROPE_IMPL=eager   # default — T=1 uses rope_rotate_t1 (same math)
+export BDH_ROPE_IMPL=fused   # T=1 shares rope_rotate_t1; multi-T fused/Triton
+```
+
+### Semantics (unchanged)
+
+```text
+y0 = x0 * c0 - x1 * s0
+y1 = x1 * c1 + x0 * s1
+# tril(diagonal=-1) attention unchanged; CacheManager cat-free generate unchanged
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_rope_decode.py tests/test_rope_fuse.py   tests/test_rope_cache.py -q
+# 24 passed, 1 skipped — t1 ≡ strided ≡ baseline; cis reuse; generate tokens match
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```text
+device=cpu  B=4 H=4 T=1 N=256  torch=2.14.0+cu130 cuda=False
+correctness max|t1-strided|=0
+strided out=  median: ~29.5 us
+t1      out=  median: ~35.4 us  (≈0.83× — pair reshape overhead on CPU)
+```
+
+**Verdict:** no default-path CPU wall win. Land **structural** deepen (T=1 pair
+apply, table pair cache, last-pos cis reuse) + honest docs. **No GPU on this
+box** — expect pair stores / skipped `expand` to matter more on CUDA with
+`BDH_ROPE_IMPL=fused` + Triton. Default remains `eager`.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ROPE_IMPL=eager`
+- No fake GPU speedups from CPU medians
+- No removal of `rope_cos_sin` / generate table cache
+- No attention math / `tril(-1)` changes
