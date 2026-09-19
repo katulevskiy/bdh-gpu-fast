@@ -182,3 +182,30 @@ def test_online_decode_preserves_offset_packed_shared_v_views():
     assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5)
     assert torch.equal(K, K_before)
     assert torch.equal(V, V_before)
+
+
+def test_online_decode_multi_query_preserves_offset_packed_kv_views():
+    """Multi-query tiled decode keeps offset packed K/V views exact and read-only."""
+    B, H, S, Tq, N, D = 2, 3, 2049, 3, 4, 2
+    offset = 7
+    capacity = S + 19
+    g = torch.Generator().manual_seed(1314)
+    k_storage = torch.randn(B, H, offset + capacity, N, generator=g)
+    v_storage = torch.randn(B, 1, offset + capacity, D, generator=g)
+    K = k_storage.narrow(2, offset, S)
+    V = v_storage.narrow(2, offset, S)
+    Q = torch.randn(B, H, Tq, N, generator=g)
+
+    assert K.stride() == (
+        H * (offset + capacity) * N, (offset + capacity) * N, N, 1
+    )
+    assert V.stride() == ((offset + capacity) * D, (offset + capacity) * D, D, 1)
+    K_before, V_before = K.clone(), V.clone()
+    ref = eager_decode_attn(Q, K, V)
+    got = online_decode_attn(Q, K, V, block_size=64)
+
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+        f"maxdiff={(got - ref).abs().max().item()}"
+    )
+    assert torch.equal(K, K_before)
+    assert torch.equal(V, V_before)
