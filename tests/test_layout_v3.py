@@ -394,3 +394,55 @@ def test_sampler_idx_out_accepts_zero_singleton_stride_view():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1, 0].reshape(2, 1), ref), name
+
+
+def test_sampler_accepts_strided_logits_with_strided_output():
+    """Decode sampler views may be strided on both input and output."""
+    torch.manual_seed(0)
+    logits_storage = torch.randn(2, 3, 32)
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        # This is the layout of logits[:, -1, :] from a (B, T, V) prefill.
+        logits = logits_storage.clone()[:, 1, :]
+        assert logits.shape == (2, 32), name
+        assert logits.stride() == (96, 1), name
+
+        destination = torch.full((1, 3, 2), -123, dtype=torch.long)
+        before = destination.clone()
+        idx_out = destination[:, 1, :].transpose(0, 1)
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (1, 6), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits,
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        target = torch.zeros_like(destination, dtype=torch.bool)
+        target[:, 1, :] = True
+        assert torch.equal(
+            destination.masked_select(~target), before.masked_select(~target)
+        ), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1, :].transpose(0, 1), ref), name
