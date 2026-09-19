@@ -7106,3 +7106,14 @@ CPU change in this matched profile.
   `tril(diagonal=-1)`, with no softmax, scaling, or SDPA.
 - No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
   claimed; real GPU measurement and cold CUDA/Triton validation remain open.
+
+
+## Sparse probe contract deepen (2026-09-19)
+
+- `benchmarks/bench_sparse_probe.py` now emits explicit `exit_code` / `reason`
+  markers: `0` for the default-off no-op or a completed probe, `2` for an
+  observed density guardrail failure, and `3` when enforcement has no density
+  samples to inspect.
+- Added a CPU smoke proving the default-off path does not call training or the
+  crossover sweep. `BDH_SPARSE_PROBE=1` remains the only opt-in; production
+  sparse wiring is unchanged and this CPU-only run claims no sparse win.

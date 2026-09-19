@@ -15,7 +15,8 @@ Usage:
 
 Exit status:
   0  probe completed, or the default-off gate intentionally did no work
-  2  an enforced density guardrail failed
+  2  an enforced density guardrail observed a failing sample
+  3  guardrail enforcement was requested without density samples
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import train as tr
 
 EXIT_OK = 0
 EXIT_DENSITY_GUARDRAIL = 2
+EXIT_GUARDRAIL_NO_SAMPLES = 3
 
 
 def density_guardrail(
@@ -309,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     if not sp.sparse_probe_enabled():
         print(
             "SPARSE PROBE DISABLED (default): no training or benchmark work. "
-            "Set BDH_SPARSE_PROBE=1 for the optional probe."
+            "Set BDH_SPARSE_PROBE=1 for the optional probe. "
+            f"exit_code={EXIT_OK} reason=probe_disabled"
         )
         return EXIT_OK
 
@@ -355,7 +358,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"density_guardrail={'pass' if ok else 'fail'} {detail}")
         if args.enforce_density_guardrail and not ok:
             print("density re-smoke guardrail failed", file=sys.stderr)
+            print(
+                f"exit_code={EXIT_DENSITY_GUARDRAIL} reason=guardrail_failed",
+                file=sys.stderr,
+            )
             return EXIT_DENSITY_GUARDRAIL
+    elif args.enforce_density_guardrail:
+        print(
+            "density_guardrail=unavailable no density samples collected; "
+            "remove --skip-train or disable enforcement",
+            file=sys.stderr,
+        )
+        print(
+            f"exit_code={EXIT_GUARDRAIL_NO_SAMPLES} "
+            "reason=guardrail_no_samples",
+            file=sys.stderr,
+        )
+        return EXIT_GUARDRAIL_NO_SAMPLES
 
     rows: list[dict] = []
     if not args.skip_crossover and not args.density_only:
@@ -420,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         ]
         print(f"cpu_sparse_wins={wins if wins else 'none'}")
 
+    print(f"exit_code={EXIT_OK} reason=probe_complete")
     return EXIT_OK
 
 
