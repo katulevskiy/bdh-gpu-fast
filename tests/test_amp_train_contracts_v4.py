@@ -515,6 +515,38 @@ def test_failed_unscaled_optimizer_step_still_clears_grads(monkeypatch):
     assert model.weight.grad is None
 
 
+def test_failed_unscaled_backward_still_clears_stale_grads(monkeypatch):
+    """The unscaled AMP path clears stale grads when backward fails."""
+    events = []
+    monkeypatch.setattr(tr, "ctx", tr.nullcontext())
+    monkeypatch.setattr(tr, "_amp_forward_only", False)
+    monkeypatch.setattr(tr, "_use_scaler", False)
+    monkeypatch.setattr(tr, "scaler", None)
+
+    class _FailingLoss:
+        def backward(self):
+            events.append("backward")
+            raise RuntimeError("synthetic unscaled backward failure")
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, 1))
+
+        def forward(self, x, y=None):
+            return x @ self.weight, _FailingLoss()
+
+    model = _TinyModel()
+    model.weight.grad = torch.ones_like(model.weight)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    with pytest.raises(RuntimeError, match="synthetic unscaled backward failure"):
+        tr.train_step(model, optimizer, torch.tensor([[2.0]]), torch.tensor([[0]]))
+
+    assert events == ["backward"]
+    assert model.weight.grad is None
+
+
 def test_failed_forward_still_clears_stale_grads(monkeypatch):
     """Train-step cleanup runs when the model fails before backward."""
     monkeypatch.setattr(tr, "ctx", tr.nullcontext())
