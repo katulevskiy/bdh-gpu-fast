@@ -184,7 +184,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **24** | `opt/bf16-train` | Opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA | CPU AMP smoke | Train bench open |
 | **25** | `opt/triton-cold` | Better cold Triton tiles + less staging | →blocked on CPU | **P0** GPU validate |
 | **26** | `opt/gpu-bench` | `benchmarks/bench_gpu_attn.py` + backlog runbook | Clean skip if no CUDA | Harness ready |
-| **27** | `opt/cuda-cold` | Tiled online cold CUDA tril score×V (no global `T×T`) | Ref path | **P0** GPU measure |
+| **27** | `opt/cuda-cold` | Tiled online cold CUDA tril score×V (no global `T×T`); deepened by cuda-cold-v2 | Ref path | **P0** GPU measure |
 | **28** | `opt/decode-copy` | `CacheManager.reserve` + in-place RoPE; fewer `copy_` | `copy_` calls cut ~2× | Remaining: decode GEMM |
 | **29** | `opt/rope-fuse` | Fused RoPE rotate (`BDH_ROPE_IMPL`) | Default eager; fused PT | Triton GPU open |
 | **30** | `opt/ln-compile` | `F.layer_norm` residual; fewer Dynamo specializations | Compile-friendlier | — |
@@ -234,6 +234,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **75** | `opt/prefill-blocked` | Deepen blocked/online cold (adaptive BS@T≥256); AUTO long-T cold+decode | AUTO e2e 1.26×@1024 / 1.39×@2048; cats=0; default eager | GPU thr re-tune open |
 | **76** | `opt/docs-matrix-v10` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #75; update documented tip metadata | Docs only | — |
 | **77** | `opt/auto-tune` | Keep shared thr=512; add `BDH_ATTN_AUTO_COLD_THRESHOLD`; operator recs from #72/#73/#75 | short AUTO A/B 1.25×@1024; default AUTO off | GPU thr re-check open |
+| **78** | `opt/docs-matrix-v11` | Refresh optimization matrix through #77 | Docs only | — |
+| **…** | `opt/cuda-cold-v2` | Deepen CUDA cold tiles (adaptive TILE_M/N long-T; pair #75); CPU refs ≡ blocked/eager | ≡ eager/blocked; soft-skip GPU; default eager | GPU `--mode cold` open |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):

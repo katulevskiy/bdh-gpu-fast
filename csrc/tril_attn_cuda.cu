@@ -6,6 +6,8 @@
 
 // Cold-path CUDA: tiled online strict-tril score×V (no global T×T scores).
 // Semantics: out[i] = sum_{j < i} (Q[i]·K[j]) * V[j]  — NO softmax, NO 1/sqrt(d).
+// cuda-cold-v2: adaptive TILE_M/TILE_N (16/32 × 16/32/64) for long-T prefill
+// (pair #75 pick_cold_block_size @T≥256).
 //
 // Grid:  (ceil(T / TILE_M), B*H, ceil(Dv / TILE_D))
 // Block: (TILE_D, TILE_M)  — thread (tx,ty) owns query row i0+ty and Dv lane d0+tx
@@ -18,14 +20,70 @@
 //  + dedicated Tq=1 path; long-S tiles pair with #55/#62).
 
 namespace {
-constexpr int TILE_M = 16;  // query rows per block (cold + multi-Tq decode)
-constexpr int TILE_N = 16;  // key cols per online tile (cold)
+constexpr int TILE_M = 16;  // base query rows (cold + multi-Tq decode)
+constexpr int TILE_N = 16;  // base key cols per online tile (cold)
 constexpr int TILE_D = 32;  // Dv columns per block (blockDim.x)
+// cuda-cold-v2: adaptive long-T cold tiles (pair #75 BS@T≥256).
+constexpr int TILE_M_MAX = 32;
+constexpr int TILE_N_MAX = 64;
 // Decode past tiles: base 32; cuda-decode-v3 adaptive long-S up to 128 (smem).
 constexpr int DECODE_TILE_N = 32;
 constexpr int DECODE_TILE_N_MAX = 128;
 // Soft cap: fall back to naive if dynamic smem would exceed this.
 constexpr size_t SMEM_CAP = 48 * 1024;
+
+// Pair with #75: prefer larger query/key tiles on long cold/prefill.
+// Returns (tile_m, tile_n); shrink until float smem estimate fits SMEM_CAP.
+__host__ inline void pick_cold_tiles(int T, int Dk, int* out_m, int* out_n) {
+  int want_m;
+  int want_n;
+  if (T <= 64) {
+    want_m = 16;
+    want_n = 16;
+  } else if (T <= 256) {
+    want_m = 32;
+    want_n = 32;
+  } else {
+    want_m = 32;  // CUDA blockDim.y cap
+    want_n = 64;  // fewer key-tile iters on long T
+  }
+  int tm = TILE_M;
+  int tn = TILE_N;
+  while (tm < want_m && tm < TILE_M_MAX) {
+    tm <<= 1;
+  }
+  while (tn < want_n && tn < TILE_N_MAX) {
+    tn <<= 1;
+  }
+  if (tm > TILE_M_MAX) tm = TILE_M_MAX;
+  if (tn > TILE_N_MAX) tn = TILE_N_MAX;
+  // Avoid oversizing tiny T.
+  while (tm > TILE_M && tm / 2 >= T) {
+    tm >>= 1;
+  }
+  while (tn > TILE_N && tn / 2 >= T) {
+    tn >>= 1;
+  }
+  auto smem_bytes = [&](int tm_, int tn_) -> size_t {
+    return sizeof(float) *
+           (static_cast<size_t>(tm_) * static_cast<size_t>(Dk) +
+            static_cast<size_t>(tn_) * static_cast<size_t>(Dk) +
+            static_cast<size_t>(tn_) * static_cast<size_t>(TILE_D));
+  };
+  while ((tm > TILE_M || tn > TILE_N) && smem_bytes(tm, tn) > SMEM_CAP) {
+    if (tn > tm && tn > TILE_N) {
+      tn >>= 1;
+    } else if (tm > TILE_M) {
+      tm >>= 1;
+    } else if (tn > TILE_N) {
+      tn >>= 1;
+    } else {
+      break;
+    }
+  }
+  *out_m = tm;
+  *out_n = tn;
+}
 
 // Pair with #55/#62: prefer larger past tiles on long packed caches.
 // Shrink until float-sized smem estimate fits SMEM_CAP (half/bf16 are smaller).
@@ -63,7 +121,8 @@ __host__ inline int pick_decode_tile_n(int S, int Dk) {
 }
 }  // namespace
 
-template <typename scalar_t>
+// cuda-cold-v2: templated TILE_M/TILE_N for long-T adaptive cold (pair #75).
+template <typename scalar_t, int TM, int TN>
 __global__ void tril_score_v_tiled_kernel(
     const scalar_t* __restrict__ Q,
     const scalar_t* __restrict__ K,
@@ -72,15 +131,15 @@ __global__ void tril_score_v_tiled_kernel(
     int B, int H, int T, int Dk, int Dv, int Hv) {
   extern __shared__ char smem_raw[];
   scalar_t* Qs = reinterpret_cast<scalar_t*>(smem_raw);
-  scalar_t* Ks = Qs + TILE_M * Dk;
-  scalar_t* Vs = Ks + TILE_N * Dk;
+  scalar_t* Ks = Qs + TM * Dk;
+  scalar_t* Vs = Ks + TN * Dk;
 
   const int bh = static_cast<int>(blockIdx.y);
   const int b = bh / H;
   const int h = bh % H;
   const int hv = (Hv == 1) ? 0 : h;
 
-  const int i0 = static_cast<int>(blockIdx.x) * TILE_M;
+  const int i0 = static_cast<int>(blockIdx.x) * TM;
   const int d0 = static_cast<int>(blockIdx.z) * TILE_D;
   const int ty = static_cast<int>(threadIdx.y);
   const int tx = static_cast<int>(threadIdx.x);
@@ -90,7 +149,7 @@ __global__ void tril_score_v_tiled_kernel(
   const int64_t q_head = (static_cast<int64_t>(b) * H + h) * T;
   const int64_t v_head = (static_cast<int64_t>(b) * Hv + hv) * T;
 
-  // Cooperative load of Q tile (all Dk) for rows [i0, i0+TILE_M).
+  // Cooperative load of Q tile (all Dk) for rows [i0, i0+TM).
   for (int e = tx; e < Dk; e += TILE_D) {
     if (i < T) {
       Qs[ty * Dk + e] = Q[(q_head + i) * Dk + e];
@@ -101,18 +160,18 @@ __global__ void tril_score_v_tiled_kernel(
   __syncthreads();
 
   float acc = 0.f;
-  // Key tiles that can contribute to any row in this query tile: j < i0+TILE_M.
-  const int j_lim = (i0 + TILE_M < T) ? (i0 + TILE_M) : T;
-  for (int j0 = 0; j0 < j_lim; j0 += TILE_N) {
-    // Load K[j0:j0+TILE_N, :] and V[j0:j0+TILE_N, d0:d0+TILE_D) into shared.
-    for (int idx = ty * TILE_D + tx; idx < TILE_N * Dk; idx += TILE_M * TILE_D) {
+  // Key tiles that can contribute to any row in this query tile: j < i0+TM.
+  const int j_lim = (i0 + TM < T) ? (i0 + TM) : T;
+  for (int j0 = 0; j0 < j_lim; j0 += TN) {
+    // Load K[j0:j0+TN, :] and V[j0:j0+TN, d0:d0+TILE_D) into shared.
+    for (int idx = ty * TILE_D + tx; idx < TN * Dk; idx += TM * TILE_D) {
       const int jl = idx / Dk;
       const int e = idx % Dk;
       const int j = j0 + jl;
       Ks[jl * Dk + e] =
           (j < T) ? K[(q_head + j) * Dk + e] : scalar_t(0);
     }
-    for (int idx = ty * TILE_D + tx; idx < TILE_N * TILE_D; idx += TILE_M * TILE_D) {
+    for (int idx = ty * TILE_D + tx; idx < TN * TILE_D; idx += TM * TILE_D) {
       const int jl = idx / TILE_D;
       const int dc = idx % TILE_D;
       const int j = j0 + jl;
@@ -123,7 +182,7 @@ __global__ void tril_score_v_tiled_kernel(
     __syncthreads();
 
     if (i < T && d < Dv && i > 0) {
-      for (int jl = 0; jl < TILE_N; ++jl) {
+      for (int jl = 0; jl < TN; ++jl) {
         const int j = j0 + jl;
         if (j >= i) {
           continue;  // strict lower-triangular: j < i only
@@ -209,27 +268,51 @@ torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor 
   const at::cuda::CUDAGuard guard(qc.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+  int tile_m = TILE_M;
+  int tile_n = TILE_N;
+  pick_cold_tiles(static_cast<int>(T), static_cast<int>(Dk), &tile_m, &tile_n);
+
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, qc.scalar_type(),
       "tril_score_v_cuda",
       [&] {
         const size_t smem = sizeof(scalar_t) *
-            (static_cast<size_t>(TILE_M) * static_cast<size_t>(Dk) +
-             static_cast<size_t>(TILE_N) * static_cast<size_t>(Dk) +
-             static_cast<size_t>(TILE_N) * static_cast<size_t>(TILE_D));
+            (static_cast<size_t>(tile_m) * static_cast<size_t>(Dk) +
+             static_cast<size_t>(tile_n) * static_cast<size_t>(Dk) +
+             static_cast<size_t>(tile_n) * static_cast<size_t>(TILE_D));
 
         if (smem <= SMEM_CAP) {
-          dim3 block(TILE_D, TILE_M);
+          dim3 block(TILE_D, tile_m);
           dim3 grid(
-              static_cast<unsigned>((T + TILE_M - 1) / TILE_M),
+              static_cast<unsigned>((T + tile_m - 1) / tile_m),
               static_cast<unsigned>(B * H),
               static_cast<unsigned>((Dv + TILE_D - 1) / TILE_D));
-          tril_score_v_tiled_kernel<scalar_t><<<grid, block, smem, stream>>>(
-              qc.data_ptr<scalar_t>(),
-              kc.data_ptr<scalar_t>(),
-              vc.data_ptr<scalar_t>(),
-              out.data_ptr<scalar_t>(),
-              (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+          // Templated (TM,TN) pairs used by pick_cold_tiles (cuda-cold-v2).
+          if (tile_m >= 32 && tile_n >= 64) {
+            tril_score_v_tiled_kernel<scalar_t, 32, 64>
+                <<<grid, block, smem, stream>>>(
+                    qc.data_ptr<scalar_t>(), kc.data_ptr<scalar_t>(),
+                    vc.data_ptr<scalar_t>(), out.data_ptr<scalar_t>(),
+                    (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+          } else if (tile_m >= 32) {
+            tril_score_v_tiled_kernel<scalar_t, 32, 32>
+                <<<grid, block, smem, stream>>>(
+                    qc.data_ptr<scalar_t>(), kc.data_ptr<scalar_t>(),
+                    vc.data_ptr<scalar_t>(), out.data_ptr<scalar_t>(),
+                    (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+          } else if (tile_n >= 32) {
+            tril_score_v_tiled_kernel<scalar_t, 16, 32>
+                <<<grid, block, smem, stream>>>(
+                    qc.data_ptr<scalar_t>(), kc.data_ptr<scalar_t>(),
+                    vc.data_ptr<scalar_t>(), out.data_ptr<scalar_t>(),
+                    (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+          } else {
+            tril_score_v_tiled_kernel<scalar_t, 16, 16>
+                <<<grid, block, smem, stream>>>(
+                    qc.data_ptr<scalar_t>(), kc.data_ptr<scalar_t>(),
+                    vc.data_ptr<scalar_t>(), out.data_ptr<scalar_t>(),
+                    (int)B, (int)H, (int)T, (int)Dk, (int)Dv, (int)Hv);
+          }
         } else {
           // Huge Dk: keep fused online math (no T×T) via naive per-element loop.
           const int64_t n = B * H * T * Dv;

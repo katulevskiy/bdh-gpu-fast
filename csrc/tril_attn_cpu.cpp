@@ -8,10 +8,48 @@ namespace {
 // Match csrc/tril_attn_cuda.cu tile sizes for CPU online scaffolds.
 constexpr int64_t TILE_M = 16;
 constexpr int64_t TILE_N = 16;
+constexpr int64_t TILE_M_CPU_MAX = 128;  // cuda-cold-v2: pair #75 BS@T≥256
+constexpr int64_t TILE_N_CPU_MAX = 128;
 constexpr int64_t DECODE_TILE_N = 32;  // base (decode-mm)
 constexpr int64_t DECODE_TILE_N_CPU_MAX = 512;  // cuda-decode-v3: pair #55/#62 long-S
 // Below this score footprint, prefer a single vectorized matmul (eager-shaped).
 constexpr int64_t SCORE_ELEMS_EAGER_OK = 256 * 256;
+constexpr int64_t COLD_SCORE_ELEMS_BUDGET = 256 * 256;
+
+// Adaptive cold tiles (CPU refs — mirrors pick_cuda_cold_tiles; pair #75).
+inline void pick_cold_tiles_cpu(int64_t T, int64_t* out_m, int64_t* out_n) {
+  int64_t want_m;
+  int64_t want_n;
+  if (T <= 64) {
+    want_m = 16;
+    want_n = 16;
+  } else if (T <= 256) {
+    want_m = 32;
+    want_n = 32;
+  } else {
+    want_m = 128;
+    want_n = 128;
+  }
+  int64_t tm = 16;
+  int64_t tn = 16;
+  const int64_t tcap = std::max(T, int64_t{1});
+  while (tm < std::min(tcap, want_m) && tm < TILE_M_CPU_MAX) {
+    tm <<= 1;
+  }
+  while (tn < std::min(tcap, want_n) && tn < TILE_N_CPU_MAX) {
+    tn <<= 1;
+  }
+  *out_m = std::min(tm, TILE_M_CPU_MAX);
+  *out_n = std::min(tn, TILE_N_CPU_MAX);
+}
+
+inline int64_t cold_score_budget(int64_t T, int64_t BS) {
+  int64_t budget = std::max(BS * BS, COLD_SCORE_ELEMS_BUDGET);
+  if (T >= 256) {
+    budget = std::max(budget, BS * std::min(T, int64_t{1024}));
+  }
+  return budget;
+}
 
 // Adaptive past tile (CPU refs — no smem cap; mirrors pick_cuda_decode_tile_n).
 inline int64_t pick_decode_tile_n_cpu(int64_t S) {
@@ -60,8 +98,8 @@ static torch::Tensor tril_score_v_cpu_eager(torch::Tensor q, torch::Tensor k,
   return out.to(q.scalar_type());
 }
 
-// Tiled online cold (mirrors CUDA tril_score_v_tiled_kernel):
-// past tiles j < i0 + diagonal row-wise strict tril; no full T×T retained.
+// Tiled online cold (mirrors CUDA tril_score_v_tiled_kernel; cuda-cold-v2):
+// adaptive TM/TN + oneshot past under budget + vectorized diag tril(-1).
 static torch::Tensor tril_score_v_cpu_tiled(torch::Tensor q, torch::Tensor k,
                                             torch::Tensor v) {
   const auto B = q.size(0);
@@ -78,27 +116,42 @@ static torch::Tensor tril_score_v_cpu_tiled(torch::Tensor q, torch::Tensor k,
     return out.to(q.scalar_type());
   }
 
-  for (int64_t i0 = 0; i0 < T; i0 += TILE_M) {
-    const int64_t i1 = std::min(i0 + TILE_M, T);
-    auto Qi = qf.narrow(/*dim=*/2, i0, i1 - i0);
+  int64_t TM = TILE_M;
+  int64_t TN = TILE_N;
+  pick_cold_tiles_cpu(T, &TM, &TN);
+  const int64_t score_budget = cold_score_budget(T, TM);
 
-    // Past key tiles: every j < i0 is strictly before queries in [i0,i1).
-    for (int64_t j0 = 0; j0 < i0; j0 += TILE_N) {
-      const int64_t j1 = std::min(j0 + TILE_N, i0);
-      auto Kj = kf.narrow(/*dim=*/2, j0, j1 - j0);
-      auto Vj = vf.narrow(/*dim=*/2, j0, j1 - j0);
-      auto tile = at::matmul(at::matmul(Qi, Kj.transpose(-2, -1)), Vj);
-      out.narrow(/*dim=*/2, i0, i1 - i0).add_(tile);
+  for (int64_t i0 = 0; i0 < T; i0 += TM) {
+    const int64_t i1 = std::min(i0 + TM, T);
+    const int64_t Bi = i1 - i0;
+    auto Qi = qf.narrow(/*dim=*/2, i0, Bi);
+
+    // Past: oneshot when Bi·i0 fits budget (pair #75); else chunk.
+    if (i0 > 0) {
+      if (Bi * i0 <= score_budget) {
+        auto Kj = kf.narrow(/*dim=*/2, 0, i0);
+        auto Vj = vf.narrow(/*dim=*/2, 0, i0);
+        out.narrow(/*dim=*/2, i0, Bi)
+            .add_(at::matmul(at::matmul(Qi, Kj.transpose(-2, -1)), Vj));
+      } else {
+        const int64_t tile =
+            std::max(TN, score_budget / std::max(Bi, int64_t{1}));
+        for (int64_t j0 = 0; j0 < i0; j0 += tile) {
+          const int64_t j1 = std::min(j0 + tile, i0);
+          auto Kj = kf.narrow(/*dim=*/2, j0, j1 - j0);
+          auto Vj = vf.narrow(/*dim=*/2, j0, j1 - j0);
+          out.narrow(/*dim=*/2, i0, Bi)
+              .add_(at::matmul(at::matmul(Qi, Kj.transpose(-2, -1)), Vj));
+        }
+      }
     }
 
-    // Diagonal: online rows with j < i inside the block (tril diagonal=-1).
-    const int64_t Bi = i1 - i0;
-    for (int64_t r = 1; r < Bi; ++r) {
-      auto qi = qf.narrow(/*dim=*/2, i0 + r, 1);
-      auto Kj = kf.narrow(/*dim=*/2, i0, r);
-      auto Vj = vf.narrow(/*dim=*/2, i0, r);
-      auto row = at::matmul(at::matmul(qi, Kj.transpose(-2, -1)), Vj);
-      out.narrow(/*dim=*/2, i0 + r, 1).add_(row);
+    // Diagonal: vectorized Bi×Bi with tril(diagonal=-1) — not a row loop.
+    if (Bi > 1) {
+      auto scores = at::matmul(Qi, kf.narrow(/*dim=*/2, i0, Bi).transpose(-2, -1));
+      scores = scores.tril(/*diagonal=*/-1);
+      out.narrow(/*dim=*/2, i0, Bi)
+          .add_(at::matmul(scores, vf.narrow(/*dim=*/2, i0, Bi)));
     }
   }
   return out.to(q.scalar_type());

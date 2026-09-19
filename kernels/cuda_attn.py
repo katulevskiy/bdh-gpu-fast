@@ -30,17 +30,21 @@ Optional native build (``csrc/``)::
     BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 
 Cold CUDA kernel (``tril_score_v_cuda``) uses **tiled online** accumulation
-(shared-mem Q/K/V tiles; no global T×T scores). Decode is a separate
-packed-past tiled scaffold with **adaptive past tiles** (``pick_cuda_decode_tile_n``;
-base ``DECODE_TILE_N=32``, long-S up to 128 on CUDA / 512 on CPU refs) and a
-dedicated ``Tq=1`` kernel. Without the extension, training and tests
-still work via pure-PyTorch refs. Import of this module **never** raises if
-the native ext is missing — ``has_cuda_ext()`` is False and dispatch falls back.
+(shared-mem Q/K/V tiles; no global T×T scores) with **adaptive** query/key
+tiles (``pick_cuda_cold_tiles``; base ``TILE_M/N=16``, long-T up to 32/64 on
+CUDA smem / 128 on CPU refs — pairs ``#75`` ``pick_cold_block_size`` @T≥256).
+Decode is a separate packed-past tiled scaffold with **adaptive past tiles**
+(``pick_cuda_decode_tile_n``; base ``DECODE_TILE_N=32``, long-S up to 128 on
+CUDA / 512 on CPU refs) and a dedicated ``Tq=1`` kernel. Without the
+extension, training and tests still work via pure-PyTorch refs. Import of
+this module **never** raises if the native ext is missing —
+``has_cuda_ext()`` is False and dispatch falls back.
 
 Wire-up: ``BDH_ATTN_IMPL=cuda`` → cold ``bdh_attn`` / decode ``bdh_attn_decode``.
 Default remains ``eager``.
 
-Tile sizes below match ``csrc/tril_attn_cuda.cu`` (TILE_M / TILE_N / TILE_D).
+Tile sizes below match ``csrc/tril_attn_cuda.cu`` (TILE_M / TILE_N / TILE_D;
+cold adaptive via ``pick_cuda_cold_tiles``).
 """
 
 from __future__ import annotations
@@ -50,9 +54,14 @@ from typing import Optional
 import torch
 
 # Match csrc/tril_attn_cuda.cu — CPU tiled refs mirror these for drop-in parity.
-CUDA_TILE_M = 16  # query rows per tile (cold)
-CUDA_TILE_N = 16  # key cols per online tile (cold)
+CUDA_TILE_M = 16  # base query rows per tile (cold; back-compat)
+CUDA_TILE_N = 16  # base key cols per online tile (cold; back-compat)
 CUDA_TILE_D = 32  # Dv columns (CUDA blockDim.x; CPU uses full Dv via matmul)
+# cuda-cold-v2: adaptive long-T cold tiles (pair #75 pick_cold_block_size @T≥256).
+CUDA_TILE_M_MAX = 32  # CUDA smem-aware query-tile cap (blockDim.y)
+CUDA_TILE_N_MAX = 64  # CUDA smem-aware key-tile cap (float Dk≈64 fits ≤48 KiB)
+CUDA_TILE_M_CPU_MAX = 128  # CPU refs: same long-T preference as #75 BS=128
+CUDA_TILE_N_CPU_MAX = 128
 # Decode past tiles: base / max (no causal diagonal — all keys valid).
 # cuda-decode-v3: adaptive long-S tiles (pair #55/#62); CUDA smem caps at MAX.
 CUDA_DECODE_TILE_N = 32  # base / mid-S default (kept for back-compat asserts)
@@ -60,11 +69,14 @@ CUDA_DECODE_TILE_N_MAX = 128  # CUDA smem-aware cap (float Dk≈64 fits ≤48 Ki
 CUDA_DECODE_TILE_N_CPU_MAX = 512  # CPU refs: same long-S preference as Triton #62
 # Soft smem budget matching csrc SMEM_CAP (bytes) for float-size estimates.
 _CUDA_DECODE_SMEM_CAP = 48 * 1024
+_CUDA_COLD_SMEM_CAP = 48 * 1024
 
 # Soft budget: below this, cold/decode refs prefer a single vectorized two-GEMM
 # (bit-identical to eager). Above it, use tiled online to avoid a full T×T /
 # Tq×S score materialization — same structure the CUDA scaffold will run.
 _SCORE_ELEMS_EAGER_OK = 256 * 256
+# cuda-cold-v2 / #75: long-T oneshot past budget (Bi × past) before key-chunking.
+_COLD_SCORE_ELEMS_BUDGET = 256 * 256
 
 _ext = None
 _ext_load_error: Optional[BaseException] = None
@@ -117,6 +129,95 @@ def _check_decode_shapes(
     if v_past.size(1) not in (1, H):
         raise ValueError("v_past heads must equal q heads or 1")
     return B, H, Tq, S, v_past.size(-1)
+
+
+def pick_cuda_cold_tiles(
+    T: int,
+    Dk: int = 64,
+    *,
+    for_smem: bool = False,
+    tile_m: int | None = None,
+    tile_n: int | None = None,
+) -> tuple[int, int]:
+    """Power-of-2 query/key tiles for CUDA cold tril score×V (long-T deepen).
+
+    Pairs with ``#75`` ``pick_cold_block_size`` (BS 64→128 at ``T≥256``) and
+    Triton ``_pick_triton_cold_tiles``: larger tiles on long prefill so fewer
+    online trips while peak scores stay ≪ ``T×T``. CUDA launch uses
+    ``for_smem=True`` (cap ``CUDA_TILE_M/N_MAX``, shrink for 48 KiB smem).
+    CPU tiled refs use ``for_smem=False`` so long-T can reach 128 like blocked.
+    """
+    def _p2_cap(x: int, lo: int, hi: int) -> int:
+        x = max(lo, min(int(x), hi))
+        p = lo
+        while p < x:
+            nxt = p << 1
+            if nxt > hi:
+                break
+            p = nxt
+        return p
+
+    hi_m = CUDA_TILE_M_MAX if for_smem else CUDA_TILE_M_CPU_MAX
+    hi_n = CUDA_TILE_N_MAX if for_smem else CUDA_TILE_N_CPU_MAX
+    lo = 16
+    T = max(int(T), 1)
+
+    if tile_m is not None:
+        tm = _p2_cap(int(tile_m), lo, hi_m)
+    else:
+        # Mirror #75: base 16 for short; grow at mid/long T (fewer query tiles).
+        if T <= 64:
+            want_m = 16
+        elif T <= 256:
+            want_m = 32
+        else:
+            want_m = 64 if for_smem else 128
+        tm = _p2_cap(min(T, want_m), lo, hi_m)
+
+    if tile_n is not None:
+        tn = _p2_cap(int(tile_n), lo, hi_n)
+    else:
+        if T <= 64:
+            want_n = 16
+        elif T <= 256:
+            want_n = 32
+        else:
+            want_n = 64 if for_smem else 128
+        tn = _p2_cap(min(T, want_n), lo, hi_n)
+
+    if for_smem:
+        Dk = max(int(Dk), 1)
+        esz = 4
+
+        def _smem(tm_: int, tn_: int) -> int:
+            # Qs[TM*Dk] + Ks[TN*Dk] + Vs[TN*TILE_D]
+            return esz * (tm_ * Dk + tn_ * Dk + tn_ * CUDA_TILE_D)
+
+        while (tm > CUDA_TILE_M or tn > CUDA_TILE_N) and _smem(tm, tn) > _CUDA_COLD_SMEM_CAP:
+            if tn > tm and tn > CUDA_TILE_N:
+                tn >>= 1
+            elif tm > CUDA_TILE_M:
+                tm >>= 1
+            elif tn > CUDA_TILE_N:
+                tn >>= 1
+            else:
+                break
+        tm = min(tm, CUDA_TILE_M_MAX)
+        tn = min(tn, CUDA_TILE_N_MAX)
+    return max(lo, tm), max(lo, tn)
+
+
+def _cold_score_budget(T: int, BS: int) -> int:
+    """Score-elem budget for one past tile (never a full ``T×T``).
+
+    Mirrors ``kernels.attention._cold_score_budget`` (#75): base
+    ``max(BS², _COLD_SCORE_ELEMS_BUDGET)``; for ``T≥256`` allow a larger
+    oneshot up to ``BS * min(T, 1024)``.
+    """
+    budget = max(BS * BS, _COLD_SCORE_ELEMS_BUDGET)
+    if int(T) >= 256:
+        budget = max(budget, BS * min(int(T), 1024))
+    return budget
 
 
 def pick_cuda_decode_tile_n(
@@ -205,67 +306,75 @@ def tril_score_v_tiled_ref(
     k: torch.Tensor,
     v: torch.Tensor,
     *,
-    tile_m: int = CUDA_TILE_M,
-    tile_n: int = CUDA_TILE_N,
+    tile_m: int | None = None,
+    tile_n: int | None = None,
 ) -> torch.Tensor:
     """CPU mirror of the CUDA **tiled online** cold kernel (no global T×T).
 
-    Matches ``csrc/tril_attn_cuda.cu`` tile structure:
+    Matches ``csrc/tril_attn_cuda.cu`` tile structure (cuda-cold-v2 adaptive):
 
-    * query tiles of ``tile_m`` (default 16 = CUDA TILE_M)
-    * key tiles of ``tile_n`` (default 16 = CUDA TILE_N)
+    * query tiles of ``tile_m`` (default via ``pick_cuda_cold_tiles``;
+      base 16, long-T up to 128 on CPU — pair ``#75`` BS)
+    * key tiles of ``tile_n`` (same picker; past region may oneshot under
+      ``_cold_score_budget`` like blocked)
     * past tiles: all ``j < i0`` for query block ``[i0, i0+tile_m)``
-    * diagonal: row-wise online strict lower triangle (``j < i`` only)
+    * diagonal: ``Bi×Bi`` with ``tril(diagonal=-1)`` then ``@ Vi`` (vectorized)
 
     Accumulates ``sum_{j<i} (Q_i·K_j) V_j`` in fp32 for half/bf16 inputs.
-    Bit-close to ``tril_score_v_ref`` / eager (same math; tile order may differ
-    in ulps on long T). V broadcast without expand.
+    Bit-close to ``tril_score_v_ref`` / ``blocked_tril_attn`` (same math; tile
+    order may differ in ulps on long T). V broadcast without expand.
     """
     _check_cold_shapes(q, k, v)
     B, H, T, Dk = q.shape
     Dv = v.size(-1)
-    TM = max(1, int(tile_m))
-    TN = max(1, int(tile_n))
 
     if T == 0:
         return q.new_zeros(B, H, 0, Dv)
+
+    TM, TN = pick_cuda_cold_tiles(T, Dk, tile_m=tile_m, tile_n=tile_n)
+    score_budget = _cold_score_budget(T, TM)
 
     # Acc dtype: widen half/bf16 like the CUDA kernel's float accumulators.
     if q.dtype in (torch.float16, torch.bfloat16):
         acc_dtype = torch.float32
     else:
         acc_dtype = q.dtype
-    Qf = q.to(dtype=acc_dtype)
-    Kf = k.to(dtype=acc_dtype)
+    # Skip .to() when already in acc dtype (hot fp32 path).
+    Qf = q if q.dtype == acc_dtype else q.to(dtype=acc_dtype)
+    Kf = k if k.dtype == acc_dtype else k.to(dtype=acc_dtype)
     # Keep V as (B,1|H,T,Dv) — matmul broadcasts; no expand staging.
-    Vf = v.to(dtype=acc_dtype)
+    Vf = v if v.dtype == acc_dtype else v.to(dtype=acc_dtype)
     out = torch.zeros(B, H, T, Dv, device=q.device, dtype=acc_dtype)
 
     for i0 in range(0, T, TM):
         i1 = min(i0 + TM, T)
+        Bi = i1 - i0
         Qi = Qf[:, :, i0:i1, :]
 
-        # Past key tiles: every j < i0 is strictly before all queries in [i0,i1).
-        for j0 in range(0, i0, TN):
-            j1 = min(j0 + TN, i0)
-            Kj = Kf[:, :, j0:j1, :]
-            Vj = Vf[:, :, j0:j1, :]
-            # Ephemeral (Bi × Bj) score discarded after ×V — never full T×T.
-            out[:, :, i0:i1, :] = out[:, :, i0:i1, :] + (Qi @ Kj.transpose(-2, -1)) @ Vj
-
-        # Diagonal tile: online rows with j < i inside the block (tril -1).
-        Bi = i1 - i0
-        if Bi > 1:
-            for r in range(1, Bi):
-                qi = Qf[:, :, i0 + r : i0 + r + 1, :]
-                Kj = Kf[:, :, i0 : i0 + r, :]
-                Vj = Vf[:, :, i0 : i0 + r, :]
-                out[:, :, i0 + r : i0 + r + 1, :] = (
-                    out[:, :, i0 + r : i0 + r + 1, :]
-                    + (qi @ Kj.transpose(-2, -1)) @ Vj
+        # Past: oneshot fused when Bi·i0 fits budget (pair #75); else chunk.
+        if i0 > 0:
+            if Bi * i0 <= score_budget:
+                out[:, :, i0:i1, :].add_(
+                    (Qi @ Kf[:, :, :i0, :].transpose(-2, -1)) @ Vf[:, :, :i0, :]
                 )
+            else:
+                # Chunk past so each score tile has ≤ score_budget elems.
+                # Prefer TN (CUDA key tile) but grow to budget//Bi like blocked.
+                tile = max(TN, score_budget // max(Bi, 1))
+                for j0 in range(0, i0, tile):
+                    j1 = min(j0 + tile, i0)
+                    out[:, :, i0:i1, :].add_(
+                        (Qi @ Kf[:, :, j0:j1, :].transpose(-2, -1))
+                        @ Vf[:, :, j0:j1, :]
+                    )
 
-    return out.to(dtype=q.dtype)
+        # Diagonal tile: vectorized Bi×Bi with tril(diagonal=-1) — not a row loop.
+        if Bi > 1:
+            scores = Qi @ Kf[:, :, i0:i1, :].transpose(-2, -1)
+            scores = scores.tril(diagonal=-1)
+            out[:, :, i0:i1, :].add_(scores @ Vf[:, :, i0:i1, :])
+
+    return out.to(dtype=q.dtype) if out.dtype != q.dtype else out
 
 
 def tril_score_v(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:

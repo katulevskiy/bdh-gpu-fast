@@ -4,9 +4,9 @@
 //   (K/V are packed past only — new token never attends to itself.)
 //
 // CPU path (tril_attn_cpu.cpp): vectorized eager for small T/S; tiled online
-// (TILE_M=16, TILE_N=16 cold; adaptive DECODE_TILE_N for decode — cuda-decode-v3
-// pairs #55/#62 long-S) for large footprints — no unnecessary float cast when
-// already f32/f64; V broadcast without expand.
+// (adaptive cold TILE_M/N — cuda-cold-v2 pairs #75; adaptive DECODE_TILE_N for
+// decode — cuda-decode-v3 pairs #55/#62 long-S) for large footprints — no
+// unnecessary float cast when already f32/f64; V broadcast without expand.
 #pragma once
 
 #include <torch/extension.h>

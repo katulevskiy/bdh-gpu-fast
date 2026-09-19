@@ -4288,3 +4288,66 @@ OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_generate.py \
 - No changing shared default thr away from 512 without GPU evidence
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No fake GPU claims from CPU medians
+
+## opt/cuda-cold-v2 — deepen CUDA cold tiles (2026-09-19)
+
+**Branch:** `opt/cuda-cold-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `68195dd` (`#78` docs matrix through #77; after `#75` prefill-blocked / `#77` auto-tune).
+
+### Goal
+
+Pair with `#75` blocked cold/prefill deepen: deepen the **CUDA** cold/prefill
+tiled online path for long T — adaptive `TILE_M`/`TILE_N` (16/32 × 16/32/64 on
+GPU smem; CPU refs up to 128 like `#75` BS), oneshot past under
+`_cold_score_budget`, vectorized diag `tril(diagonal=-1)`. **No GPU on this
+box** — scaffolds + CPU refs + soft-skip CUDA tests. Hard constraints:
+`tril(diagonal=-1)`, `aten::cat=0`, **default eager** unchanged.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/cuda_attn.py` | `pick_cuda_cold_tiles(T, Dk)`; `CUDA_TILE_{M,N}_MAX` / `_CPU_MAX`; tiled ref adaptive + oneshot past + vectorized diag; skip `.to()` when fp32 |
+| `csrc/tril_attn_cuda.cu` | Templated cold kernel `(TM,TN)∈{(16,16),(16,32),(32,32),(32,64)}`; host `pick_cold_tiles` |
+| `csrc/tril_attn_cpu.cpp` | Adaptive `pick_cold_tiles_cpu` (up to 128) + oneshot budget + vectorized diag |
+| `csrc/tril_attn.h` / README / `__init__.py` | Document adaptive cold tiles; export picker |
+| `tests/test_cuda_attn.py` | Picker; long-T adaptive ≡ eager / blocked; dispatch tiled; soft-skip CUDA long-T |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — unchanged
+export BDH_ATTN_IMPL=cuda      # cold adaptive tiles / CPU tiled ref
+export BDH_ATTN_IMPL=blocked   # #75 adaptive BS (parity target for CUDA refs)
+```
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K.T).tril(diagonal=-1) @ V   # no softmax, no 1/√d, diagonal excluded
+# peak scores ≪ T×T (tile / oneshot budget); aten::cat generate = 0
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_cuda_attn.py tests/test_cuda_decode.py \
+  tests/test_prefill_blocked.py tests/test_fuse_scorev.py -q
+# 77 passed, 9 skipped — picker/long-T tiled ≡ eager/blocked; CUDA soft-skip
+# (no GPU/ext); default eager; tril(-1); cats=0
+```
+
+### Honest limits (no GPU claims)
+
+- **No GPU on this box** — templated cold CUDA launch paths are in-tree
+  (adaptive TILE_M/N) but **unexecuted** here; Python/C++ CPU refs exercise the
+  same tile structure and match `#75` `blocked_tril_attn` / eager.
+- Do **not** claim GPU wall wins from CPU medians. Measure later:
+  `bench_gpu_attn.py --mode cold` / `bench_blocked_vec.py` with
+  `BDH_ATTN_IMPL=cuda` on A100/H100.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager` or AUTO-off behavior
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / scale / SDPA
+- No fake GPU speedups from CPU medians
