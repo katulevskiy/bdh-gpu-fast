@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#188; #160 docs scope retained)
+# OPT status — landed work (#1–#189; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `87ccac9` (`opt/layout-v4`, #188) follows `#187` docs refresh through gen-bench-v3, `#186` generate-benchmark hardening, `#185` AUTO threshold-gate smoke, `#184` sparse-probe exit guardrails, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, and #188 adds CPU-only sampler-layout probe coverage; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `da79013` (`opt/online-decode-v5`, #189) follows `#188` CPU sampler-layout probe coverage, `#187` docs refresh through gen-bench-v3, `#186` generate-benchmark hardening, `#185` AUTO threshold-gate smoke, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, #186 hardens CPU generate-benchmark checks, #187 is docs-only, #188 adds CPU-only sampler-layout probe coverage, and #189 adds CPU-only packed shared-V decode parity coverage; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#188)
+## Landed opts (#1–#189)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -366,6 +366,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **186** | `opt/gen-bench-v3` | Harden generate sweeps with eager as the token reference, explicit PASS/FAIL rows, fail-closed token/cat checks, separate AUTO `cat0`/`cat1` summary columns, and strict threshold smoke coverage | CPU-only validation; defaults remain eager; no GPU timing or win claim | **P1** GPU generate measurement remains open |
 | **187** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #186 while preserving profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
 | **188** | `opt/layout-v4` | Deepen the CPU sampler layout probe across scaled sampling, narrow `top_k`, and the `top_k=vocab` fallback; preserve sampler/RNG behavior, defaults, and raw strict-tril attention semantics | CPU-only profiler coverage: each opt-in case has one expected `(B,)` index materialization, no `aten::cat`, and no new `(B,V)` contiguous signature; no GPU claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **189** | `opt/online-decode-v5` | Add B>1 long-S packed shared-V CPU parity coverage across blocked, online, Triton-fallback, and CUDA-reference dispatch while preserving eager defaults, strict lower-triangular semantics, and the autograd fallback | CPU-only parity/stride coverage at the long-S tiled boundary; no GPU timing or win claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 
 ### Concurrent main updates
 
@@ -394,7 +395,8 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#184** `opt/sparse-probe` is at `63b25cc`; adds CPU-only sparse-probe exit guardrails and smoke coverage while sparse remains OFF.
 - **#185** `opt/auto-thr-v4` is at `e7943ba`; adds CPU-only per-child AUTO threshold-gate fallback and malformed-input dispatch smoke.
 - **#187** docs refresh is at `2088c90`; carries the matrix through #186 and preserves profile-v17 counts plus the real-GPU P0 blocker.
-- **Current tip #188** `opt/layout-v4` is at `87ccac9`; deepens CPU sampler-layout probe coverage for scaled and top-k signatures without changing defaults or sampler/RNG behavior.
+- **#188** `opt/layout-v4` is at `87ccac9`; deepens CPU sampler-layout probe coverage for scaled and top-k signatures without changing defaults or sampler/RNG behavior.
+- **Current tip #189** `opt/online-decode-v5` is at `da79013`; adds B>1 long-S packed shared-V CPU parity across blocked, online, Triton-fallback, and CUDA-reference dispatch with no GPU timing claim.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
