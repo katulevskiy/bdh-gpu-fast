@@ -187,6 +187,23 @@ def test_cpu_long_blocked_online_autograd_matches_eager(
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_long_blocked_low_precision_matches_eager(dtype, value_heads):
+    """CPU cold tiles preserve raw-score parity while widening half inputs."""
+    T, B, H, N, D = 257, 2, 2, 3, 4
+    g = torch.Generator().manual_seed(131 + value_heads)
+    Q = torch.randn(B, H, T, N, dtype=dtype, generator=g) * 0.125
+    K = torch.randn(B, H, T, N, dtype=dtype, generator=g) * 0.125
+    V = torch.randn(B, value_heads, T, D, dtype=dtype, generator=g) * 0.125
+
+    ref = eager_tril_attn(Q, K, V)
+    got = blocked_tril_attn(Q, K, V, block_size=128)
+    assert got.dtype == dtype
+    assert torch.allclose(got, ref, rtol=2e-2, atol=2e-2)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 def test_pick_cold_block_size_adaptive():
     assert pick_cold_block_size(64) == DEFAULT_BLOCK_COLD
     assert pick_cold_block_size(255) == DEFAULT_BLOCK_COLD
