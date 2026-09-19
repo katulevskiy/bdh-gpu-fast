@@ -488,3 +488,22 @@ def test_online_decode_t1_long_per_head_v_tiled_parity():
     )
     assert torch.equal(K, K_before)
     assert torch.equal(V, V_before)
+
+def test_online_decode_empty_past_returns_typed_zeros_for_shared_and_per_head_v():
+    """Direct online decode keeps empty shared/per-head past outputs typed."""
+    B, H, Tq, N, D = 2, 3, 2, 4, 5
+    Q = torch.randn(B, H, Tq, N, dtype=torch.float64)
+    K_past = torch.empty(B, H, 0, N, dtype=Q.dtype)
+    expected = torch.zeros(B, H, Tq, D, dtype=Q.dtype)
+
+    for V_past in (
+        torch.empty(B, 1, 0, D, dtype=Q.dtype),
+        torch.empty(B, H, 0, D, dtype=Q.dtype),
+    ):
+        for block_size in (1, 64):
+            got = online_decode_attn(Q, K_past, V_past, block_size=block_size)
+            assert got.shape == expected.shape
+            assert got.dtype == expected.dtype
+            assert torch.equal(got, expected), (
+                f"v_heads={V_past.size(1)} block_size={block_size} returned {got}"
+            )
