@@ -3304,3 +3304,63 @@ T=1 decode:
 - No PRs to `pathwaycom/*`
 - No softmax / scale / SDPA
 - No fake GPU speedups from CPU medians
+
+## opt/cache-page — deepen CacheManager paging / growth (2026-09-19)
+
+**Branch:** `opt/cache-page` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `a96acaf` (main after attn-auto #56).
+
+### Goal
+
+Deepen `CacheManager` page growth for **long generate**: fewer realloc
+copies on long S, keep **`aten::cat=0`** and **`tril(diagonal=-1)`**.
+Defaults unchanged (`page_size=None` → full prealloc; `generate` default
+unchanged).
+
+### What landed
+
+| Piece | Detail |
+|-------|--------|
+| Geometric growth | `_next_capacity`: `max(need, 2×capacity)`, page-aligned, ≤`max_seq` |
+| Cheap realloc | `_grow` uses `torch.empty` + live-prefix `copy_` (no zero-fill free slots) |
+| Stats | `n_grows`, `bytes_copied_on_grow` |
+| `ensure_capacity(need)` | Public one-shot grow hint (optional; not wired into default generate) |
+| `reserve` / `stage` | Grow-before-write; docs note prior views invalidate on grow |
+
+Linear `+page_size` recopied the prefix every page (≈ O(S²) bytes). Doubling
+keeps total grow-copy bytes ≈ O(S). Example: `page=16`, `max_seq=512` → **5**
+grows (16→32→…→512) vs **31** linear steps.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_cache_pack.py tests/test_correctness.py \
+  tests/test_attention_mask.py tests/test_vs_baseline.py \
+  tests/test_decode_amp.py tests/test_inc_decode.py -q
+# 99 passed (cache_pack 21 incl. geometric / ensure_capacity /
+#   reserve+stage across grow / long paged generate cat=0 + match)
+```
+
+### Honest CPU notes (this box)
+
+```text
+page=16 → max_seq=512 tokenwise fill (2 layers, d=64):
+  geometric n_grows=5   (16→32→64→128→256→512)
+  linear would be 31    (+16 each step)
+  bytes_copied_on_grow ≈ 2.3 MB vs ~36.6 MB linear estimate (~16× less)
+generate(prompt=8, +64, cache_page_size=8): aten::cat = 0
+```
+
+- **CPU-only** box. Geometric paging cuts **realloc copy bytes / grow count**,
+  not attention GEMM wall time. Do **not** claim GPU wins from these numbers.
+- Default `generate` (`cache_page_size=None`) still preallocates
+  `prompt+max_new_tokens` — **zero grows**, same as tip. Opt-in
+  `cache_page_size=` trades peak RSS for O(log S) grows.
+- `aten::cat` in `generate` remains **0** (paged and fixed).
+- `tril(diagonal=-1)` incremental decode unchanged.
+
+### Non-goals
+
+- No change to default `page_size` / `cache_page_size` (still `None`)
+- No softmax / scale / SDPA; no pathwaycom PRs
+- No fake GPU speedups from CPU grow-count deltas

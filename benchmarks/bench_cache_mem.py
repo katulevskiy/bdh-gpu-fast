@@ -143,6 +143,12 @@ def main():
     cat_packed = count_torch_cat(run_packed)
     cat_generate = count_torch_cat(run_generate)
 
+    # cache-page: geometric grow stats on a long paged decode (honest CPU).
+    with torch.no_grad():
+        page_cm = packed_decode(m, prompt.clone(), n_new, page_size=16)
+    # Theoretical linear grows for same page/max_seq (for comparison only).
+    linear_grows = max_seq // 16 - 1
+
     print(f"device={device} layers={cfg.n_layer} d={cfg.n_embd}")
     print(f"decode prompt={prompt_len} + new={n_new} (greedy)")
     print(f"legacy cat-cache median:  {t_leg*1000:.2f} ms")
@@ -157,8 +163,13 @@ def main():
     print(f"torch.cat calls packed decode:   {cat_packed}")
     print(f"torch.cat calls generate(+32):   {cat_generate}")
     print(
-        "Note: cache-v2 layer-contiguous + generate prealloc → near-zero aten::cat "
-        "on generate; packed decode path already cat-free for KR/V (T=1)."
+        f"page=16 geometric grows:    {page_cm.n_grows}  "
+        f"(linear would be {linear_grows}; "
+        f"bytes_copied_on_grow={page_cm.bytes_copied_on_grow})"
+    )
+    print(
+        "Note: cache-v2 cat-free generate + cache-page geometric growth. "
+        "CPU medians are realloc/copy noise, not GPU GEMM wins."
     )
 
 
