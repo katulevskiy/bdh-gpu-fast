@@ -424,6 +424,25 @@ def test_dataloader_cpu_h2d_opt_out_preserves_identity(tr, monkeypatch):
     assert x is host_x and y is host_y
 
 
+def test_dataloader_preserves_validation_split_contract(tr, monkeypatch):
+    """The DataLoader adapter forwards ``val`` without changing CPU identity."""
+    host_x = torch.zeros((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64)
+    host_y = torch.ones_like(host_x)
+    seen = []
+
+    def gather(split):
+        seen.append(split)
+        return host_x, host_y
+
+    monkeypatch.setattr(tr, "NUM_WORKERS", 0)
+    monkeypatch.setattr(tr, "_gather_batch_host", gather)
+    src = tr.DataLoaderBatchSource("val")
+    x, y = src.next()
+    assert seen == ["val"]
+    assert src._loader.pin_memory is False
+    assert x is host_x and y is host_y
+
+
 def test_dataloader_cpu_h2d_workers_keep_pin_memory_off(tr, monkeypatch):
     """CPU DataLoader workers keep H2D staging disabled without CUDA setup."""
     def fail_cuda_probe():
