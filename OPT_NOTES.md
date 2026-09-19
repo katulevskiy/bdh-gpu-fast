@@ -3744,3 +3744,56 @@ BDH_LOG_FREQ=200 BDH_LOG_ASYNC=0 python train.py
 - No default flip of `LOG_FREQ` / compile / AMP / attn impl
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No fake GPU speedups from CPU runs
+
+## opt/profile-v6 — re-profile tip after #64–#66 (2026-09-19)
+
+**Branch:** `opt/profile-v6` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `b126d77` (main after log-sync #66; post docs-matrix #65, cuda-decode-v3 #64).
+Profile windows captured at the same tip `b126d77` (docs tip `8439c06` = #67 matrix refresh on top; code-identical for profiling).
+Default **eager** attn unchanged by #64 (CUDA decode scaffold / soft-skip) and #66
+(train logging only). #65 / #67 were docs-only. Short profile window does **not** exercise
+CUDA decode tiles or train-loop log async.
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+Absolute ms are **profiler-inflated** (noisy on short active windows).
+Rank by **% self CPU** and call counts. Chrome traces under `benchmarks/traces/`
+(gitignored). Compare to § opt/profile-v5 (tip / profile source `fc9283d`).
+
+### New % breakdown (self CPU)
+
+Representative midpoints on this box. Default `BDH_ATTN_IMPL=eager` throughout
+(`BDH_ATTN_AUTO` off; `cache_page_size=None`):
+
+| Mode | Top self-CPU ops | vs profile-v5 / post-#64–#66 note |
+|------|------------------|-----------------------------------|
+| Attention | `mul` ~26%, `bmm` ~23%, `copy_` ~16%, `sub` ~8%, `tril` ~0.8% | Same eager T×T shape as v5. Mix wobbles (`copy_`↓ / `mul`↓ vs v5 midpoints); **no structural default-attn change** from #64–#66. |
+| Forward | `copy_` ~25%, `mm` ~19%, `bmm` ~18%, `mul` ~12%, LN ~2%, `tril` ~0.7% | Same GEMM+copies shape. **`aten::contiguous` = 0** still (#36). Train path still einsum-led (#58 eval cache). |
+| Generate | `BDH.generate` self ~32% (noisy host attribution), `mm` ~13%, `bmm` ~11%, `mul` ~4%, LN ~3%, `einsum` ~3%; `linear` present (~0.6%) | **`aten::cat` = 0** still (#20+#57). **#58 layout-v2 still visible** (`mm`/`linear`). Short prompt=16 does **not** exercise #64 CUDA decode tiles or #66 train log-sync. |
+
+### Confirmed landed (profile-visible / structural)
+
+- **#20 / #57 cache-page:** generate still **zero `aten::cat`** (0 calls in traces).
+- **#36 mlp-fuse:** forward still **zero `aten::contiguous`**.
+- **#58 layout-v2:** generate/eval still shows cached `F.linear`/`mm` path.
+- **#64 cuda-decode-v3 / #65–#67 docs / #66 log-sync:** default eager generate/forward profile unchanged; CUDA decode + train log async are off the short default window.
+
+### Ranked follow-ups
+
+Unchanged honesty vs backlog: **P0** = GPU measure fused score×V (CPU % above
+are not GPU wins). **P1** = GPU compile train-step + generate/decode GEMM /
+AUTO threshold re-tune on CUDA (+ CUDA-graph `reduce-overhead`). #64–#66 already
+on main — strike from “next.”
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal / SDPA
+- No GPU speedup claims from these CPU % figures
+- No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1` on CPU
