@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#82)
+# OPT status — landed work (#1–#84)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `03bc30b` (`#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged; #69–#82 opt-ins are not exercised on the short window; re-profiled in `opt/profile-v7`). Latest #82 deepens Triton cold tiles; GPU validation remains open.
+Tip documented here: `006de27` (`#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged; #69–#82 opt-ins are not exercised on the short window; re-profiled in `opt/profile-v7`). Latest #84 probes fullgraph compile with soft fallback; GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
