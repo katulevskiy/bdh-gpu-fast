@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#163; #160 docs scope retained)
+# OPT status — landed work (#1–#165; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `d0e667b` (`#163` structured GPU-attention measurement harness follows `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2; `#158` docs refresh through #157 and `#157` profile-v15 remain documented below). The requested through-#160 documentation is retained, with #159 now landed and #161 profile-v16 carried forward. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163 adds structured cold/decode/dtype measurement and CPU skip coverage, but no CUDA run or GPU speedup evidence; real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `aa73a43` (`#165` shared-V decode epilogue follows `#164` packed T=1 decode views, `#163` structured GPU-attention measurement, `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2; `#158` docs refresh through #157 and `#157` profile-v15 remain documented below). The requested through-#160 documentation is retained, with #159 now landed, #161 profile-v16 carried forward, #163 structured GPU measurement scaffolding, #164 packed-view decode deepening, and #165 shared-V decode accumulation deepening. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163 adds structured cold/decode/dtype measurement and CPU skip coverage, #164 preserves capacity-strided packed KR/V decode views without an unconditional staging copy, and #165 accumulates B>1 shared-V decode tiles in place; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#163)
+## Landed opts (#1–#165)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -341,11 +341,15 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **160** | `opt/cache-bench-v2` | Deepen the CPU cache-page bench with `initial→final` packed-cache capacity and final KR/V allocation in KiB; assert geometric/linear policies reach the same final capacity/allocation without changing defaults | CPU accounting only; cache/generate defaults unchanged; no GPU claim | **P0** GPU measure remains open |
 | **161** | `opt/profile-v16` | CPU re-profile after #159/#160 using the profile-v15 warmup/active-step schedule; record self-CPU mix and copy/cat/contiguous counts without changing semantics | Flat versus v15: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; CPU-only evidence | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **163** | `opt/gpu-measure-v2` | Deepen structured GPU-attention measurement for cold and T=1 decode paths with JSON fields, parity deltas, and CPU-safe skip diagnostics; preserve defaults and raw strict `tril(-1)` math | CPU tests/skip path only here; no CUDA run or GPU win claim | **P0** run on real GPU remains open |
+| **164** | `opt/decode-gemm-v3` | Preserve capacity-strided packed CacheManager Q/K/V views in T=1 Triton decode; avoid an unconditional staging copy while retaining eager defaults, raw strict `tril(-1)`, and past-only decode semantics | CPU parity/stride contract; no GPU timing | **P0** GPU decode measure / cold CUDA-Triton validation |
+| **165** | `opt/scorev-fuse-v4` | Accumulate B>1 shared-V decode tiles in place, removing the accumulated shared-V score×V staging product while preserving CPU-safe strict-tril parity, autograd fallback, and eager defaults | CPU parity/coverage; no GPU timing | **P0** GPU decode measure / cold CUDA-Triton validation |
 
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
 - **#161** `opt/profile-v16` merged as `8bd6b17`; **#163** `opt/gpu-measure-v2` merged as `d0e667b` with structured GPU measurement scaffolding but no CUDA results on this box.
+- **#164** `opt/decode-gemm-v3` merged as `7719e9a`; preserves capacity-strided packed T=1 decode views without an unconditional staging copy, with CPU parity only and no CUDA timing.
+- **#165** `opt/scorev-fuse-v4` merged as `aa73a43`; deepens B>1 shared-V decode accumulation in place with CPU-safe strict-tril parity, no CUDA timing.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
