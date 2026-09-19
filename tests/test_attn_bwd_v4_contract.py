@@ -172,3 +172,29 @@ def test_self_attn_single_query_accumulates_only_valid_qk_paths(impl):
         Q.grad, torch.tensor([[[[10.0, 12.0], [15.0, 18.0], [11.0, 16.0]]]])
     )
     assert torch.equal(V.grad, torch.tensor([[[[17.0], [39.0], [0.0]]]]))
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_half_dtypes_preserve_strict_tril_backward_contract(impl, dtype):
+    """Tiled analytic backward widens safely, then restores input grad dtypes."""
+    generator = torch.Generator().manual_seed(2030)
+    Q = torch.randn(1, 2, 5, 3, generator=generator, dtype=dtype, requires_grad=True)
+    K = torch.randn(1, 2, 5, 3, generator=generator, dtype=dtype, requires_grad=True)
+    V = torch.randn(1, 2, 5, 4, generator=generator, dtype=dtype, requires_grad=True)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+    dO = torch.randn_like(out)
+    dO_ref = dO.to(dtype=ref.dtype)
+
+    assert torch.allclose(out.float(), ref.float(), rtol=5e-2, atol=5e-2)
+    out.backward(dO)
+    ref.backward(dO_ref)
+    assert Q.grad.dtype == dtype and K.grad.dtype == dtype and V.grad.dtype == dtype
+    assert torch.allclose(Q.grad.float(), Q_ref.grad.float(), rtol=5e-2, atol=5e-2)
+    assert torch.allclose(K.grad.float(), K_ref.grad.float(), rtol=5e-2, atol=5e-2)
+    assert torch.allclose(V.grad.float(), V_ref.grad.float(), rtol=5e-2, atol=5e-2)
