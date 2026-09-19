@@ -1645,3 +1645,50 @@ BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation
 - No PRs to `pathwaycom/*`
 - No change to default `BDH_ATTN_IMPL=eager`
 - No fake GPU speedups from CPU medians
+
+## opt/decode-copy — cut generate copy_/slice tax (2026-09-19)
+
+**Branch:** `opt/decode-copy` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `d64157a` (main after cuda-cold; rebased from `e5f8031`).
+
+### Goal
+
+Reduce host `copy_` / view tax on `generate` after cache-v2 removed `aten::cat`.
+Keep **cat-free** generate and `tril(diagonal=-1)` incremental decode.
+
+### What landed
+
+| Piece | Detail |
+|-------|--------|
+| `CacheManager.reserve(level, T)` | Writable `narrow` views at `[seq_len : seq_len+T]` (no copy) |
+| In-place RoPE into KR | `Attention.forward(..., out_kr=)` writes RoPE into reserved KR when inference + storage==compute |
+| V slot | Still one `copy_` into packed V (activation must move) |
+| `get_past` / `stage` | `narrow` views; **never** `.contiguous()` |
+| `_write_block` | `dst.copy_(src)` casts without intermediate `.to()` alloc |
+| Multi-token+past | `_try_extend_seq`: zero-copy past||new when QR/V already adjacent in packed buffer; else empty+`copy_` (still cat-free) |
+
+### Profile note (CPU hook, cfg layers=4 d=128 nh=4, prompt=16 / new=32)
+
+| Metric | Before | After |
+|--------|--------|-------|
+| `Tensor.copy_` in `generate` | **265** | **133** |
+| Breakdown after | 1× prompt `out.copy_` + 4×(1 prefill V + 32 decode V) = 133 | KR `copy_` eliminated via `reserve`+`out_kr` |
+| `torch.cat` in `generate` | 0 | **0** (unchanged) |
+
+Profiler `aten::copy_` still includes GEMM/epilogue internals; the hooked
+`Tensor.copy_` count is the CacheManager/host write tax this branch targets.
+
+### Correctness
+
+```bash
+.venv/bin/python -m pytest tests/test_cache_pack.py tests/test_correctness.py \
+  tests/test_attention_mask.py tests/test_vs_baseline.py \
+  tests/test_decode_amp.py tests/test_inc_decode.py -q
+# 76 passed (incl. reserve / copy-halving / no-contiguous tests)
+```
+
+### Non-goals
+
+- Softmax / diagonal / SDPA
+- PRs to `pathwaycom/*`
+- Claiming GPU wall-time wins from CPU copy counts

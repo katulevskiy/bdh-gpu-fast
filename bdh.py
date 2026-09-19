@@ -42,6 +42,29 @@ def get_freqs(n, theta, dtype):
     )
 
 
+
+def _try_extend_seq(past: Optional[torch.Tensor], new: Optional[torch.Tensor]):
+    """If ``new`` is the next seq block after ``past`` in the same storage, return a past||new view.
+
+    Used to skip empty+copy_ when CacheManager.reserve already wrote the new
+    block adjacent to the committed prefix. Returns None when not adjacent.
+    """
+    if past is None or new is None:
+        return None
+    if past.untyped_storage().data_ptr() != new.untyped_storage().data_ptr():
+        return None
+    if past.stride() != new.stride():
+        return None
+    if past.shape[:-2] != new.shape[:-2] or past.size(-1) != new.size(-1):
+        return None
+    S = past.size(-2)
+    T = new.size(-2)
+    expected_off = past.storage_offset() + S * past.stride(-2)
+    if new.storage_offset() != expected_off:
+        return None
+    return past.as_strided((*past.shape[:-2], S + T, past.size(-1)), past.stride())
+
+
 class Attention(torch.nn.Module):
     """BDH attention: raw (unnormalized) scores with strict causal mask.
 
@@ -157,6 +180,7 @@ class Attention(torch.nn.Module):
         past_kr: Optional[torch.Tensor] = None,
         past_v: Optional[torch.Tensor] = None,
         cos_sin: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        out_kr: Optional[torch.Tensor] = None,
     ):
         """
         Q, K: (B, nh, T, N) — K must be Q (shared latent).
@@ -167,6 +191,10 @@ class Attention(torch.nn.Module):
 
         cos_sin: optional (cos, sin) from ``rope_cos_sin`` — avoids redoing
         remainder/trig every layer when the caller shares phases.
+
+        out_kr: optional preallocated KR write view (e.g. CacheManager.reserve).
+        When set, RoPE writes in-place into it (no extra KR ``copy_`` into the
+        packed cache). Must not alias Q.
 
         Cold path (``past_kr is None``): dispatches via
         ``kernels.attention_dispatch.bdh_attn`` according to ``BDH_ATTN_IMPL``
@@ -181,7 +209,7 @@ class Attention(torch.nn.Module):
         B, nh, T, _ = Q.size()
         if cos_sin is None:
             cos_sin = self.rope_cos_sin(T, rope_start, Q.device)
-        QR = self.rope(None, Q, cos_sin=cos_sin)
+        QR = self.rope(None, Q, cos_sin=cos_sin, out=out_kr)
 
         if past_kr is None:
             # Training / cold prefill: unified backend dispatch.
@@ -215,33 +243,37 @@ class Attention(torch.nn.Module):
             return out, QR, V
 
         # Multi-token chunk with past (prefill continuation / speculative).
-        # Prefer packed past+new via empty+copy_ (no aten::cat) + dispatched
-        # tril attn when not eager so blocked/triton stay consistent with the
-        # cold path; eager keeps the split form (also cat-free).
+        # Prefer a zero-copy past||new view when QR/V already sit in the packed
+        # buffer adjacent to past (CacheManager.reserve). Else empty+copy_
+        # (still cat-free). Eager keeps the split form + tril(diagonal=-1).
         if impl != "eager":
-            # Contiguous past||new without torch.cat (generate profile cares).
-            _, _, _, Ndim = QR.shape
-            Ddim = V.size(-1)
-            KR_all = QR.new_empty(B, nh, S + T, Ndim)
-            KR_all[:, :, :S].copy_(past_kr)
-            KR_all[:, :, S:].copy_(QR)
-            V_all = V.new_empty(B, 1, S + T, Ddim)
-            V_all[:, :, :S].copy_(past_v)
-            V_all[:, :, S:].copy_(V)
+            KR_all = _try_extend_seq(past_kr, QR)
+            V_all = _try_extend_seq(past_v, V)
+            if KR_all is None or V_all is None:
+                _, _, _, Ndim = QR.shape
+                Ddim = V.size(-1)
+                KR_all = QR.new_empty(B, nh, S + T, Ndim)
+                KR_all[:, :, :S].copy_(past_kr)
+                KR_all[:, :, S:].copy_(QR)
+                V_all = V.new_empty(B, 1, S + T, Ddim)
+                V_all[:, :, :S].copy_(past_v)
+                V_all[:, :, S:].copy_(V)
             out_all = bdh_attn(KR_all, KR_all, V_all, impl=impl)
             out = out_all[:, :, S:, :]
             return out, QR, V
 
-        # Eager split: scores vs past + tril self-block; assemble via copy_.
+        # Eager split: scores vs past + tril self-block; V_all via view or copy_.
         if S > 0 and T > 1:
             scores = QR.new_empty(B, nh, T, S + T)
             scores[:, :, :, :S] = QR @ past_kr.mT
             self_scores = QR @ QR.mT
             self_scores.tril_(diagonal=-1)
             scores[:, :, :, S:] = self_scores
-            V_all = V.new_empty(B, 1, S + T, V.size(-1))
-            V_all[:, :, :S].copy_(past_v)
-            V_all[:, :, S:].copy_(V)
+            V_all = _try_extend_seq(past_v, V)
+            if V_all is None:
+                V_all = V.new_empty(B, 1, S + T, V.size(-1))
+                V_all[:, :, :S].copy_(past_v)
+                V_all[:, :, S:].copy_(V)
             out = scores @ V_all
         elif S > 0:
             out = (QR @ past_kr.mT) @ past_v
@@ -471,8 +503,27 @@ class BDH(nn.Module):
             x_sparse = x_bthn.permute(0, 2, 1, 3)  # (B, nh, T, N) — view, no copy
 
             past_kr = past_v = None
+            out_kr = None
+            v_tok = x.unsqueeze(1)
             if packed:
-                past_kr, past_v = cache.get_past(level)
+                # Inference + matching dtypes: RoPE straight into packed KR slot
+                # (skips one copy_ per layer). V still copy_'d into its slot.
+                # Under grad, keep a fresh QR so autograd is not writing into
+                # the cache buffer.
+                # reserve BEFORE get_past so page growth cannot invalidate past views.
+                inplace_ok = (
+                    not grad_enabled
+                    and cache.storage_dtype == cache.compute_dtype
+                    and v_tok.dtype == cache.storage_dtype
+                )
+                if inplace_ok:
+                    dst_kr, dst_v = cache.reserve(level, T)
+                    past_kr, past_v = cache.get_past(level)
+                    dst_v.copy_(v_tok)
+                    out_kr = dst_kr
+                    v_tok = dst_v  # attn + return share packed V slot
+                else:
+                    past_kr, past_v = cache.get_past(level)
             elif cache is not None and cache[level] is not None:
                 past_kr = cache[level]["kr"]
                 past_v = cache[level]["v"]
@@ -480,14 +531,17 @@ class BDH(nn.Module):
             yKV, new_kr, new_v = self.attn(
                 Q=x_sparse,
                 K=x_sparse,
-                V=x.unsqueeze(1),
+                V=v_tok,
                 rope_start=rope_start,
                 past_kr=past_kr,
                 past_v=past_v,
                 cos_sin=cos_sin,
+                out_kr=out_kr,
             )
             if packed:
-                cache.append(level, new_kr, new_v)
+                if out_kr is None:
+                    cache.append(level, new_kr, new_v)
+                # else: reserve already wrote KR (RoPE) + V (copy_)
             elif cache is not None:
                 if cache[level] is None:
                     cache[level] = {"kr": new_kr, "v": new_v}
