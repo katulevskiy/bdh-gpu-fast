@@ -438,7 +438,7 @@ export BDH_ATTN_IMPL=cuda      # kernels.cuda_attn (ext if built, else ref)
 
 ```text
 .venv/bin/python -m pytest tests/ -q
-# expect green on CPU; CUDA/native/Triton GPU skips OK
+# 81 passed, 4 skipped (CUDA/native/Triton GPU) on CPU-only box
 # test_attn_unify: env resolve, all 4 impls match eager, cold hook, cache ignores impl
 ```
 
