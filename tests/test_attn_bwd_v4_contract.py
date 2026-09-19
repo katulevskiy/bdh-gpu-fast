@@ -850,3 +850,63 @@ def test_self_attn_alias_with_broadcast_upstream_preserves_backward_contract(imp
     assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-12, atol=1e-12)
     assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
     assert torch.equal(V.grad[:, :, -1, :], torch.zeros_like(V.grad[:, :, -1, :]))
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_nonzero_storage_offset_inputs_preserve_backward_contract(impl):
+    """Backward must preserve gradients for views that start inside storage."""
+    generator = torch.Generator().manual_seed(2049)
+    Q_base = torch.randn(
+        2, 3, 7, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K_base = torch.randn(
+        2, 3, 7, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V_base = torch.randn(
+        2, 1, 7, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    Q = Q_base[:, :, 1:6, :]
+    K = K_base[:, :, 1:6, :]
+    V = V_base[:, :, 1:6, :]
+    dO = torch.randn(2, 3, 5, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert Q.storage_offset() > 0
+    assert K.storage_offset() > 0
+    assert V.storage_offset() > 0
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+
+    assert torch.allclose(
+        Q_base.grad[:, :, 1:6, :], Q_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(
+        K_base.grad[:, :, 1:6, :], K_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.allclose(
+        V_base.grad[:, :, 1:6, :], V_ref.grad, rtol=1e-12, atol=1e-12
+    )
+    assert torch.equal(
+        Q_base.grad[:, :, :1, :], torch.zeros_like(Q_base.grad[:, :, :1, :])
+    )
+    assert torch.equal(
+        Q_base.grad[:, :, 6:, :], torch.zeros_like(Q_base.grad[:, :, 6:, :])
+    )
+    assert torch.equal(
+        K_base.grad[:, :, :1, :], torch.zeros_like(K_base.grad[:, :, :1, :])
+    )
+    assert torch.equal(
+        K_base.grad[:, :, 6:, :], torch.zeros_like(K_base.grad[:, :, 6:, :])
+    )
+    assert torch.equal(
+        V_base.grad[:, :, :1, :], torch.zeros_like(V_base.grad[:, :, :1, :])
+    )
+    assert torch.equal(
+        V_base.grad[:, :, 6:, :], torch.zeros_like(V_base.grad[:, :, 6:, :])
+    )
