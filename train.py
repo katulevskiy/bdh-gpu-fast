@@ -798,6 +798,17 @@ def maybe_compile(
                 else ""
             )
         )
+        if probe == "train_bwd":
+            # A failed forward/backward probe may have left partial gradients
+            # on the original parameters. Keep the eager fallback clean just
+            # like the successful probe path above.
+            try:
+                clear_grads(model)
+            except Exception as cleanup_error:
+                print(
+                    "torch.compile probe gradient cleanup failed "
+                    f"({type(cleanup_error).__name__}: {cleanup_error})"
+                )
         if was_training:
             model.train()
         else:
