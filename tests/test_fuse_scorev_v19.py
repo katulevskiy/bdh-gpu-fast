@@ -445,3 +445,40 @@ def test_dispatch_preserves_self_qk_analytic_autograd_contract(impl, v_heads):
     assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
     assert torch.allclose(got_q_grad, ref_q_grad, rtol=1e-9, atol=1e-9)
     assert torch.allclose(got_v_grad, ref_v_grad, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_strided_self_qk_analytic_autograd_storage_contract(
+    impl, v_heads
+):
+    """Analytic self-attention preserves gradients for strided Q storage."""
+    B, H, T, N, D = 2, 3, 23, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1930)
+    Q_storage = torch.randn(
+        B, H, T + 3, N, generator=generator, dtype=torch.float64
+    )
+    Q = Q_storage[:, :, 1 : T + 1, :]
+    V = torch.randn(B, v_heads, T, D, generator=generator, dtype=torch.float64)
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    assert not Q.is_contiguous()
+
+    def run(name, use_autograd_fn):
+        q_storage = Q_storage.detach().clone().requires_grad_(True)
+        q = q_storage[:, :, 1 : T + 1, :]
+        v = V.detach().clone().requires_grad_(True)
+        out = bdh_attn(q, q, v, impl=name, use_autograd_fn=use_autograd_fn)
+        out.backward(dO)
+        return out.detach(), q_storage.grad.detach(), v.grad.detach()
+
+    ref, ref_q_storage_grad, ref_v_grad = run("eager", use_autograd_fn=False)
+    expected = (Q @ Q.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_q_storage_grad, got_v_grad = run(impl, use_autograd_fn=True)
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    assert torch.allclose(
+        got_q_storage_grad, ref_q_storage_grad, rtol=1e-9, atol=1e-9
+    )
+    assert torch.allclose(got_v_grad, ref_v_grad, rtol=1e-9, atol=1e-9)
