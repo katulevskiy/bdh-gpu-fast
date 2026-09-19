@@ -48,3 +48,44 @@ def test_dispatch_preserves_distinct_qk_shared_and_per_head_v_gradients(
     assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10)
     for got_grad, ref_grad in zip(got_grads, ref_grads):
         assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
+def test_dispatch_preserves_capacity_strided_shared_v_gradients(impl):
+    """Dispatch aliases preserve gradients through capacity-strided shared V."""
+    B, H, T, N, D = 2, 3, 67, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1920)
+    Q_storage = torch.randn(
+        B, H, T + 3, N, generator=generator, dtype=torch.float64
+    )
+    K_storage = torch.randn(
+        B, H, T + 3, N, generator=generator, dtype=torch.float64
+    )
+    V_storage = torch.randn(
+        B, 1, T + 3, D, generator=generator, dtype=torch.float64
+    )
+    Q = Q_storage[:, :, 1 : T + 1, :]
+    K = K_storage[:, :, 2 : T + 2, :]
+    V = V_storage[:, :, 1 : T + 1, :]
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    assert not Q.is_contiguous()
+    assert not K.is_contiguous()
+    assert not V.is_contiguous()
+
+    def run(name):
+        q = Q.detach().requires_grad_(True)
+        k = K.detach().requires_grad_(True)
+        v = V.detach().requires_grad_(True)
+        out = bdh_attn(q, k, v, impl=name)
+        out.backward(dO)
+        return out.detach(), tuple(x.grad.detach() for x in (q, k, v))
+
+    ref, ref_grads = run("eager")
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_grads = run(impl)
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
