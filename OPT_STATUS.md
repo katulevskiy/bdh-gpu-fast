@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#182; #160 docs scope retained)
+# OPT status — landed work (#1–#186; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `4eea9ad` (`opt/profile-v17`, #182) follows `#181` cache-bench-v3 initial packed-footprint accounting, `#180` docs refresh through #179, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #180 is docs-only and #181 adds CPU-only packed-cache capacity/allocation accounting; neither adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `9a86f03` (`opt/gen-bench-v3`, #186) follows `#185` AUTO threshold-gate smoke, `#184` sparse-probe exit guardrails, `#183` docs refresh through profile-v17, `#182` profile-v17, and earlier landings remain documented below. Profile-v17 records a matched CPU-only re-profile after #176–#181: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v16. #183 is docs-only, #184 adds CPU-only sparse-probe exit guardrails, #185 adds CPU-only AUTO threshold-gate smoke, and #186 hardens CPU generate-benchmark checks; none adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#182)
+## Landed opts (#1–#186)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -360,6 +360,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **180** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #179 while preserving profile-v16 counts and the real-GPU P0 blocker | Docs only | — |
 | **181** | `opt/cache-bench-v3` | Expose initial→final packed-cache capacity and final packed KR/V allocation in KiB in the page sweep; assert the capacity/allocation invariant before and after CPU page growth without changing defaults | CPU-only packed-footprint/accounting evidence; generate smoke matches fixed-capacity output with `aten::cat=0`; no GPU claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **182** | `opt/profile-v17` | Re-profile the #176–#181 tip with the profile-v15/v16 schedule and record self-CPU percentages plus `copy_`, `cat`, and `contiguous` counts without changing semantics | Flat versus profile-v16: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; CPU-only evidence | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **183** | docs refresh | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #182 while preserving profile-v17 counts and the real-GPU P0 blocker | Docs only | — |
+| **184** | `opt/sparse-probe` | Add explicit `exit_code` / `reason` markers for disabled/complete (`0`), failing density guardrail (`2`), and guardrail enforcement without samples (`3`); add CPU smoke coverage while preserving the default-off opt-in and dense production path | CPU smoke only; sparse remains OFF; no GPU claim | **P0** GPU measure / sparse validation remains open |
+| **185** | `opt/auto-thr-v4` | Deepen CPU AUTO threshold-sweep gate smoke: an omitted cold threshold mirrors each de-duplicated decode threshold, including zero, per child; malformed input errors before dispatch | CPU-only control-flow smoke; eager/AUTO-off defaults unchanged; no GPU claim | **P0** GPU measure / threshold/tile validation remains open |
+| **186** | `opt/gen-bench-v3` | Harden generate sweeps with eager as the token reference, explicit PASS/FAIL rows, fail-closed token/cat checks, separate AUTO `cat0`/`cat1` summary columns, and strict threshold smoke coverage | CPU-only validation; defaults remain eager; no GPU timing or win claim | **P1** GPU generate measurement remains open |
 
 ### Concurrent main updates
 
@@ -383,7 +387,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#179** `opt/amp-train-v4` is at `0983326`; adds CPU-only AMP dtype/scaler contracts with no GPU timing or throughput claim.
 - **#180** docs refresh is at `f92090f`; carries the matrix through #179 and preserves profile-v16 counts.
 - **#181** `opt/cache-bench-v3` is at `f34d908`; adds CPU-only initial→final packed-cache footprint accounting with no GPU memory, timing, or speedup claim.
-- **Current tip #182** `opt/profile-v17` is at `4eea9ad`; matched CPU evidence is flat versus profile-v16 with `copy_` counts 2/12/394 and `cat=0`, `contiguous=0`.
+- **#182** `opt/profile-v17` is at `4eea9ad`; matched CPU evidence is flat versus profile-v16 with `copy_` counts 2/12/394 and `cat=0`, `contiguous=0`.
+- **#183** docs refresh is at `86ba7df`; carries the matrix through profile-v17 and preserves the real-GPU P0 blocker.
+- **#184** `opt/sparse-probe` is at `63b25cc`; adds CPU-only sparse-probe exit guardrails and smoke coverage while sparse remains OFF.
+- **#185** `opt/auto-thr-v4` is at `e7943ba`; adds CPU-only per-child AUTO threshold-gate fallback and malformed-input dispatch smoke.
+- **Current tip #186** `opt/gen-bench-v3` is at `9a86f03`; hardens CPU generate checks with eager reference ordering, PASS/FAIL status, and fail-closed token/cat validation.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
