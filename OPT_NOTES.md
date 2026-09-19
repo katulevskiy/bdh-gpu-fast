@@ -1692,3 +1692,66 @@ Profiler `aten::copy_` still includes GEMM/epilogue internals; the hooked
 - Softmax / diagonal / SDPA
 - PRs to `pathwaycom/*`
 - Claiming GPU wall-time wins from CPU copy counts
+
+## opt/rope-fuse — fused RoPE rotate (2026-09-19)
+
+**Branch:** `opt/rope-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `5af4f50` (main after decode-copy).
+
+### Goal
+
+Optional fused RoPE **rotate** that applies cached cos/sin without the strided
+even/odd mul/copy storm. Keep ``rope_cos_sin`` cache by
+``(T, head_dim, device, dtype)``. Default remains **eager**.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/rope.py` | `eager_rope_rotate` (historical strided path), `fused_rope_rotate_pytorch` (pair-contiguous), optional Triton + analytic bwd |
+| `kernels/rope_dispatch.py` | `BDH_ROPE_IMPL=eager\|fused` + `bdh_rope_rotate()` |
+| `bdh.py` `Attention.rope` | Thin dispatch; still accepts `cos_sin=` from cache |
+| `tests/test_rope_fuse.py` | Bit-identical fused vs eager/baseline; cache reuse; CUDA Triton skipped without GPU |
+
+```bash
+export BDH_ROPE_IMPL=eager   # default — strided even/odd (zero behavior change)
+export BDH_ROPE_IMPL=fused   # pair-contiguous PyTorch; Triton on CUDA when usable
+```
+
+``rope_cos_sin`` / ``_rope_cis`` cache **unchanged**.
+
+### Semantics (unchanged)
+
+```text
+y0 = x0 * c0 - x1 * s0
+y1 = x1 * c1 + x0 * s1
+```
+
+Per-element phases (full ``N``), not classic half-dim shared-(cos,sin).
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/ -q
+# tests/test_rope_fuse.py — fused ≡ eager ≡ baseline (atol=0 on CPU fp32/fp16 cast path)
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```text
+device=cpu  B=4 H=4 T=128 N=256  torch=2.14.0+cu130 cuda=False
+correctness max|fused-eager|=0
+eager_rotate  median: ~67 ms
+fused_pytorch median: ~75 ms  (≈0.9× — expand+stack overhead on CPU)
+```
+
+**No GPU on this box** — Triton rotate kernel is in-tree but unexecuted; CUDA
+pytest is `skipif`. On CPU prefer **eager** (default). Expect fused/Triton to
+matter on GPU by writing each pair once without strided `0::2`/`1::2` stores.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ROPE_IMPL=eager`
+- No fake GPU speedups from CPU medians
+- No removal of `rope_cos_sin` cache

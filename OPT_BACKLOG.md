@@ -44,7 +44,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU parity / train bench** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. Compile path hardened (#22); **GPU inductor / CUDA graphs unmeasured**. | GPU compile train step vs eager | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). **`opt/decode-copy`:** CacheManager `reserve` + in-place RoPE → generate `Tensor.copy_` **265→133** (V-only + prompt); still cat-free / `tril(-1)`. Remaining: decode GEMM kernel. | GPU decode kernel bench; keep cat-free | Medium |
-| **P2** | **Fused RoPE kernel** | Attn: `mul` ~19% + `copy_` ~11% + `sub`/`add` (RoPE). **Cached tables landed** (#18); fused rotate kernel still open. | Optional fused RoPE on GPU | Low–medium |
+| **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; embed/lm_head path: see `opt/embed-tie`; CPU wall ~noise vs tip | Low |
 | **P3** | **Hardware / dtype** | **Landed `opt/bf16-train`:** opt-in `BDH_AMP_DTYPE` + GradScaler fp16+CUDA only; CPU parity tests. GPU train bench still open. | GPU box microbench | Env |
@@ -57,6 +57,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Cache packing / fewer cats | **Done** #19–#20 — generate `aten::cat` **0** (was ~10% self / ~864 calls pre-pack) |
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21 under `BDH_ATTN_IMPL=blocked\|online` (CPU slower; GPU measure = P0) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22; remaining = GPU measure (P1) |
+| Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
 
 ## Explicit non-goals
@@ -72,7 +73,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 1. GPU: bench eager vs blocked/online vs Triton vs CUDA fused score×V (cold + T=1 decode)
 2. GPU: `BDH_COMPILE=1` train-step vs eager (after #22 probe)
 3. ~~Cache preallocate / cat-free generate~~ (**done** `opt/cache-v2` #20)
-4. RoPE fuse / sparsity density / dtype
+4. ~~RoPE fuse~~ (**done** `opt/rope-fuse`) / sparsity density / dtype
 
 ```bash
 python benchmarks/profile_forward.py --mode all
