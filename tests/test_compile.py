@@ -976,6 +976,39 @@ def test_compile_failed_backward_probe_clears_fallback_grads(monkeypatch, capsys
     assert all(param.grad is None for param in model.parameters())
 
 
+def test_compile_successful_backward_probe_restores_mode_and_clears_grads(
+    monkeypatch, capsys
+):
+    """A successful train_bwd probe leaves eval callers clean and unchanged."""
+    import importlib
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+    # Keep the success-path contract independent of inductor/C++ availability.
+    monkeypatch.setattr(tr.torch, "compile", lambda model, **kwargs: model)
+
+    cfg = _small_cfg(dropout=0.0)
+    model = bdh.BDH(cfg).eval()
+    x = torch.randint(0, cfg.vocab_size, (2, 8))
+    y = torch.randint(0, cfg.vocab_size, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    assert out is model
+    assert not out.training
+    assert all(param.grad is None for param in model.parameters())
+    captured = capsys.readouterr().out
+    assert "torch.compile enabled" in captured
+    assert "probe=train_bwd" in captured
+
+
 @pytest.mark.parametrize("autograd", [False, True])
 def test_compile_fullgraph_forward_matches_eager(autograd, monkeypatch):
     """fullgraph=True cold forward matches eager @ dropout=0 (eager × AUTOGRAD).
