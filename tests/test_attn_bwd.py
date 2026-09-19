@@ -436,3 +436,24 @@ def test_strict_tril_attn_routes_self_when_q_is_k():
     O.sum().backward()
     assert Q.grad is not None and V.grad is not None
     assert torch.isfinite(Q.grad).all()
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "triton", "cuda"])
+@pytest.mark.parametrize("use_fn", [False, True])
+def test_cpu_impl_autograd_matrix_parity(impl, use_fn):
+    """Every train-backend spelling remains CPU-correct with/without the Function."""
+    Q, K, V = _qkv(B=1, H=2, T=7, N=4, D=5, seed=31)
+    Q = Q.float().requires_grad_(True)
+    K = K.float().requires_grad_(True)
+    V = V.float().requires_grad_(True)
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=use_fn)
+    ref = eager_tril_attn(Q.detach(), K.detach(), V.detach())
+    assert torch.allclose(out, ref, rtol=1e-4, atol=1e-4)
+    out.sum().backward()
+
+    Qr = Q.detach().clone().requires_grad_(True)
+    Kr = K.detach().clone().requires_grad_(True)
+    Vr = V.detach().clone().requires_grad_(True)
+    eager_tril_attn(Qr, Kr, Vr).sum().backward()
+    assert torch.allclose(Q.grad, Qr.grad, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(K.grad, Kr.grad, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(V.grad, Vr.grad, rtol=1e-4, atol=1e-4)
