@@ -429,7 +429,7 @@ class BDH(nn.Module):
         return x.unsqueeze(1)
 
     def _vocab_logits(self, x: torch.Tensor) -> torch.Tensor:
-        """Final hidden ``(B, 1, T, D)`` → contiguous ``(B, T, V)`` logits.
+        """Final hidden ``(B, 1, T, D)`` or ``(B, T, D)`` → contiguous ``(B, T, V)``.
 
         Untied (default): ``F.linear(h, lm_head.T)`` — transpose is a *view*;
         no ``.contiguous()`` copy of a (V, D) clone. Bit-identical to
@@ -452,6 +452,87 @@ class BDH(nn.Module):
             w = w.contiguous()
         # F.linear wants (out, in)=(V, D); stored weight is (D, V).
         return F.linear(h, w.transpose(0, 1), bias)
+
+    def _lm_head_last_into(self, x: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+        """Write last-token logits into preallocated ``out`` ``(B, V)`` (fp32).
+
+        Hot path for T=1 decode: ``torch.mm`` / ``addmm`` with ``out=`` avoids a
+        fresh ``(B, 1, V)`` alloc from ``_vocab_logits`` each step. Math matches
+        ``_vocab_logits(x)[:, -1, :].float()``.
+        """
+        if x.dim() == 4:
+            h = x[:, 0, -1, :]
+        else:
+            h = x[:, -1, :]
+        if h.dtype != out.dtype:
+            h = h.to(dtype=out.dtype)
+        if not h.is_contiguous():
+            h = h.contiguous()
+        bias = self.lm_head_bias
+        # out= GEMMs disallow requires_grad args; decode is inference_mode but
+        # detach so the helper is safe if called outside that context.
+        if self.lm_head is None:
+            # F.linear(h, embed.weight) = h @ weight.T + bias; weight (V, D).
+            w = self.embed.weight.detach()
+            if w.dtype != out.dtype:
+                w = w.to(dtype=out.dtype)
+            wt = w.transpose(0, 1)  # (D, V) view
+            h = h.detach()
+            if bias is not None:
+                torch.addmm(bias.detach().to(dtype=out.dtype), h, wt, out=out)
+            else:
+                torch.mm(h, wt, out=out)
+        else:
+            w = self.lm_head.detach()
+            if not w.is_contiguous():
+                w = w.contiguous()
+            if w.dtype != out.dtype:
+                w = w.to(dtype=out.dtype)
+            h = h.detach()
+            if bias is not None:
+                torch.addmm(bias.detach().to(dtype=out.dtype), h, w, out=out)
+            else:
+                torch.mm(h, w, out=out)
+        return out
+
+    @staticmethod
+    def _sample_from_logits(
+        logits_bv: torch.Tensor,
+        *,
+        scale: float | None,
+        do_topk: bool,
+        top_k_n: int,
+        probs_buf: torch.Tensor,
+        softmax,
+        multinomial,
+    ) -> torch.Tensor:
+        """Sample one token from ``(B, V)`` logits into reused ``probs_buf``.
+
+        Owns ``logits_bv`` for the call (may ``mul_`` / ``masked_fill_``).
+        When ``do_topk``, optional fused path: softmax+multinomial over the top-k
+        values only, then ``gather`` indices — same distribution as mask/-inf,
+        fewer full-vocab softmax flops. Full-vocab multinomial kept when
+        ``top_k`` is None (default) for RNG parity with prior generate.
+        """
+        if scale is not None:
+            logits_bv.mul_(scale)
+        if do_topk:
+            V = logits_bv.size(-1)
+            k = top_k_n if top_k_n <= V else V
+            # Fused top-k: sample in the k-space (distribution-equivalent to
+            # mask+softmax over V; RNG stream differs — only used when top_k set).
+            values, indices = torch.topk(logits_bv, k, dim=-1)
+            if k < V:
+                # Softmax only over k; write into a narrow of probs_buf when B*k fits,
+                # else allocate a small (B, k) probs (k << V).
+                probs_k = softmax(values, dim=-1)
+                idx_k = multinomial(probs_k, num_samples=1)
+                return indices.gather(1, idx_k)
+            # k == V: fall through to full-vocab path using values order? Use mask.
+            values_min = values[:, -1:]
+            logits_bv.masked_fill_(logits_bv < values_min, float("-inf"))
+        torch.softmax(logits_bv, dim=-1, out=probs_buf)
+        return multinomial(probs_buf, num_samples=1)
 
     def _residual_ln(self, x: torch.Tensor, y_mlp: torch.Tensor) -> torch.Tensor:
         """``LN(x + LN(y_mlp))`` via ``F.layer_norm`` only — compile-friendly.
@@ -576,12 +657,18 @@ class BDH(nn.Module):
         idx,
         targets=None,
         cache: Optional[Union[list, CacheManager]] = None,
+        *,
+        logits_out: Optional[torch.Tensor] = None,
     ):
         """
         cache: optional packed ``CacheManager`` (preferred) or legacy list of
         length n_layer with None | {'kr', 'v'} (cat every step). Mutated in place.
         When cache is provided, idx is the new token block; RoPE continues from
         cached length.
+
+        logits_out: optional preallocated ``(B, V)`` fp32 buffer. When set and
+        ``T==1``, writes last-token logits via ``_lm_head_last_into`` and returns the
+        same ``(B, V)`` buffer — generate decode reuse (no per-step vocab alloc).
 
         AMP: wrap the call in torch.autocast(...) or use generate(amp_dtype=...).
         Default path remains fp32. RoPE phases stay float32.
@@ -675,13 +762,20 @@ class BDH(nn.Module):
         if packed:
             cache.commit()
 
-        logits = self._vocab_logits(x)
         loss = None
-        if targets is not None:
-            # Contiguous (B*T, V) for CE; view is safe after _vocab_logits.
-            loss = F.cross_entropy(
-                logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
-            )
+        if logits_out is not None:
+            if T != 1:
+                raise ValueError("logits_out requires T==1 decode")
+            self._lm_head_last_into(x, logits_out)
+            # Return the owned (B, V) buffer (no unsqueeze); generate ignores it.
+            logits = logits_out
+        else:
+            logits = self._vocab_logits(x)
+            if targets is not None:
+                # Contiguous (B*T, V) for CE; view is safe after _vocab_logits.
+                loss = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
+                )
 
         return logits, loss
 
@@ -717,7 +811,8 @@ class BDH(nn.Module):
         Default None preallocates exactly ``prompt + max_new_tokens``.
 
         Output tokens are written into a preallocated buffer (no per-step
-        ``torch.cat`` on the token sequence).
+        ``torch.cat`` on the token sequence). Decode steps fuse ``lm_head`` into
+        a reused ``(B, V)`` buffer (``logits_out``) and sample via reused probs.
         """
         was_training = self.training
         self.eval()
@@ -752,34 +847,48 @@ class BDH(nn.Module):
         top_k_n = int(top_k) if do_topk else 0
         softmax = F.softmax
         multinomial = torch.multinomial
+        vocab = int(self.config.vocab_size)
+        # Reused across decode steps: fused lm_head (mm out=) + softmax out=.
+        logits_buf = torch.empty(B, vocab, dtype=torch.float32, device=device)
+        probs_buf = torch.empty(B, vocab, dtype=torch.float32, device=device)
+        sample = self._sample_from_logits
 
         try:
             with _autocast_context(device, amp_dtype):
+                # Prefill: full (B, T, V) once. First sample may use a view when
+                # fp32 + no in-place scale/top-k (avoids an extra Tensor.copy_).
+                # Later steps: lm_head writes straight into logits_buf (T=1).
                 logits, _ = self(idx, cache=cache)
 
                 for t in range(max_new_tokens):
-                    # Decode steps return (B, 1, V); [-1] keeps the prefill case too.
-                    step_logits = logits[:, -1, :]
-                    if step_logits.dtype != torch.float32:
-                        step_logits = step_logits.float()
-                    if scale is not None:
-                        step_logits = step_logits * scale
-                    if do_topk:
-                        k = (
-                            top_k_n
-                            if top_k_n <= step_logits.size(-1)
-                            else step_logits.size(-1)
+                    if t == 0:
+                        step = logits[:, -1, :]
+                        need_owned = (
+                            step.dtype != torch.float32
+                            or scale is not None
+                            or do_topk
                         )
-                        values, _ = torch.topk(step_logits, k)
-                        # Clone: step_logits may view into logits storage.
-                        step_logits = step_logits.clone()
-                        step_logits.masked_fill_(
-                            step_logits < values[:, -1:], float("-inf")
-                        )
-                    probs = softmax(step_logits, dim=-1)
-                    idx_next = multinomial(probs, num_samples=1)
+                        if need_owned:
+                            if step.dtype != torch.float32:
+                                logits_buf.copy_(step.float())
+                            else:
+                                logits_buf.copy_(step)
+                            sample_in = logits_buf
+                        else:
+                            sample_in = step
+                    else:
+                        sample_in = logits_buf
+                    idx_next = sample(
+                        sample_in,
+                        scale=scale,
+                        do_topk=do_topk,
+                        top_k_n=top_k_n,
+                        probs_buf=probs_buf,
+                        softmax=softmax,
+                        multinomial=multinomial,
+                    )
                     out[:, prompt_len + t] = idx_next[:, 0]
-                    logits, _ = self(idx_next, cache=cache)
+                    self(idx_next, cache=cache, logits_out=logits_buf)
         finally:
             self.attn._attn_impl_override = None
 
