@@ -174,6 +174,22 @@ def test_public_dispatch_rejects_cis_aliases_before_store(impl):
             bdh_rope_rotate(v, cos, sin, out=out, impl=impl)
         assert torch.equal(out, before), impl
 
+
+@pytest.mark.parametrize("impl", ["eager", "fused"])
+def test_public_paired_dispatch_rejects_cis_aliases_before_store(impl):
+    """Public paired dispatch keeps the no-cis-alias output contract."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=1, seed=117)
+    cos_p = cos.reshape(*cos.shape[:-1], -1, 2)
+    sin_p = sin.reshape(*sin.shape[:-1], -1, 2)
+
+    for cis_p in (cos_p, sin_p):
+        out = cis_p.reshape(*cis_p.shape[:-2], -1).expand_as(v)
+        before = out.clone()
+        with pytest.raises(ValueError, match="alias"):
+            bdh_rope_rotate_paired(v, cos_p, sin_p, out=out, impl=impl)
+        assert torch.equal(out, before), impl
+
+
 def test_rope_shape_contracts_reject_malformed_inputs():
     """Rotation entrypoints fail clearly before doing partial math."""
     _, _, cos, sin, v, _ = _cis_and_v(T=2, seed=111)
