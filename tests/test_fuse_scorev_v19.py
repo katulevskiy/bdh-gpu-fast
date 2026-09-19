@@ -133,6 +133,42 @@ def test_dispatch_preserves_capacity_strided_per_head_v_gradients(impl):
 
 
 @pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
+@pytest.mark.parametrize("v_heads", [1, 3])
+def test_dispatch_preserves_capacity_strided_v_storage_gradients(impl, v_heads):
+    """Dispatch aliases accumulate V gradients in the backing storage."""
+    B, H, T, N, D = 2, 3, 67, 5, 4
+    generator = torch.Generator(device="cpu").manual_seed(1924)
+    Q = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
+    K = torch.randn(B, H, T, N, generator=generator, dtype=torch.float64)
+    V_storage = torch.randn(
+        B, v_heads, T + 3, D, generator=generator, dtype=torch.float64
+    )
+    V = V_storage[:, :, 1 : T + 1, :]
+    dO = torch.randn(B, H, T, D, generator=generator, dtype=torch.float64)
+
+    assert not V.is_contiguous()
+
+    def run(name):
+        q = Q.detach().clone().requires_grad_(True)
+        k = K.detach().clone().requires_grad_(True)
+        v_storage = V_storage.detach().clone().requires_grad_(True)
+        v = v_storage[:, :, 1 : T + 1, :]
+        out = bdh_attn(q, k, v, impl=name)
+        out.backward(dO)
+        return out.detach(), v_storage.grad.detach()
+
+    ref, ref_storage_grad = run("eager")
+    expected = (Q @ K.transpose(-2, -1)).tril(diagonal=-1) @ V
+    assert torch.equal(ref, expected)
+
+    got, got_storage_grad = run(impl)
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    assert torch.allclose(
+        got_storage_grad, ref_storage_grad, rtol=1e-9, atol=1e-9
+    )
+
+
+@pytest.mark.parametrize("impl", ["blocked", "online", "triton", "cuda"])
 def test_dispatch_preserves_feature_strided_shared_v_gradients(impl):
     """Dispatch aliases preserve gradients through a feature-strided shared V."""
     B, H, T, N, D = 2, 3, 29, 5, 4
