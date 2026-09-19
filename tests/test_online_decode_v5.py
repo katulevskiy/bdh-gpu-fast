@@ -226,6 +226,20 @@ def test_decode_empty_past_returns_typed_zeros_for_all_backends():
         assert torch.equal(got, expected), f"impl={impl} returned {got}"
 
 
+def test_decode_empty_past_preserves_float64_query_dtype():
+    """Empty decode keeps float64 instead of silently widening or narrowing zeros."""
+    B, H, Tq, N, D = 1, 2, 3, 4, 5
+    Q = torch.randn(B, H, Tq, N, dtype=torch.float64)
+    K_past = torch.empty(B, H, 0, N, dtype=Q.dtype)
+    V_past = torch.empty(B, 1, 0, D, dtype=Q.dtype)
+
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K_past, V_past, impl=impl)
+        assert got.shape == (B, H, Tq, D)
+        assert got.dtype == Q.dtype
+        assert torch.equal(got, torch.zeros_like(got)), f"impl={impl} returned {got}"
+
+
 def test_online_decode_tiled_nonempty_preserves_query_dtype():
     """A tiled nonempty CPU decode keeps score×V output in the query dtype."""
     B, H, S, Tq, N, D = 2, 3, 1025, 2, 4, 3
