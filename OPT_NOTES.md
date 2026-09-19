@@ -7158,7 +7158,7 @@ eager, and attention remains raw scores × strict `tril(diagonal=-1)`.
 
 **Branch:** `opt/layout-v4` (private `katulevskiy/bdh-gpu-opt` only; no
 public PR and no PRs to `pathwaycom/*`).
-**Base tip:** `9a86f03` (#186).
+**Base tip:** `2088c90` (#187 docs).
 
 The post-#156 layout probe now covers the remaining sampler-owned signatures
 in addition to the default warm-path evidence. `tests/test_layout_v3.py`
