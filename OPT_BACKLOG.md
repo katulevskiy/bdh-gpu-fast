@@ -16,7 +16,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 - RoPE without `stack→view`; skip redundant dtype casts
 - KV-style cache + incremental `generate`
 - MLP `permute → contiguous → view`
-- Vectorized `train.get_batch`
+- Vectorized `train.get_batch` (+ pin/non_blocking CUDA; optional DataLoader workers)
 - Triton + blocked pure-PyTorch attn dispatch (`BDH_ATTN_IMPL`) — CPU blocked slower; GPU unmeasured
 - Experimental sparse ReLU matmul (default off)
 - CUDA extension scaffold for tril score×V (optional build)
