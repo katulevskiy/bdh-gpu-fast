@@ -5577,6 +5577,12 @@ FULLGRAPH ∈ {0,1} × IMPL=eager
 MODE ∈ {default, reduce-overhead}
 ```
 
+A warm single-process smoke on this CPU box (`layers=2 d=64 B=4 T=64`,
+`IMPL=eager`, `MODE=default`) reported `COMPILE=0` at 19.08 ms and
+`COMPILE=1` with the new `train_bwd` probe at 31.23 ms. This is a local CPU
+wall measurement, not a speedup claim; the stronger probe adds intentional
+backward compile/startup work.
+
 On this CPU-only box, use only `BDH_COMPILE=1 BDH_ATTN_IMPL=eager
 BDH_COMPILE_MODE=default` as the recommended compile combination. CPU wall
 medians are not GPU or CUDA-graph claims; `COMPILE=0` remains the repository
