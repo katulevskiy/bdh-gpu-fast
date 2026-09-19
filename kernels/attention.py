@@ -97,48 +97,157 @@ def _tiled_score_v(
     return out
 
 
+# Peak score elements for a single tile before the ×V epilogue discards it.
+# Used by tests / OPT_NOTES — blocked never allocates a full T×T score tensor.
+_STREAM_SCORE_ELEMS = 4096  # if Bi*Bj exceeds this, stream query rows (bound peak)
+
+
+def max_score_tile_elems(T: int, block_size: int = 64) -> int:
+    """Upper bound on score elements materialized at once by blocked/online.
+
+    Eager allocates ``T*T`` (full matrix). Blocked/online keeps at most one
+    tile: ``min(BS*BS, _STREAM_SCORE_ELEMS)`` when streaming, else ``BS*BS``,
+    and diagonal online rows keep at most ``BS-1`` keys per query row.
+    """
+    BS = max(1, int(block_size))
+    if T <= 0:
+        return 0
+    # Past tiles: Bi <= BS, Bj <= BS → Bi*Bj, or streamed to Bj (<= BS)
+    past = min(BS * BS, _STREAM_SCORE_ELEMS) if BS * BS > _STREAM_SCORE_ELEMS else BS * BS
+    # Diagonal online: one query row × at most (BS-1) within-block keys
+    diag = max(0, BS - 1)
+    return max(past, diag)
+
+
+def _accumulate_qk_v(
+    out: torch.Tensor,
+    Qi: torch.Tensor,
+    Kj: torch.Tensor,
+    Vj: torch.Tensor,
+    *,
+    i0: int,
+    i1: int,
+) -> None:
+    """Online fuse: ``out[:,:,i0:i1] += (Qi @ Kj.mT) @ Vj``.
+
+    Computes ``sum_j (Qi · Kj) Vj`` for the tile and accumulates into ``out``.
+    The score tile is not retained after the ×V epilogue. When ``Bi*Bj`` is
+    large, streams one query row at a time so peak score storage is ``O(Bj)``
+    rather than ``O(Bi*Bj)`` (still never a full ``T×T``).
+    """
+    Bi = i1 - i0
+    Bj = Kj.size(2)
+    if Bi == 0 or Bj == 0:
+        return
+
+    if Bi * Bj > _STREAM_SCORE_ELEMS:
+        # Stream query rows: peak scores (B,H,1,Bj)
+        for r in range(Bi):
+            q = Qi[:, :, r : r + 1, :]
+            out[:, :, i0 + r : i0 + r + 1, :] = out[
+                :, :, i0 + r : i0 + r + 1, :
+            ] + (q @ Kj.transpose(-2, -1)) @ Vj
+        return
+
+    # Single tile: score ephemeral in the fused expression
+    out[:, :, i0:i1, :] = out[:, :, i0:i1, :] + (Qi @ Kj.transpose(-2, -1)) @ Vj
+
+
+def _accumulate_diag_online(
+    out: torch.Tensor,
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    Vh: torch.Tensor,
+    *,
+    i0: int,
+    i1: int,
+) -> None:
+    """Diagonal block with strict ``tril(diagonal=-1)`` via online rows.
+
+    For local row ``r``, only keys ``j in [i0, i0+r)`` contribute — never
+    materializes a ``Bi×Bi`` score matrix (peak ``O(r) <= O(BS)`` per row).
+    """
+    Bi = i1 - i0
+    if Bi <= 1:
+        return
+    for r in range(1, Bi):
+        # Global query index i0+r; within-block keys with j < i0+r
+        q = Q[:, :, i0 + r : i0 + r + 1, :]
+        Kj = K[:, :, i0 : i0 + r, :]
+        Vj = Vh[:, :, i0 : i0 + r, :]
+        out[:, :, i0 + r : i0 + r + 1, :] = out[
+            :, :, i0 + r : i0 + r + 1, :
+        ] + (q @ Kj.transpose(-2, -1)) @ Vj
+
+
 def blocked_tril_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    block_size: int = DEFAULT_BLOCK_COLD,
+    block_size: int = 64,
 ) -> torch.Tensor:
-    """Pure-PyTorch strict-tril attention without a full upper triangle.
+    """Pure-PyTorch strict-tril attention without a full T×T score matrix.
 
-    Tiles the sequence so score tiles are at most (BS × past) / (BS × BS).
-    Past-only regions reuse ``_tiled_score_v`` (same helper as decode).
-    Semantically identical to eager_tril_attn (up to fp roundoff on long T).
-    Works on CPU and CUDA; used as the non-Triton "triton" path fallback and
-    as a lower-memory eager alternative.
+    Online fused accumulation of ``sum_{j<i} (Q_i·K_j) V_j``:
+
+    * **Past tiles** — all ``j < i0`` for query block ``[i0,i1)``; fuse
+      score×V per tile (stream query rows when the tile is large).
+    * **Diagonal tile** — row-wise online strict lower triangle (no ``Bi×Bi``
+      scores + ``tril_``).
+
+    Semantically identical to ``eager_tril_attn`` (up to fp roundoff on long T).
+    Works on CPU and CUDA; used as the non-Triton ``triton`` path fallback and
+    as a lower-peak-score-memory alternative to eager.
     """
     B, H, T, N = Q.shape
     D = V.shape[-1]
-    Vh = _expand_v_heads(V, B, H, T, D)
+    if V.size(1) == 1 and H != 1:
+        Vh = V.expand(B, H, T, D)
+    else:
+        Vh = V
 
-    out = Q.new_zeros(B, H, T, D)
+    # Accumulate in a stable float: widen half/bfloat16 to fp32; keep f32/f64
+    # so gradcheck / analytic bwd on float64 stay exact-dtype.
+    if Q.dtype in (torch.float16, torch.bfloat16):
+        acc_dtype = torch.float32
+    else:
+        acc_dtype = Q.dtype
+    Qf = Q.to(dtype=acc_dtype)
+    Kf = K.to(dtype=acc_dtype)
+    Vhf = Vh.to(dtype=acc_dtype)
+    out = torch.zeros(B, H, T, D, device=Q.device, dtype=acc_dtype)
     BS = max(1, int(block_size))
 
     for i0 in range(0, T, BS):
         i1 = min(i0 + BS, T)
-        Qi = Q[:, :, i0:i1, :]
+        Qi = Qf[:, :, i0:i1, :]
 
-        # Full past: all j < i0 are strictly before every query in [i0, i1).
-        # Shared with decode — one helper, adaptive tiles, often a single GEMM.
-        if i0 > 0:
-            out[:, :, i0:i1, :] = _tiled_score_v(
-                Qi, K[:, :, :i0, :], Vh[:, :, :i0, :], BS
+        # Past blocks: every key index j < i0 is strictly before all queries
+        for j0 in range(0, i0, BS):
+            j1 = min(j0 + BS, i0)
+            _accumulate_qk_v(
+                out,
+                Qi,
+                Kf[:, :, j0:j1, :],
+                Vhf[:, :, j0:j1, :],
+                i0=i0,
+                i1=i1,
             )
 
-        # Diagonal block: apply tril(diagonal=-1) within the block
-        Bi = i1 - i0
-        if Bi > 1:
-            Kj = K[:, :, i0:i1, :]
-            Vj = Vh[:, :, i0:i1, :]
-            scores = Qi @ Kj.transpose(-2, -1)
-            scores = scores.tril(diagonal=-1)
-            out[:, :, i0:i1, :] = out[:, :, i0:i1, :] + scores @ Vj
+        # Diagonal: online rows with j < i inside the block (tril diagonal=-1)
+        _accumulate_diag_online(out, Qf, Kf, Vhf, i0=i0, i1=i1)
 
-    return out
+    return out.to(dtype=Q.dtype)
+
+
+def online_tril_attn(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    block_size: int = 64,
+) -> torch.Tensor:
+    """Alias for deepened blocked fusion (explicit name for OPT / benches)."""
+    return blocked_tril_attn(Q, K, V, block_size=block_size)
 
 
 def _can_use_triton(Q: torch.Tensor) -> bool:

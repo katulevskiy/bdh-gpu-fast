@@ -30,7 +30,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Eager path still pays full TxT `bmm` (~12% self) + `tril_` (~6%). Kernels in-tree; no CUDA on this box. | A100/H100 microbench vs eager; bit-identical | Env blocker |
-| **P0** | **Fuse score×V epilogue (no materialize T×T)** | Ideal: `sum_{j<i} (Q_i·K_j) V_j` without full score tensor. | Complete Triton/CUDA fused kernel | High impact |
+| **P0** | **Fuse score×V epilogue (no materialize T×T)** | **Landed `opt/fuse-scorev`:** blocked/online strict-tril accumulation keeps peak score storage ≪ T×T; GPU Triton/CUDA measure remains open. | GPU microbench vs eager; keep deepening CUDA/Triton | High impact |
 | **P1** | ~~Cache packing / fewer cats~~ | **Landed cache-pack + cache-v2**: generate `aten::cat` **0** (was 32 post-pack / ~864 pre-pack). Layer-contiguous + optional `page_size`. | done | — |
 | **P1** | **`torch.compile` / inductor** | Forward: `copy_` ~23%, `mul` ~16%, LN ~9%, ReLU ~7%. **train-fuse:** optional `BDH_COMPILE=1` + fused AdamW + sync-light loop landed; measure on GPU. | GPU compile parity | Low |
 | **P2** | **Fused / cached RoPE** | Attn: mul/copy/trig/neg ~60% combined self. | **Cached tables landed `opt/rope-cache`**; fused kernel still open | Low–medium |

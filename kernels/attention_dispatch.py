@@ -4,7 +4,7 @@ Backends (``BDH_ATTN_IMPL``)::
 
     export BDH_ATTN_IMPL=triton   # blocked PyTorch on CPU; Triton on CUDA
     export BDH_ATTN_IMPL=eager    # default — full T×T then tril_(diagonal=-1)
-    export BDH_ATTN_IMPL=blocked  # tiled pure-PyTorch, no full upper triangle
+    export BDH_ATTN_IMPL=blocked  # online fused tiles, no full T×T scores
     export BDH_ATTN_IMPL=cuda    # native ext if built, else CPU/CUDA ref
     export BDH_ATTN_AUTOGRAD=1    # optional — StrictTrilAttnFn + analytic bwd
 
@@ -63,7 +63,7 @@ def bdh_attn(
     """Compute tril(Q @ K.T, diagonal=-1) @ V with the selected backend.
 
     - eager:   materialize full scores (reference; matches original bdh.py)
-    - blocked: tiled pure PyTorch (no full upper triangle; CPU/CUDA)
+    - blocked: online fused tiles (no full T×T scores; CPU/CUDA)
     - triton:  Triton fused kernel on CUDA; else blocked
     - cuda:    native ext via ``kernels.cuda_attn.tril_score_v`` when present,
                else that module's pure-PyTorch reference (same math)

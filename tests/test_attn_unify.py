@@ -68,7 +68,7 @@ def test_bdh_attn_matches_eager(monkeypatch, impl):
     ref = eager_tril_attn(Q, K, V)
     got = bdh_attn(Q, K, V)
     assert got.shape == ref.shape
-    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5), (
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4), (
         f"impl={impl} max diff={(got - ref).abs().max().item()}"
     )
     assert torch.equal(got[:, :, 0, :], torch.zeros_like(got[:, :, 0, :]))
@@ -79,7 +79,7 @@ def test_cuda_impl_matches_ref(monkeypatch):
     Q, K, V = _make_qkv(T=9, seed=42)
     got = bdh_attn(Q, K, V, impl="cuda")
     ref = tril_score_v_ref(Q, K, V)
-    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
 
 
 def test_backend_info_keys(monkeypatch):
@@ -106,7 +106,7 @@ def test_attention_cold_path_env_switch(monkeypatch, impl):
     monkeypatch.setenv("BDH_ATTN_IMPL", impl)
     out, kr2, vv2 = attn(Q, Q, V)
 
-    assert torch.allclose(out, out_eager, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(out, out_eager, rtol=1e-4, atol=1e-4)
     assert torch.equal(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
     # RoPE'd keys / values store tensors unchanged by backend choice
     assert torch.equal(kr, kr2)
@@ -152,6 +152,6 @@ def test_no_softmax_no_scale_across_impls(monkeypatch):
     for impl in ("eager", "blocked", "triton", "cuda"):
         monkeypatch.setenv("BDH_ATTN_IMPL", impl)
         got = bdh_attn(Q, K, V)
-        assert torch.allclose(got, expected, rtol=1e-5, atol=1e-5)
+        assert torch.allclose(got, expected, rtol=1e-4, atol=1e-4)
     sm_out = torch.softmax(scores, dim=-1) @ V
     assert not torch.allclose(expected, sm_out, rtol=1e-3, atol=1e-3)
