@@ -56,18 +56,33 @@ def fetch_data():
             f.write(requests.get(data_url).text)
 
 
+# Cached train/val byte tensors (pre-tensorized once from memmap).
+_train_data = None
+_val_data = None
+
+
+def _load_splits():
+    """Load corpus once: train = first 90%, val = last 10% (same as before)."""
+    global _train_data, _val_data
+    if _train_data is not None:
+        return
+    mm = np.memmap(input_file_path, dtype=np.uint8, mode="r")
+    n = len(mm)
+    split = int(0.9 * n)
+    # Pre-tensorize int64 once; tiny Shakespeare is ~1MB → ~8MB resident.
+    _train_data = torch.from_numpy(np.asarray(mm[:split], dtype=np.int64))
+    _val_data = torch.from_numpy(np.asarray(mm[split:], dtype=np.int64))
+
+
 def get_batch(split):
-    # treat the file as bytes; vectorized window gather (no Python per-row loop)
-    data = np.memmap(input_file_path, dtype=np.uint8, mode="r")
-    if split == "train":
-        data = data[: int(0.9 * len(data))]
-    else:
-        data = data[int(0.9 * len(data)) :]
-    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,)).numpy()
-    offsets = np.arange(BLOCK_SIZE, dtype=np.int64)[None, :]
-    idx_x = ix[:, None] + offsets
-    x = torch.from_numpy(np.asarray(data[idx_x], dtype=np.int64))
-    y = torch.from_numpy(np.asarray(data[idx_x + 1], dtype=np.int64))
+    # Vectorized window gather — no Python list of from_numpy per sample.
+    _load_splits()
+    data = _train_data if split == "train" else _val_data
+    ix = torch.randint(len(data) - BLOCK_SIZE, (BATCH_SIZE,))
+    offsets = torch.arange(BLOCK_SIZE + 1)
+    windows = data[ix.unsqueeze(1) + offsets.unsqueeze(0)]  # (B, BLOCK_SIZE+1)
+    x = windows[:, :-1]
+    y = windows[:, 1:]
     if torch.cuda.is_available():
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(

@@ -98,3 +98,11 @@ source .venv/bin/activate
 python tests/test_correctness.py
 python benchmarks/bench_forward.py
 ```
+
+## train.py
+
+- `get_batch`: pre-tensorize train/val splits once from the uint8 memmap; gather
+  windows with vectorized advanced indexing (`ix[:,None] + arange`) instead of a
+  Python list comprehension of `torch.from_numpy` per sample.
+- Semantics unchanged: `BLOCK_SIZE`/`BATCH_SIZE`, train=first 90% / val=last 10%.
+- Microbench: `.venv/bin/python benchmarks/bench_batch.py`
