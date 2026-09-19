@@ -40,3 +40,25 @@ def test_blank_cold_threshold_tracks_decode_threshold(monkeypatch, raw):
     assert resolve_cold_impl(9) != "eager"
     assert resolve_decode_impl(8) == "eager"
     assert resolve_decode_impl(9) != "eager"
+
+
+def test_blank_cold_threshold_recovers_from_explicit_override(monkeypatch):
+    """Blank cold overrides clear a prior value and resume live fallback."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "2")
+
+    assert attn_auto_cold_threshold() == 2
+    assert resolve_cold_impl(2) == "eager"
+    assert resolve_cold_impl(3) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "   ")
+    assert attn_auto_cold_threshold() == 4
+    assert resolve_cold_impl(4) == "eager"
+    assert resolve_cold_impl(5) != "eager"
+
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "8")
+    assert attn_auto_cold_threshold() == 8
+    assert resolve_cold_impl(8) == "eager"
+    assert resolve_cold_impl(9) != "eager"
