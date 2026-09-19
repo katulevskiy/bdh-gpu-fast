@@ -126,6 +126,26 @@ def test_cpu_flattened_bmm_padded_v_view_preserves_layout_contract(value_heads):
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
+def test_cpu_flattened_bmm_padded_qk_views_preserve_layout_contract():
+    """Long CPU cold tiles preserve parity for capacity-padded Q/K views."""
+    T, B, H, N, D = 257, 2, 2, 5, 4
+    g = torch.Generator().manual_seed(28)
+    Q_storage = torch.randn(B, H, T, N + 1, generator=g)
+    K_storage = torch.randn(B, H, T, N + 1, generator=g)
+    Q = Q_storage[..., :N]
+    K = K_storage[..., :N]
+    V = torch.randn(B, 1, T, D, generator=g)
+
+    assert not Q.is_contiguous()
+    assert not K.is_contiguous()
+    assert Q.stride(-2) == N + 1
+    assert K.stride(-2) == N + 1
+    ref = eager_tril_attn(Q, K, V)
+    got = blocked_tril_attn(Q, K, V, block_size=128)
+    assert torch.allclose(got, ref, rtol=1e-4, atol=1e-4)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
 @pytest.mark.parametrize("impl", ["blocked", "online"])
 @pytest.mark.parametrize("value_heads", [1, 2])
 def test_cpu_long_padded_v_autograd_matches_eager(impl, value_heads):
