@@ -198,3 +198,38 @@ def test_half_dtypes_preserve_strict_tril_backward_contract(impl, dtype):
     assert torch.allclose(Q.grad.float(), Q_ref.grad.float(), rtol=5e-2, atol=5e-2)
     assert torch.allclose(K.grad.float(), K_ref.grad.float(), rtol=5e-2, atol=5e-2)
     assert torch.allclose(V.grad.float(), V_ref.grad.float(), rtol=5e-2, atol=5e-2)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_backward_preserves_strict_past_at_default_tile_boundary(impl):
+    """A query at the first row after the 64-row tile still excludes self/future."""
+    generator = torch.Generator().manual_seed(2031)
+    query = 64
+    Q = torch.randn(
+        1, 2, 65, 3, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        1, 2, 65, 3, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        1, 1, 65, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO = torch.zeros(1, 2, 65, 4, dtype=torch.float64)
+    dO[:, :, query, :] = torch.randn(
+        1, 2, 4, generator=generator, dtype=torch.float64
+    )
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    ref = eager_tril_attn(Q.detach(), K.detach(), V.detach())
+    assert torch.allclose(out, ref, rtol=1e-10, atol=1e-10)
+    out.backward(dO)
+
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    eager_tril_attn(Q_ref, K_ref, V_ref).backward(dO)
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-10, atol=1e-10)
+    assert torch.allclose(K.grad, K_ref.grad, rtol=1e-10, atol=1e-10)
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-10, atol=1e-10)
+    assert torch.equal(K.grad[:, :, query:, :], torch.zeros_like(K.grad[:, :, query:, :]))
+    assert torch.equal(V.grad[:, :, query:, :], torch.zeros_like(V.grad[:, :, query:, :]))
