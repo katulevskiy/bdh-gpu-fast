@@ -1,5 +1,5 @@
 # Copyright Pathway Technology, Inc.
-# Private opt: compile-friendly training loop (see OPT_NOTES.md).
+# Private opt (opt/train-fuse): sync-light loop + opt-in compile (see OPT_NOTES.md).
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ WEIGHT_DECAY = 0.1
 LOG_FREQ = 100
 
 # Compile / opt knobs (env overrides for benches and CPU boxes without inductor deps)
-USE_COMPILE = os.environ.get("BDH_COMPILE", "1") not in ("0", "false", "False")
+USE_COMPILE = os.environ.get("BDH_COMPILE", "0") in ("1", "true", "True")
 COMPILE_MODE = os.environ.get("BDH_COMPILE_MODE", "default")  # default|reduce-overhead|max-autotune
 USE_FUSED_ADAMW = os.environ.get("BDH_FUSED_ADAMW", "1") not in ("0", "false", "False")
 
@@ -164,7 +164,7 @@ def maybe_compile(
       see train_fast.py / OPT_NOTES.md. Not enabled by default on dynamic T.
     """
     if not USE_COMPILE:
-        print("torch.compile disabled (BDH_COMPILE=0)")
+        print("torch.compile disabled (set BDH_COMPILE=1 to enable)")
         return model
     try:
         compiled = torch.compile(model, mode=COMPILE_MODE)
@@ -221,17 +221,18 @@ if __name__ == "__main__":
     model = maybe_compile(model, example_x=x, example_y=y)
     optimizer = make_optimizer(model)
 
-    loss_acc = 0.0
+    # Detach + accumulate on-device; .item() only at LOG_FREQ (avoids per-step CUDA sync).
+    loss_acc = None
     loss_steps = 0
     for step in range(MAX_ITERS):
         loss = train_step(model, optimizer, x, y)
         x, y = loader.next()  # already prefetched during step on CUDA side-stream
-        # Detach so we do not retain the autograd graph across iterations.
-        loss_acc += float(loss.detach())
+        det = loss.detach()
+        loss_acc = det if loss_acc is None else (loss_acc + det)
         loss_steps += 1
         if step % LOG_FREQ == 0:
-            print(f"Step: {step}/{MAX_ITERS} loss {loss_acc / loss_steps:.3}")
-            loss_acc = 0.0
+            print(f"Step: {step}/{MAX_ITERS} loss {loss_acc.item() / loss_steps:.3}")
+            loss_acc = None
             loss_steps = 0
     print("Training done, now generating a sample ")
     model.eval()

@@ -1,5 +1,7 @@
 """Microbench: train-step variants (fused AdamW, set_to_none, compile path).
 
+Also used by opt/train-fuse to document CPU honesty after sync-light logging.
+
 CPU-honest: no CUDA on the default runner. Measures median step time for a
 tiny BDH config. Compile is opt-in (BDH_BENCH_COMPILE=1) because inductor
 warmup is long on CPU.
