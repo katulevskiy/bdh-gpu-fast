@@ -79,3 +79,47 @@ def test_failed_backward_probe_restores_eval_mode_and_clears_grads(
     assert all(param.grad is None for param in model.parameters())
     assert "first probe failed" in captured
     assert "original eager module is retained" in captured
+
+
+def test_backward_probe_without_loss_restores_mode_and_clears_grads(
+    monkeypatch, capsys
+):
+    """A train_bwd probe returning no loss must soft-fallback cleanly."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    class ProbeWithoutLoss(torch.nn.Module):
+        def __init__(self, target):
+            super().__init__()
+            self.target = target
+
+        def forward(self, *args, **kwargs):
+            param = next(self.target.parameters())
+            # Simulate a partial gradient before the missing-loss check.
+            param.grad = torch.ones_like(param)
+            return torch.zeros(1), None
+
+    monkeypatch.setattr(
+        tr.torch, "compile", lambda model, **kwargs: ProbeWithoutLoss(model)
+    )
+    model = bdh.BDH(_small_cfg()).eval()
+    x = torch.randint(0, 256, (2, 8))
+    y = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x, example_y=y)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert out is model
+    assert not model.training
+    assert all(param.grad is None for param in model.parameters())
+    assert "first probe failed" in captured
+    assert "requires example_y (loss)" in captured
+    assert "original eager module is retained" in captured
