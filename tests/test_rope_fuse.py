@@ -565,6 +565,29 @@ def test_fused_strided_pair_input_and_out_preserve_parity():
         ), name
 
 
+@pytest.mark.parametrize("impl", ["eager", "fused"])
+def test_public_dispatch_noncontiguous_t_gt1_backward_matches_eager(impl):
+    """Public T>1 dispatch preserves input gradients for strided V views."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=294)
+
+    def make_strided_input():
+        backing = torch.full((*v.shape[:-1], v.shape[-1] * 2), -321.0)
+        backing[..., ::2].copy_(v)
+        backing.requires_grad_()
+        return backing, backing[..., ::2]
+
+    eager_backing, eager_v = make_strided_input()
+    impl_backing, impl_v = make_strided_input()
+    eager = eager_rope_rotate(eager_v, cos, sin)
+    got = bdh_rope_rotate(impl_v, cos, sin, impl=impl)
+    torch.manual_seed(295)
+    grad = torch.randn_like(eager)
+    eager.backward(grad)
+    got.backward(grad)
+
+    assert torch.equal(impl_backing.grad, eager_backing.grad), impl
+
+
 def test_fused_out_none_pair_store_parity():
     _, _, cos, sin, v, _ = _cis_and_v(T=10, seed=27)
     # Explicit out=None path
