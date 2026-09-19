@@ -22,11 +22,12 @@ Private ``katulevskiy/bdh-gpu-opt`` only — do not target pathwaycom.
 from __future__ import annotations
 
 import argparse
+import json
 import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 
@@ -38,6 +39,7 @@ from kernels.attention import (  # noqa: E402
     blocked_tril_attn,
     eager_decode_attn,
     eager_tril_attn,
+    online_decode_attn,
     online_tril_attn,
     triton_decode_attn,
     triton_tril_attn,
@@ -57,9 +59,53 @@ BACKENDS_COLD: dict[str, Callable[..., torch.Tensor]] = {
 BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
     "eager": eager_decode_attn,
     "blocked": blocked_decode_attn,
+    "online": online_decode_attn,
     "triton": triton_decode_attn,
     "cuda": tril_decode,
 }
+
+
+# Keep these commands in sync with the GPU microbench runbook in
+# OPT_BACKLOG.md. They are printed on CPU so a skipped run is still an
+# actionable handoff to a CUDA box; no CPU timings are substituted.
+BACKLOG_COMMANDS: dict[str, tuple[str, ...]] = {
+    "cold": (
+        "python benchmarks/bench_gpu_attn.py",
+        "python benchmarks/bench_gpu_attn.py --B 4 --H 8 --T 512 --N 64 --D 128 --warmup 20 --iters 100",
+    ),
+    "decode": ("python benchmarks/bench_gpu_attn.py --mode decode --T 512",),
+    "dtype": (
+        "python benchmarks/bench_gpu_attn.py --dtype bfloat16",
+        "python benchmarks/bench_gpu_attn.py --dtype float16",
+    ),
+    "native_cuda_optional": (
+        "BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation",
+        "python benchmarks/bench_gpu_attn.py",
+    ),
+}
+
+
+def _summary_path(path: str | None, summary: dict[str, Any]) -> None:
+    if path is None:
+        return
+    output = Path(path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+
+
+def _skip_summary() -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "status": "skip",
+        "reason": "cuda_unavailable",
+        "device": "cpu",
+        "cuda_available": False,
+        "gpu_name": None,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "backend_info": backend_info(),
+        "commands": {key: list(value) for key, value in BACKLOG_COMMANDS.items()},
+    }
 
 
 def _sync() -> None:
@@ -86,8 +132,10 @@ def _bench(
     return statistics.median(times)
 
 
-def _bit_identical_report(name: str, got: torch.Tensor, ref: torch.Tensor) -> None:
-    """Print exact equality + max abs/rel diffs vs eager reference."""
+def _bit_identical_report(
+    name: str, got: torch.Tensor, ref: torch.Tensor
+) -> dict[str, Any]:
+    """Print and return exact equality + closeness vs eager reference."""
     identical = bool(torch.equal(got, ref))
     diff = (got - ref).abs()
     max_abs = float(diff.max().item()) if diff.numel() else 0.0
@@ -98,6 +146,13 @@ def _bit_identical_report(name: str, got: torch.Tensor, ref: torch.Tensor) -> No
         f"  vs eager [{name:7s}] bit_identical={identical}  "
         f"allclose@1e-4={close}  max|Δ|={max_abs:.3e}  max_rel={max_rel:.3e}"
     )
+    return {
+        "backend": name,
+        "bit_identical": identical,
+        "allclose_at_1e-4": close,
+        "max_abs_delta": max_abs,
+        "max_rel_delta": max_rel,
+    }
 
 
 def main() -> int:
@@ -121,20 +176,33 @@ def main() -> int:
         action="store_true",
         help="Run on CPU anyway (not the intended path; for harness smoke only).",
     )
+    p.add_argument(
+        "--json-out",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Write the structured skip or CUDA comparison summary to PATH.",
+    )
     args = p.parse_args()
 
     cuda_ok = torch.cuda.is_available()
     if not cuda_ok and not args.force_cpu:
+        summary = _skip_summary()
         print(
-            "SKIP: CUDA not available — GPU attn microbench requires a CUDA device.\n"
-            "  On A100/H100:\n"
-            "    python benchmarks/bench_gpu_attn.py\n"
-            "    python benchmarks/bench_gpu_attn.py --B 4 --H 8 --T 512 --N 64 --D 128\n"
-            "    python benchmarks/bench_gpu_attn.py --mode decode --T 512\n"
-            "  Optional native ext:\n"
-            "    BDH_BUILD_EXT=1 BDH_BUILD_CUDA=1 pip install -e . --no-build-isolation\n"
-            f"  torch={torch.__version__}  cuda={cuda_ok}  backend_info={backend_info()}"
+            "GPU_ATTN_SKIP status=skip reason=cuda_unavailable device=cpu\n"
+            "CUDA is required for Triton/CUDA timing; no CPU timings were substituted."
         )
+        print("GPU_ATTN_COMMANDS (from OPT_BACKLOG.md):")
+        for group, commands in summary["commands"].items():
+            print(f"  {group}:")
+            for command in commands:
+                print(f"    {command}")
+        print(
+            f"  torch={summary['torch_version']}  cuda_available=false "
+            f"cuda_version={summary['cuda_version']}  backend_info={summary['backend_info']}"
+        )
+        print("GPU_ATTN_SUMMARY " + json.dumps(summary, sort_keys=True))
+        _summary_path(args.json_out, summary)
         return 0
 
     device = torch.device("cuda" if cuda_ok else "cpu")
@@ -170,24 +238,57 @@ def main() -> int:
     print(f"warmup={args.warmup}  iters={args.iters}")
     print("--- bit-identical / closeness vs eager ---")
 
+    comparisons: dict[str, dict[str, Any]] = {}
     with torch.no_grad():
         ref = ref_fn(Q, K, V)
         outs: dict[str, torch.Tensor] = {"eager": ref}
+        comparisons["eager"] = {
+            "backend": "eager",
+            "bit_identical": True,
+            "allclose_at_1e-4": True,
+            "max_abs_delta": 0.0,
+            "max_rel_delta": 0.0,
+        }
         for name, fn in backends.items():
             if name == "eager":
                 continue
             outs[name] = fn(Q, K, V)
-            _bit_identical_report(name, outs[name], ref)
+            comparisons[name] = _bit_identical_report(name, outs[name], ref)
 
     print("--- median wall time (ms) ---")
+    timings: dict[str, float] = {}
     t_eager = _bench(ref_fn, (Q, K, V), warmup=args.warmup, iters=args.iters)
+    timings["eager"] = t_eager
     print(f"  eager   {t_eager:8.3f} ms  (baseline)")
     for name, fn in backends.items():
         if name == "eager":
             continue
         t = _bench(fn, (Q, K, V), warmup=args.warmup, iters=args.iters)
+        timings[name] = t
         speedup = (t_eager / t) if t > 0 else float("inf")
         print(f"  {name:7s} {t:8.3f} ms  ({speedup:.2f}× vs eager)")
+
+    summary = {
+        "schema_version": 1,
+        "status": "ok",
+        "mode": mode,
+        "device": "cuda",
+        "gpu_name": gpu_name,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "cuda_available": True,
+        "backend_info": info,
+        "shape": {"B": B, "H": H, "T": T, "N": N, "D": D},
+        "dtype": args.dtype,
+        "warmup": args.warmup,
+        "iters": args.iters,
+        "results": [
+            {**comparisons[name], "median_ms": timings[name]}
+            for name in backends
+        ],
+    }
+    print("GPU_ATTN_SUMMARY " + json.dumps(summary, sort_keys=True))
+    _summary_path(args.json_out, summary)
 
     if device.type != "cuda":
         print(

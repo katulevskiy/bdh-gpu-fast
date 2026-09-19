@@ -11,6 +11,21 @@ Push only to `https://github.com/katulevskiy/bdh-gpu-opt` (private).
 - Venv: `/workspace/bdh-gpu-opt/.venv`
 - Baseline frozen as `bdh_baseline.py` (byte-identical to upstream `bdh.py` at mirror time)
 
+## GPU measurement harness deepen (2026-09-19)
+
+`benchmarks/bench_gpu_attn.py` now emits a structured `GPU_ATTN_SKIP` /
+`GPU_ATTN_SUMMARY` record and exits 0 when CUDA is unavailable. The skip record
+prints the cold, T=1 decode, dtype, and optional native-extension commands from
+`OPT_BACKLOG.md`; `--json-out PATH` saves the same schema for a CUDA-box
+collection pass. On CUDA, cold and decode both compare eager, blocked, online,
+Triton, and CUDA against eager with bit-identical / `allclose@1e-4`, max-abs
+delta, and median-ms fields.
+
+This CPU box still has `cuda=False`: no GPU timings or wins are claimed, and
+P0 remains environment-blocked pending real CUDA/Triton cold validation.
+Defaults remain eager and AUTO-off; attention math remains raw
+`(Q @ K.T).tril(diagonal=-1) @ V` with no softmax or scale.
+
 ## P3 profiler CI scaffold (2026-09-19)
 
 - `benchmarks/profile_smoke.py` runs one tiny, CPU-only `torch.profiler` forward pass and writes a Chrome trace under `benchmarks/traces/`.
