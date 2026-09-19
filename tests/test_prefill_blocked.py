@@ -70,7 +70,7 @@ def test_cpu_flattened_bmm_broadcast_and_head_matched(value_heads):
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
-@pytest.mark.parametrize("value_heads", [1, 2])
+@pytest.mark.parametrize("value_heads", [1, 3])
 def test_cpu_flattened_bmm_wide_head_parity(value_heads):
     """Wide N/D heads preserve CPU cold parity for both V layouts."""
     T, B, H, N, D = 512, 1, 2, 128, 256
@@ -97,6 +97,34 @@ def test_cpu_wide_head_partial_tile_parity(value_heads):
     ref = eager_tril_attn(Q, K, V)
     got = blocked_tril_attn(Q, K, V, block_size=128)
     assert torch.allclose(got, ref, rtol=1e-3, atol=1e-3)
+    assert torch.count_nonzero(got[:, :, 0, :]) == 0
+
+
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_cpu_long_blocked_autograd_matches_eager(value_heads):
+    """Long flattened CPU tiles preserve raw-score forward and gradient parity."""
+    T, B, H, N, D = 257, 1, 2, 5, 4
+    g = torch.Generator().manual_seed(101 + value_heads)
+    Q0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    K0 = torch.randn(B, H, T, N, dtype=torch.float64, generator=g)
+    V0 = torch.randn(B, value_heads, T, D, dtype=torch.float64, generator=g)
+    weight = torch.randn(B, H, T, D, dtype=torch.float64, generator=g)
+
+    def run(fn):
+        Q = Q0.clone().requires_grad_()
+        K = K0.clone().requires_grad_()
+        V = V0.clone().requires_grad_()
+        out = fn(Q, K, V)
+        grads = torch.autograd.grad((out * weight).sum(), (Q, K, V))
+        return out, grads
+
+    ref, ref_grads = run(eager_tril_attn)
+    got, got_grads = run(
+        lambda Q, K, V: blocked_tril_attn(Q, K, V, block_size=128)
+    )
+    assert torch.allclose(got, ref, rtol=1e-9, atol=1e-9)
+    for got_grad, ref_grad in zip(got_grads, ref_grads):
+        assert torch.allclose(got_grad, ref_grad, rtol=1e-9, atol=1e-9)
     assert torch.count_nonzero(got[:, :, 0, :]) == 0
 
 
