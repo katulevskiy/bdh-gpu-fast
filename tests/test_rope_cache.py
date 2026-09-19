@@ -123,6 +123,25 @@ def test_rope_table_t_gt1_narrow_hit_invalidates_on_rebuild():
     assert torch.equal(new_pairs[1], old_pairs[1])
 
 
+def test_t1_cis_pairs_rejects_positions_outside_table_without_poisoning_cache():
+    """Paired T=1 lookup must not replace a valid narrow on a miss."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    attn.ensure_rope_table(16, device)
+
+    cos, sin = attn.rope_cos_sin(1, 5, device)
+    pairs = attn.t1_cis_pairs(5, device)
+    assert pairs is not None
+
+    for position in (-1, 16):
+        assert attn.t1_cis_pairs(position, device) is None
+
+    cos_after, sin_after = attn.rope_cos_sin(1, 5, device)
+    assert cos_after is cos and sin_after is sin
+    assert attn.t1_cis_pairs(5, device) is pairs
+
+
 def test_rope_cache_model_forward_parity_across_batches():
     """Two eval forwards with same T reuse cis; logits match twin without cache abuse."""
     cfg = _small_cfg()

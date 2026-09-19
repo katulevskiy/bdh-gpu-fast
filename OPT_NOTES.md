@@ -7209,6 +7209,26 @@ python -m pytest tests/test_rope_cache.py tests/test_rope_fuse.py tests/test_rop
 No GPU is available here; no GPU timing, kernel-on-hardware result, or GPU
 RoPE win is claimed.
 
+## opt/rope-fuse-v5 — guard paired T=1 table boundaries (2026-09-19)
+
+**Branch:** `opt/rope-fuse-v5` from `39ca536` (#221; private
+`katulevskiy/bdh-gpu-opt` only).
+
+`tests/test_rope_cache.py` now locks the paired T=1 RoPE lookup contract at
+both table boundaries: negative and out-of-range positions return `None` and
+do not poison the last valid flat or paired narrow. This keeps the fused
+decode path from reusing stale table views after a cache miss. Attention math,
+defaults, and the eager fallback are unchanged.
+
+### CPU validation
+
+```text
+python -m pytest tests/test_rope_cache.py tests/test_rope_fuse.py tests/test_rope_decode.py -q
+```
+
+Validation is CPU-only; no GPU timing, kernel-on-hardware result, or GPU RoPE
+win is claimed.
+
 ## opt/scorev-v5 — B=1 packed shared-V epilogue edge coverage (2026-09-19)
 
 **Branch:** `opt/scorev-v5` (private `katulevskiy/bdh-gpu-opt` only; no
