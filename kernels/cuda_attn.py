@@ -136,11 +136,8 @@ def tril_decode_ref(
     if S == 0:
         return q.new_zeros(B, H, Tq, Dv)
 
-    if v_past.size(1) == 1 and H != 1:
-        vh = v_past.expand(B, H, S, Dv)
-    else:
-        vh = v_past
-    return (q @ k_past.transpose(-2, -1)) @ vh
+    # Broadcast V heads via matmul — no expand copy into (B,H,S,Dv).
+    return (q @ k_past.transpose(-2, -1)) @ v_past
 
 
 def tril_decode(

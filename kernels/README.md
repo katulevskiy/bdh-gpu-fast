@@ -28,9 +28,9 @@ export BDH_ATTN_IMPL=cuda
 Cold `Attention.forward` (no cache) goes through `kernels.attention_dispatch.bdh_attn`.
 T=1 decode against packed past KR/V uses `bdh_attn_decode` when
 `BDH_ATTN_IMPL` is `blocked` / `triton` / `cuda` (`cuda` → `tril_decode`).
-Blocked/triton decode share `_tiled_score_v` with the cold past region;
-Triton has a dedicated decode kernel on CUDA (blocked fallback on CPU).
-Default remains **eager**.
+Blocked/triton decode share `_tiled_score_v` (broadcast-V, no expand);
+Triton decode uses `V_BROADCAST` staging on CUDA (blocked fallback on CPU);
+CUDA decode is tiled online vs packed KR/V. Default remains **eager**.
 
 ## Modules
 
@@ -74,7 +74,7 @@ skip CUDA paths and still validate the CPU reference.
 - Grid `(ceil(T/16), B·H, ceil(Dv/32))`, block `(32, 16)`
 - Shared Q/K/V tiles; accumulate `score×V` in registers — **no global T×T**
 - Falls back to a per-element fused loop if dynamic smem would exceed 48 KiB
-- Decode kernel unchanged (packed past; see `opt/cuda-decode`)
+- Decode: **tiled online** packed-past score×V (`opt/decode-gemm`); falls back to naive fused loop if smem > 48 KiB
 
 ## RoPE rotate (`BDH_ROPE_IMPL`)
 

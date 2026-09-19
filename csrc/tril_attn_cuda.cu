@@ -13,7 +13,7 @@
 // Online: for each key tile, ephemeral BM×BN scores stay in registers; ×V accumulates
 // into Out. Never allocates or writes a T×T score matrix.
 //
-// Decode kernel below remains a separate packed-past scaffold (see opt/cuda-decode).
+// Decode kernel below: tiled online packed-past score×V (see opt/decode-gemm).
 
 namespace {
 constexpr int TILE_M = 16;  // query rows per block
@@ -208,11 +208,93 @@ torch::Tensor tril_score_v_cuda(torch::Tensor q, torch::Tensor k, torch::Tensor 
   return out;
 }
 
-// Decode scaffold: one thread per (b,h,i,d_v).
-// out[b,h,i,d] = sum_{j=0}^{S-1} (sum_e Q[b,h,i,e]*K[b,h,j,e]) * V[b,hv,j,d]
-// Q:(B,H,Tq,Dk) K:(B,H,S,Dk) V:(B,Hv,S,Dv). Past-only → no self-attend.
+// Decode vs packed past KR/V (opt/decode-gemm): tiled online score×V.
+// out[b,h,i,d] = sum_{j=0}^{S-1} (Q[b,h,i]·K[b,h,j]) * V[b,hv,j,d]
+// All past keys valid (no causal mask) — same as tril(diagonal=-1) at T=1.
+// Grid: (ceil(Tq/TILE_M), B*H, ceil(Dv/TILE_D)); block (TILE_D, TILE_M).
+// Falls back to naive per-element fused loop if smem would exceed SMEM_CAP.
+
 template <typename scalar_t>
-__global__ void tril_decode_kernel(
+__global__ void tril_decode_tiled_kernel(
+    const scalar_t* __restrict__ Q,
+    const scalar_t* __restrict__ K,
+    const scalar_t* __restrict__ V,
+    scalar_t* __restrict__ Out,
+    int B, int H, int Tq, int S, int Dk, int Dv, int Hv) {
+  extern __shared__ char smem_raw[];
+  scalar_t* Qs = reinterpret_cast<scalar_t*>(smem_raw);
+  scalar_t* Ks = Qs + TILE_M * Dk;
+  scalar_t* Vs = Ks + TILE_N * Dk;
+
+  const int bh = static_cast<int>(blockIdx.y);
+  const int b = bh / H;
+  const int h = bh % H;
+  const int hv = (Hv == 1) ? 0 : h;
+
+  const int i0 = static_cast<int>(blockIdx.x) * TILE_M;
+  const int d0 = static_cast<int>(blockIdx.z) * TILE_D;
+  const int ty = static_cast<int>(threadIdx.y);
+  const int tx = static_cast<int>(threadIdx.x);
+  const int i = i0 + ty;
+  const int d = d0 + tx;
+
+  const int64_t q_head = (static_cast<int64_t>(b) * H + h) * Tq;
+  const int64_t k_head = (static_cast<int64_t>(b) * H + h) * S;
+  const int64_t v_head = (static_cast<int64_t>(b) * Hv + hv) * S;
+
+  for (int e = tx; e < Dk; e += TILE_D) {
+    if (i < Tq) {
+      Qs[ty * Dk + e] = Q[(q_head + i) * Dk + e];
+    } else {
+      Qs[ty * Dk + e] = scalar_t(0);
+    }
+  }
+  __syncthreads();
+
+  float acc = 0.f;
+  for (int j0 = 0; j0 < S; j0 += TILE_N) {
+    for (int idx = ty * TILE_D + tx; idx < TILE_N * Dk; idx += TILE_M * TILE_D) {
+      const int jl = idx / Dk;
+      const int e = idx % Dk;
+      const int j = j0 + jl;
+      Ks[jl * Dk + e] =
+          (j < S) ? K[(k_head + j) * Dk + e] : scalar_t(0);
+    }
+    for (int idx = ty * TILE_D + tx; idx < TILE_N * TILE_D; idx += TILE_M * TILE_D) {
+      const int jl = idx / TILE_D;
+      const int dc = idx % TILE_D;
+      const int j = j0 + jl;
+      const int dd = d0 + dc;
+      Vs[jl * TILE_D + dc] =
+          (j < S && dd < Dv) ? V[(v_head + j) * Dv + dd] : scalar_t(0);
+    }
+    __syncthreads();
+
+    if (i < Tq && d < Dv) {
+      for (int jl = 0; jl < TILE_N; ++jl) {
+        const int j = j0 + jl;
+        if (j >= S) {
+          continue;
+        }
+        float score = 0.f;
+        for (int e = 0; e < Dk; ++e) {
+          score += static_cast<float>(Qs[ty * Dk + e]) *
+                   static_cast<float>(Ks[jl * Dk + e]);
+        }
+        acc += score * static_cast<float>(Vs[jl * TILE_D + tx]);
+      }
+    }
+    __syncthreads();
+  }
+
+  if (i < Tq && d < Dv) {
+    Out[(q_head + i) * Dv + d] = static_cast<scalar_t>(acc);
+  }
+}
+
+// Naive fallback: one thread per (b,h,i,d). Still fused online (no Tq×S alloc).
+template <typename scalar_t>
+__global__ void tril_decode_naive_kernel(
     const scalar_t* __restrict__ Q,
     const scalar_t* __restrict__ K,
     const scalar_t* __restrict__ V,
@@ -235,19 +317,20 @@ __global__ void tril_decode_kernel(
   }
 
   const int hv = (Hv == 1) ? 0 : h;
-  scalar_t acc = scalar_t(0);
+  float acc = 0.f;
   const int64_t q_base = (((int64_t)b * H + h) * Tq + i) * Dk;
 
   for (int j = 0; j < S; ++j) {
-    scalar_t score = scalar_t(0);
+    float score = 0.f;
     const int64_t k_base = (((int64_t)b * H + h) * S + j) * Dk;
     for (int e = 0; e < Dk; ++e) {
-      score += Q[q_base + e] * K[k_base + e];
+      score += static_cast<float>(Q[q_base + e]) *
+               static_cast<float>(K[k_base + e]);
     }
     const int64_t v_base = (((int64_t)b * Hv + hv) * S + j) * Dv;
-    acc += score * V[v_base + d];
+    acc += score * static_cast<float>(V[v_base + d]);
   }
-  Out[idx] = acc;
+  Out[idx] = static_cast<scalar_t>(acc);
 }
 
 torch::Tensor tril_decode_cuda(torch::Tensor q, torch::Tensor k_past, torch::Tensor v_past) {
@@ -274,14 +357,10 @@ torch::Tensor tril_decode_cuda(torch::Tensor q, torch::Tensor k_past, torch::Ten
   auto vc = v_past.contiguous();
   auto out = torch::empty({B, H, Tq, Dv}, qc.options());
 
-  if (S == 0) {
+  if (S == 0 || Tq == 0 || B == 0 || H == 0) {
     out.zero_();
     return out;
   }
-
-  const int64_t n = B * H * Tq * Dv;
-  const int threads = 256;
-  const int blocks = static_cast<int>((n + threads - 1) / threads);
 
   const at::cuda::CUDAGuard guard(qc.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -290,12 +369,34 @@ torch::Tensor tril_decode_cuda(torch::Tensor q, torch::Tensor k_past, torch::Ten
       at::ScalarType::Half, at::ScalarType::BFloat16, qc.scalar_type(),
       "tril_decode_cuda",
       [&] {
-        tril_decode_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
-            qc.data_ptr<scalar_t>(),
-            kc.data_ptr<scalar_t>(),
-            vc.data_ptr<scalar_t>(),
-            out.data_ptr<scalar_t>(),
-            (int)B, (int)H, (int)Tq, (int)S, (int)Dk, (int)Dv, (int)Hv);
+        const size_t smem = sizeof(scalar_t) *
+            (static_cast<size_t>(TILE_M) * static_cast<size_t>(Dk) +
+             static_cast<size_t>(TILE_N) * static_cast<size_t>(Dk) +
+             static_cast<size_t>(TILE_N) * static_cast<size_t>(TILE_D));
+
+        if (smem <= SMEM_CAP) {
+          dim3 block(TILE_D, TILE_M);
+          dim3 grid(
+              static_cast<unsigned>((Tq + TILE_M - 1) / TILE_M),
+              static_cast<unsigned>(B * H),
+              static_cast<unsigned>((Dv + TILE_D - 1) / TILE_D));
+          tril_decode_tiled_kernel<scalar_t><<<grid, block, smem, stream>>>(
+              qc.data_ptr<scalar_t>(),
+              kc.data_ptr<scalar_t>(),
+              vc.data_ptr<scalar_t>(),
+              out.data_ptr<scalar_t>(),
+              (int)B, (int)H, (int)Tq, (int)S, (int)Dk, (int)Dv, (int)Hv);
+        } else {
+          const int64_t n = B * H * Tq * Dv;
+          const int threads = 256;
+          const int blocks = static_cast<int>((n + threads - 1) / threads);
+          tril_decode_naive_kernel<scalar_t><<<blocks, threads, 0, stream>>>(
+              qc.data_ptr<scalar_t>(),
+              kc.data_ptr<scalar_t>(),
+              vc.data_ptr<scalar_t>(),
+              out.data_ptr<scalar_t>(),
+              (int)B, (int)H, (int)Tq, (int)S, (int)Dk, (int)Dv, (int)Hv);
+        }
       });
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();

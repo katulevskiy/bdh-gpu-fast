@@ -1871,3 +1871,73 @@ soft-skips if compile/probe falls back. GPU A/B (`reduce-overhead`) = backlog P1
 - No default `BDH_COMPILE=1` on `train.py`
 - No attention math changes
 - No fake speedups from CPU inductor noise under multi-agent load
+## opt/decode-gemm — incremental T=1 decode score×V vs packed KR/V (2026-09-19)
+
+**Branch:** `opt/decode-gemm` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `b7979f1` (main after compile-bench; includes rope-fuse `410656f` + decode-copy + ln-compile).
+
+### Goal
+
+Cut generate **bmm** tax further on the blocked / Triton / CUDA decode path
+against packed past KR/V (`CacheManager` slices). Keep **cat-free** generate,
+`tril(diagonal=-1)` (no self-attend on the new token), and **default eager**.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `blocked_decode_attn` keeps broadcast `V=(B,1,S,D)` (no expand); `_tiled_score_v` docs; Triton decode **`V_BROADCAST`** + `_pick_triton_decode_tiles`; `eager_decode` uses matmul broadcast |
+| `csrc/tril_attn_cuda.cu` | Decode **tiled online** (shared Q/K/V tiles, register score×V) + naive smem fallback — no `Tq×S` global scores |
+| `kernels/cuda_attn.py` | `tril_decode_ref` broadcast-V without expand |
+| `benchmarks/bench_gpu_attn.py` | `--mode decode` (Tq=1 vs past length `T`) |
+| `tests/test_inc_decode.py` | Broadcast-V, long-S tiles, cuda dispatch ≡ eager tril(-1) last row |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — two-GEMM decode
+export BDH_ATTN_IMPL=blocked   # tiled decode, broadcast V
+export BDH_ATTN_IMPL=triton    # CUDA fused + V_BROADCAST; CPU → blocked
+export BDH_ATTN_IMPL=cuda      # tiled CUDA decode ext / ref
+```
+
+### Semantics (unchanged)
+
+```text
+# decode at absolute index S (past length S):
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_inc_decode.py tests/test_cuda_decode.py \
+  tests/test_attention_mask.py tests/test_cache_pack.py -q
+# 257 passed, 9 skipped (CUDA paths) — blocked/triton/cuda decode ≡ eager last row
+# CacheManager still cat-free; default BDH_ATTN_IMPL=eager
+```
+
+### Honest CPU microbench (no GPU wins claimed)
+
+```text
+device=cpu  B=4 H=4 S=128 N=64 D=128  torch=2.14.0+cu130 cuda=False
+correctness max|blocked-eager|=0  max|triton-eager|=0
+eager_decode   median: ~48 ms
+blocked_decode median: ~49 ms  (≈1.0× — tile/broadcast overhead ≈ noise)
+triton_decode  median: ~49 ms  (CPU → blocked)
+
+long S=2048 (B=1 H=2 N=32 D=64, block_size=64):
+max|blocked-eager|=0
+eager ~36 ms / blocked ~34 ms  (tile path; not a claimed win)
+```
+
+**No GPU on this box** — Triton `V_BROADCAST` + CUDA tiled decode are in-tree
+but unexecuted; `bench_gpu_attn.py --mode decode` skips cleanly. On GPU expect
+wins from (1) no `B·H·S·D` V expand staging, (2) fused score×V without
+materializing `Tq×S`, (3) tiled smem CUDA vs naive O(S·Dk) per thread.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No re-introducing `aten::cat` in generate / CacheManager
+- No fake GPU speedups from CPU medians

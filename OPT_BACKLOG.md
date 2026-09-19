@@ -31,6 +31,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Blocked/Triton decode polish vs packed KR/V (`opt/triton-decode2` #19)
 - CacheManager v2: layer-contiguous KR/V, page growth, generate **0× aten::cat** (`opt/cache-v2` #20)
 - Decode-copy: `reserve` + in-place RoPE into packed KR; `narrow` past views; no intermediate `.to()` on `copy_` (`opt/decode-copy`)
+- Decode GEMM polish: blocked/Triton/CUDA T=1 score×V vs packed KR/V — broadcast-V, Triton staging, tiled CUDA (`opt/decode-gemm`)
 - Online fused strict-tril score×V (no full T×T) under `blocked`/`online` (`opt/fuse-scorev` #21)
 - GPU attn microbench harness `benchmarks/bench_gpu_attn.py` (eager|blocked|online|triton|cuda; clean CPU skip) (`opt/gpu-bench`)
 - Cold CUDA tril score×V **tiled online** scaffold (no global T×T; `opt/cuda-cold`) — GPU measure still P0
@@ -45,7 +46,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still: attn self `bmm` ~36% + `tril` ~7%; forward `bmm` ~29% + `tril` ~3%. Online/blocked (#21) + cold CUDA **tiled** scaffold (`opt/cuda-cold`) + Triton scaffolds in-tree; **harness landed** `benchmarks/bench_gpu_attn.py` — **no CUDA on this box**. | A100/H100 microbench vs eager; bit-identical | Env blocker |
 | **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU** `BDH_COMPILE=0` vs `1` train-step bench landed (`opt/compile-bench`, soft-skip if inductor missing). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` (+ `reduce-overhead`) via `benchmarks/bench_train_step.py` | Low |
-| **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8%, `mm` ~4%, `einsum` ~4%, `slice` ~3%. **Cats gone** (#20). **`opt/decode-copy`:** CacheManager `reserve` + in-place RoPE → generate `Tensor.copy_` **265→133** (V-only + prompt); still cat-free / `tril(-1)`. Remaining: decode GEMM kernel. | GPU decode kernel bench; keep cat-free | Medium |
+| **P1** | **Decode GEMM / copy tax on generate** | Generate: Python `BDH.generate` ~26%, `bmm` ~20%, `copy_` ~8% (post-#20 cats=0; post-decode-copy `copy_` 265→133). **`opt/decode-gemm`:** blocked broadcast-V + tiled score×V; Triton decode `V_BROADCAST` staging; CUDA decode **tiled online** (smem) vs packed KR/V. Default still eager. | GPU decode microbench (`--mode decode`); keep cat-free | Medium |
 | **P2** | **Fused RoPE kernel** | Attn: `mul`/`copy_` from strided rotate. **Cached tables** (#18); **fused rotate landed** `opt/rope-fuse` (`BDH_ROPE_IMPL`). | GPU Triton microbench still open | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
 | **P2** | **Memory layout** | Forward contiguous/clone copies significant. | **Landed `opt/weight-layout`** — `(B,T,nh,N)` encoder path, free decoder view, `F.linear`+bias hooks; embed/lm_head path: see `opt/embed-tie`; CPU wall ~noise vs tip | Low |
@@ -60,6 +61,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Fuse score×V epilogue (no materialize T×T) | **Landed** #21 under `BDH_ATTN_IMPL=blocked\|online` (CPU slower; GPU measure = P0) |
 | `torch.compile` / inductor CPU harden | **Landed** #17+#22; CPU 0-vs-1 train bench `opt/compile-bench`; remaining = **GPU** measure (P1) |
 | Fused RoPE rotate (`BDH_ROPE_IMPL`) | **Landed** `opt/rope-fuse` — default eager; fused PyTorch + optional Triton |
+| Decode GEMM vs packed KR/V | **Landed** `opt/decode-gemm` — blocked/triton/cuda decode polish; GPU measure still open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
 
 ## Explicit non-goals

@@ -266,3 +266,57 @@ def test_blocked_decode_vs_eager_tril_last_row(S, BS):
 def test_default_impl_is_eager(monkeypatch):
     monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
     assert resolve_attn_impl() == "eager"
+
+
+def test_blocked_decode_no_expand_broadcast_v():
+    """Broadcast V stays (B,1,S,D); result matches eager last-row of tril(-1)."""
+    B, H, S, N, D = 2, 4, 33, 8, 16
+    g = torch.Generator().manual_seed(99)
+    past_k = torch.randn(B, H, S, N, generator=g)
+    past_v = torch.randn(B, 1, S, D, generator=g)
+    q = torch.randn(B, H, 1, N, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    K_all = torch.cat([past_k, q], dim=2)
+    V_all = torch.cat([past_v, v_new], dim=2)
+    last = eager_tril_attn(K_all, K_all, V_all)[:, :, -1:, :]
+    got = blocked_decode_attn(q, past_k, past_v, block_size=9)
+    assert past_v.size(1) == 1
+    assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("S", [1, 7, 64, 257])
+def test_long_past_tiled_decode_vs_eager_last_row(S):
+    """Long packed past: blocked/triton decode ≡ eager tril(-1) last row."""
+    B, H, N, D = 1, 2, 8, 16
+    g = torch.Generator().manual_seed(200 + S)
+    past_k = torch.randn(B, H, S, N, generator=g)
+    past_v = torch.randn(B, 1, S, D, generator=g)
+    q = torch.randn(B, H, 1, N, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    last = eager_tril_attn(
+        torch.cat([past_k, q], dim=2),
+        torch.cat([past_k, q], dim=2),
+        torch.cat([past_v, v_new], dim=2),
+    )[:, :, -1:, :]
+    # Force tiles when S is large (budget / small BS)
+    got = blocked_decode_attn(q, past_k, past_v, block_size=16)
+    tri = triton_decode_attn(q, past_k, past_v, block_size=16)
+    assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(tri, last, rtol=1e-5, atol=1e-5)
+
+
+def test_cuda_dispatch_decode_vs_eager_last_row():
+    """BDH_ATTN_IMPL=cuda decode path matches eager tril(-1) last row."""
+    B, H, S, N, D = 2, 4, 24, 8, 16
+    g = torch.Generator().manual_seed(55)
+    past_k = torch.randn(B, H, S, N, generator=g)
+    past_v = torch.randn(B, 1, S, D, generator=g)
+    q = torch.randn(B, H, 1, N, generator=g)
+    v_new = torch.randn(B, 1, 1, D, generator=g)
+    last = eager_tril_attn(
+        torch.cat([past_k, q], dim=2),
+        torch.cat([past_k, q], dim=2),
+        torch.cat([past_v, v_new], dim=2),
+    )[:, :, -1:, :]
+    got = bdh_attn_decode(q, past_k, past_v, impl="cuda")
+    assert torch.allclose(got, last, rtol=1e-5, atol=1e-5)

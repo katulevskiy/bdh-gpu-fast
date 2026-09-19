@@ -120,6 +120,9 @@ def _tiled_score_v(
     Shared by ``blocked_decode_attn`` and the past region of ``blocked_tril_attn``.
     One-shots when the full ``(Tq × S)`` score fits the budget; otherwise loops
     over adaptive tiles (fewer trips than a fixed small BS).
+
+    ``Vh`` may be ``(B, H, S, D)`` or broadcast ``(B, 1, S, D)`` — matmul
+    broadcasts heads, so decode can skip an expand copy into ``(B, H, S, D)``.
     """
     B, H, Tq, _N = Q.shape
     S = K.size(2)
@@ -129,6 +132,7 @@ def _tiled_score_v(
 
     BS = _pick_tile_size(S, Tq, block_size)
     # Modest past / small score: single two-GEMM (same as eager decode).
+    # Ephemeral ``(Tq × S)`` only — never ``(S+Tq)×(S+Tq)``.
     if S <= BS or Tq * S <= _SCORE_ELEMS_BUDGET:
         return (Q @ K.transpose(-2, -1)) @ Vh
 
@@ -137,6 +141,7 @@ def _tiled_score_v(
         j1 = min(j0 + BS, S)
         Kj = K[:, :, j0:j1, :]
         Vj = Vh[:, :, j0:j1, :]
+        # Score tile discarded after ×V — peak ~ Tq×BS, not Tq×S.
         out = out + (Q @ Kj.transpose(-2, -1)) @ Vj
     return out
 
@@ -538,8 +543,9 @@ def blocked_decode_attn(
     if S == 0:
         return Q.new_zeros(B, H, Tq, D)
 
-    Vh = _expand_v_heads(V, B, H, S, D)
-    return _tiled_score_v(Q, K, Vh, block_size)
+    # Keep broadcast V as (B,1,S,D) — matmul broadcasts heads; no expand copy.
+    # Online tiles via ``_tiled_score_v`` bound peak score memory to ~Tq×tile.
+    return _tiled_score_v(Q, K, V, block_size)
 
 
 if _HAS_TRITON:
@@ -556,7 +562,7 @@ if _HAS_TRITON:
         stride_kh,
         stride_kt,
         stride_kn,
-        stride_vh,
+        stride_vb,
         stride_vt,
         stride_vd,
         stride_oh,
@@ -566,26 +572,30 @@ if _HAS_TRITON:
         S,
         N,
         D,
+        H,
+        V_BROADCAST: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_D: tl.constexpr,
         BLOCK_K: tl.constexpr,
     ):
         """Fused decode: out[t] = sum_{j<S} (q_t·k_j) * v_j (all past keys valid).
 
-        Grid: (cdiv(Tq, 1) effectively one row-group per program, B*H).
-        pid_m indexes query rows in steps of 1..BLOCK_M with BLOCK_M=1 typical.
+        Grid: (Tq, B*H). ``V_BROADCAST`` indexes values by ``bh // H`` so host
+        stages ``(B,S,D)`` instead of materializing ``(B,H,S,D)``.
         """
         pid_m = tl.program_id(0)
         bh = tl.program_id(1)
 
-        # One query row per program when Tq is small; still masked for safety.
         offs_m = pid_m + tl.arange(0, 1)
         mask_m = offs_m < Tq
 
         q_bh = Q_ptr + bh * stride_qh
         k_bh = K_ptr + bh * stride_kh
-        v_bh = V_ptr + bh * stride_vh
         o_bh = Out_ptr + bh * stride_oh
+        if V_BROADCAST:
+            v_bh = V_ptr + (bh // H) * stride_vb
+        else:
+            v_bh = V_ptr + bh * stride_vb
 
         for d0 in range(0, D, BLOCK_D):
             offs_d = d0 + tl.arange(0, BLOCK_D)
@@ -635,19 +645,46 @@ if _HAS_TRITON:
             )
 
 
+def _pick_triton_decode_tiles(
+    S: int,
+    N: int,
+    D: int,
+    *,
+    block_n: int | None = None,
+) -> tuple[int, int, int]:
+    """Power-of-2 past/Dk/Dv tiles for fused T=1 decode (aligned with cold caps)."""
+    def _p2_cap(x: int, lo: int, hi: int) -> int:
+        x = max(lo, min(int(x), hi))
+        p = 1
+        while p < x:
+            p <<= 1
+        return min(p, hi)
+
+    if block_n is None:
+        # Prefer ~64–128 past keys per inner trip for long packed caches.
+        want = 64 if S <= 256 else min(128, DEFAULT_BLOCK_DECODE)
+        block_n = _p2_cap(min(max(S, 1), want), 16, 128)
+    else:
+        block_n = _p2_cap(block_n, 16, 128)
+    block_d = _p2_cap(D if D > 0 else 1, 16, 64)
+    block_k = _p2_cap(N if N > 0 else 1, 16, 64)
+    return block_n, block_d, block_k
+
+
 def triton_decode_attn(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
     block_size: int = DEFAULT_BLOCK_DECODE,
-    block_n: int = 64,
+    block_n: int | None = None,
 ) -> torch.Tensor:
     """Decode against past KR/V. Triton fused on CUDA; else blocked.
 
     On CPU (this box) and whenever Triton cannot run, uses
     ``blocked_decode_attn`` so ``BDH_ATTN_IMPL=triton`` still gets the
     no-full-TxT decode path. Dedicated decode kernel skips causal masking
-    (past keys are all valid under tril(-1)).
+    (past keys are all valid under tril(-1)) and supports broadcast-V
+    staging (``(B,S,D)`` when ``V`` is ``(B,1,S,D)``).
     """
     if not _can_use_triton(Q):
         return blocked_decode_attn(Q, K, V, block_size=block_size)
@@ -658,32 +695,34 @@ def triton_decode_attn(
     if S == 0:
         return Q.new_zeros(B, H, Tq, D)
 
-    if V.size(1) == 1 and H != 1:
-        # Broadcast expand is a view; contig only if the kernel needs it.
-        Vh = _as_contiguous(_expand_v_heads(V, B, H, S, D))
-    else:
-        Vh = _as_contiguous(V)
-
+    v_broadcast = bool(V.size(1) == 1 and H != 1)
     Qc = _as_contiguous(Q)
     Kc = _as_contiguous(K)
     out = torch.empty(B, H, Tq, D, device=Q.device, dtype=Q.dtype)
 
     Qf = Qc.view(B * H, Tq, N)
     Kf = Kc.view(B * H, S, N)
-    Vf = Vh.view(B * H, S, D)
     Of = out.view(B * H, Tq, D)
 
-    BH = B * H
-    BLOCK_N = min(block_n, triton.next_power_of_2(max(S, 1)))
-    BLOCK_N = max(16, min(BLOCK_N, 128))
-    BLOCK_D = min(64, triton.next_power_of_2(D) if D > 0 else 1)
-    BLOCK_K = min(64, triton.next_power_of_2(N) if N > 0 else 1)
+    if v_broadcast:
+        V1 = _as_contiguous(V.squeeze(1))  # (B, S, D) — not B*H*S*D
+        V_ptr = V1
+        stride_vb, stride_vt, stride_vd = V1.stride(0), V1.stride(1), V1.stride(2)
+    else:
+        Vh = _as_contiguous(V)
+        Vf = Vh.view(B * H, S, D)
+        V_ptr = Vf
+        stride_vb, stride_vt, stride_vd = Vf.stride(0), Vf.stride(1), Vf.stride(2)
 
+    BH = B * H
+    BLOCK_N, BLOCK_D, BLOCK_K = _pick_triton_decode_tiles(
+        S, N, D, block_n=block_n
+    )
     grid = (Tq, BH)
     _bdh_decode_fwd_kernel[grid](
         Qf,
         Kf,
-        Vf,
+        V_ptr,
         Of,
         Qf.stride(0),
         Qf.stride(1),
@@ -691,9 +730,9 @@ def triton_decode_attn(
         Kf.stride(0),
         Kf.stride(1),
         Kf.stride(2),
-        Vf.stride(0),
-        Vf.stride(1),
-        Vf.stride(2),
+        stride_vb,
+        stride_vt,
+        stride_vd,
         Of.stride(0),
         Of.stride(1),
         Of.stride(2),
@@ -701,11 +740,14 @@ def triton_decode_attn(
         S,
         N,
         D,
+        H,
+        V_BROADCAST=1 if v_broadcast else 0,
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         BLOCK_K=BLOCK_K,
     )
     return out
+
 
 
 def eager_decode_attn(
@@ -719,5 +761,5 @@ def eager_decode_attn(
     D = V.size(-1)
     if S == 0:
         return Q.new_zeros(B, H, Tq, D)
-    Vh = _expand_v_heads(V, B, H, S, D)
-    return (Q @ K.transpose(-2, -1)) @ Vh
+    # Broadcast V heads via matmul (no expand copy). Same math as expand view.
+    return (Q @ K.transpose(-2, -1)) @ V
