@@ -692,3 +692,30 @@ def test_online_decode_tiled_per_head_v_offset_views_preserve_autograd_contract(
         assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-5), (
             f"grad maxdiff={(actual - expected).abs().max().item()}"
         )
+
+def test_online_decode_tiled_zero_stride_shared_v_view_matches_shared_layout():
+    """A head-expanded shared-V view keeps raw score×V decode semantics."""
+    B, H, S, Tq, N, D = 2, 3, 513, 3, 4, 2
+    offset = 5
+    capacity = S + 17
+    g = torch.Generator().manual_seed(3132)
+    Q = torch.randn(B, H, Tq, N, generator=g)
+    K_storage = torch.randn(B, H, offset + capacity, N, generator=g)
+    V_storage = torch.randn(B, 1, offset + capacity, D, generator=g)
+    K = K_storage.narrow(2, offset, S)
+    V_shared = V_storage.narrow(2, offset, S)
+    V_expanded = V_shared.expand(B, H, S, D)
+
+    assert V_expanded.stride() == ((offset + capacity) * D, 0, D, 1)
+    ref = eager_decode_attn(Q, K, V_shared)
+    for block_size in (1, 64, 256):
+        got_shared = online_decode_attn(Q, K, V_shared, block_size=block_size)
+        got_expanded = online_decode_attn(Q, K, V_expanded, block_size=block_size)
+        assert torch.allclose(got_shared, ref, rtol=1e-4, atol=1e-5), (
+            f"shared block_size={block_size} maxdiff="
+            f"{(got_shared - ref).abs().max().item()}"
+        )
+        assert torch.allclose(got_expanded, ref, rtol=1e-4, atol=1e-5), (
+            f"expanded block_size={block_size} maxdiff="
+            f"{(got_expanded - ref).abs().max().item()}"
+        )
