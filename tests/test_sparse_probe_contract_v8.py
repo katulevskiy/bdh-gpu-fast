@@ -509,3 +509,20 @@ def test_unenforced_guardrail_failure_allows_crossover(monkeypatch, capsys):
     assert len(calls) == 3 * 8
     assert "density re-smoke guardrail failed" not in captured.err
     assert "exit_code=0 reason=probe_complete" in captured.out
+
+
+def test_falsey_gate_values_disable_probe_without_work(monkeypatch, capsys):
+    """Recognized falsey gate values keep the optional probe default-off."""
+    def unexpected_work(*_, **__):
+        raise AssertionError("falsey sparse probe gate must not do work")
+
+    monkeypatch.setattr(probe, "short_train_density", unexpected_work)
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_work)
+    for value in ("", "0", "false", "no", "off", "unexpected"):
+        monkeypatch.setenv(sp.SPARSE_PROBE_ENV, value)
+        assert probe.main(["--enforce-density-guardrail"]) == probe.EXIT_OK
+
+        captured = capsys.readouterr()
+        assert "density_guardrail" not in captured.out
+        assert "CPU sparse vs dense crossover" not in captured.out
+        assert "exit_code=0 reason=probe_disabled" in captured.out
