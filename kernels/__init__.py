@@ -1,5 +1,13 @@
-"""BDH custom attention kernels (Triton + pure-PyTorch fallbacks)."""
+"""BDH custom attention kernels (Triton, blocked PyTorch, optional CUDA ext)."""
 
 from .attention_dispatch import bdh_attn, resolve_attn_impl
+from .cuda_attn import tril_score_v, tril_score_v_ref, has_cuda_ext, has_cuda_kernel
 
-__all__ = ["bdh_attn", "resolve_attn_impl"]
+__all__ = [
+    "bdh_attn",
+    "resolve_attn_impl",
+    "tril_score_v",
+    "tril_score_v_ref",
+    "has_cuda_ext",
+    "has_cuda_kernel",
+]

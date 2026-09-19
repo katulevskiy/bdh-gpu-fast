@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61", "wheel", "torch"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bdh-gpu-opt"
+version = "0.1.0"
+description = "Private BDH GPU optimization sandbox — optional CUDA tril score×V extension"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["torch"]
+
+[project.optional-dependencies]
+dev = ["pytest", "numpy"]
+
+# Optional native build: `pip install -e .`
+# Pure-Python CPU reference in kernels/cuda_attn.py always works without it.
+[tool.setuptools.packages.find]
+include = ["kernels*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
