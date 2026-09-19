@@ -233,6 +233,14 @@ def test_pick_triton_cold_tiles_long_t_pairs_with_blocked():
     bm512, bn512, _, _ = pick_triton_cold_tiles(T=512, N=64, D=128)
     assert bm512 == 128 and bn512 == 128
 
+    # Wide heads keep the 64×64 staging footprint; explicit overrides win.
+    bm_wide, bn_wide, _, _ = pick_triton_cold_tiles(T=512, N=128, D=256)
+    assert bm_wide == DEFAULT_BLOCK_COLD and bn_wide == DEFAULT_BLOCK_COLD
+    bm_explicit, bn_explicit, _, _ = pick_triton_cold_tiles(
+        512, 128, 256, block_m=128, block_n=128
+    )
+    assert bm_explicit == 128 and bn_explicit == 128
+
     # Explicit overrides still power-of-2 capped
     bm2, bn2, _, _ = pick_triton_cold_tiles(64, 32, 32, block_m=40, block_n=40)
     assert bm2 == 64 and bn2 == 64

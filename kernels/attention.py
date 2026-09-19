@@ -78,8 +78,9 @@ def _pick_triton_cold_tiles(
     fixed 32×32). For ``T >= 256`` grow to ``min(128, 2*DEFAULT_BLOCK_COLD)``
     — same threshold as ``pick_cold_block_size`` / ``#75`` / ``#79`` CUDA cold
     CPU refs — so long prefill needs fewer programs while peak scores stay
-    ≪ ``T×T``. Caps keep register pressure bounded; ``BLOCK_D``/``BLOCK_K``
-    track head dims.
+    ≪ ``T×T``. Wide heads (``N > 64`` or ``D > 128``) retain 64×64 query/key
+    tiles to bound qk/accumulator pressure; ``BLOCK_D``/``BLOCK_K`` track head
+    dims.
     """
     def _p2_cap(x: int, lo: int, hi: int) -> int:
         x = max(lo, min(int(x), hi))
@@ -90,13 +91,21 @@ def _pick_triton_cold_tiles(
         return min(p, hi)
 
     # Mirror pick_cold_block_size (#75): BS=64 short/mid; grow at T>=256.
+    # Wide heads spend more registers on the qk tile and D accumulator. Keep
+    # those programs at the short/mid width rather than blindly applying the
+    # long-T 128 tile; explicit overrides still win below.
+    wide_head = N > 64 or D > 128
     if block_m is None:
         want_m = pick_cold_block_size(T)
+        if wide_head:
+            want_m = min(want_m, DEFAULT_BLOCK_COLD)
         block_m = _p2_cap(min(T, want_m) if T > 0 else want_m, 16, 128)
     else:
         block_m = _p2_cap(block_m, 16, 128)
     if block_n is None:
         want_n = pick_cold_block_size(T)
+        if wide_head:
+            want_n = min(want_n, DEFAULT_BLOCK_COLD)
         block_n = _p2_cap(min(max(T, 1), want_n), 16, 128)
     else:
         block_n = _p2_cap(block_n, 16, 128)
@@ -268,6 +277,34 @@ def _score_v_into(
         target.add_(torch.bmm(scores, Vj))
 
 
+def _broadcast_score_v_into(
+    target: torch.Tensor,
+    scores: torch.Tensor,
+    Vj: torch.Tensor,
+    *,
+    B: int,
+    H: int,
+    beta: float,
+) -> None:
+    """Accumulate a shared ``(B, Bj, D)`` V tile without head expansion.
+
+    ``scores`` is flattened as ``(B*H, Bi, Bj)`` for dense score bmm. View it
+    back to ``(B,H,Bi,Bj)`` for the score×V matmul so PyTorch broadcasts the
+    shared value tile; this avoids materializing a ``(B*H,T,D)`` V staging
+    buffer on the long CPU fallback. The output tile remains the only
+    unavoidable score×V temporary.
+    """
+    Bi, Bj = scores.size(1), scores.size(2)
+    product = torch.matmul(
+        scores.view(B, H, Bi, Bj),
+        Vj[:, None, :, :],
+    ).reshape(B * H, Bi, Vj.size(-1))
+    if beta == 0:
+        target.copy_(product)
+    else:
+        target.add_(product)
+
+
 def _blocked_cpu_bmm(
     Qf: torch.Tensor,
     Kf: torch.Tensor,
@@ -283,15 +320,22 @@ def _blocked_cpu_bmm(
     """CPU cold path using one flattened ``B*H`` bmm batch.
 
     4-D ``matmul`` is convenient, but on CPU it can pay a broadcast/head
-    iterator cost for every score and score×V tile. Long cold inputs are
-    already staging tiles, so flattening heads once makes both GEMMs use the
-    same dense bmm batch. A broadcast V is expanded once here (rather than
-    once per tile); the score tile is still ephemeral and never ``T×T``.
+    iterator cost for every score tile. Long cold inputs are already staging
+    tiles, so flattening heads once makes score GEMMs use the same dense bmm
+    batch. A broadcast V stays as one ``(B,T,D)`` view and is broadcast only
+    for the score×V tile; per-head V remains a dense bmm batch. The score tile
+    is still ephemeral and never ``T×T``.
     """
     BH = B * H
     Qb = Qf.reshape(BH, T, Qf.size(-1))
     Kb = Kf.reshape(BH, T, Kf.size(-1))
-    Vb = Vhf.expand(B, H, T, D).reshape(BH, T, D)
+    broadcast_v = Vhf.size(1) == 1 and H != 1
+    if broadcast_v:
+        Vshared = Vhf[:, 0, :, :]
+        Vb = None
+    else:
+        Vshared = None
+        Vb = Vhf.reshape(BH, T, D)
     out = torch.zeros(BH, T, D, device=Qf.device, dtype=Qf.dtype)
 
     for i0 in range(0, T, BS):
@@ -303,7 +347,12 @@ def _blocked_cpu_bmm(
         if i0 > 0:
             if Bi * i0 <= score_budget:
                 scores = torch.bmm(Qi, Kb[:, :i0, :].transpose(1, 2))
-                _score_v_into(target, scores, Vb[:, :i0, :], beta=0)
+                if broadcast_v:
+                    _broadcast_score_v_into(
+                        target, scores, Vshared[:, :i0, :], B=B, H=H, beta=0
+                    )
+                else:
+                    _score_v_into(target, scores, Vb[:, :i0, :], beta=0)
                 del scores
             else:
                 tile = max(BS, score_budget // max(Bi, 1))
@@ -312,14 +361,34 @@ def _blocked_cpu_bmm(
                     scores = torch.bmm(
                         Qi, Kb[:, j0:j1, :].transpose(1, 2)
                     )
-                    _score_v_into(target, scores, Vb[:, j0:j1, :], beta=1)
+                    if broadcast_v:
+                        _broadcast_score_v_into(
+                            target,
+                            scores,
+                            Vshared[:, j0:j1, :],
+                            B=B,
+                            H=H,
+                            beta=1,
+                        )
+                    else:
+                        _score_v_into(target, scores, Vb[:, j0:j1, :], beta=1)
                     del scores
 
         if Bi > 1:
             scores = torch.bmm(Qi, Kb[:, i0:i1, :].transpose(1, 2))
             # Fuse the mask in-place: scores is consumed immediately by ×V.
             scores.tril_(diagonal=-1)
-            _score_v_into(target, scores, Vb[:, i0:i1, :], beta=1)
+            if broadcast_v:
+                _broadcast_score_v_into(
+                    target,
+                    scores,
+                    Vshared[:, i0:i1, :],
+                    B=B,
+                    H=H,
+                    beta=1,
+                )
+            else:
+                _score_v_into(target, scores, Vb[:, i0:i1, :], beta=1)
             del scores
 
     return out.view(B, H, T, D)
