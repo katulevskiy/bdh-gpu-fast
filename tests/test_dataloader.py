@@ -376,6 +376,23 @@ def test_batch_prefetcher_close_idempotent(tr):
     loader.close()  # second close must not raise
 
 
+def test_batch_prefetcher_producer_failure_is_terminal(tr, monkeypatch):
+    """Once the CPU producer fails, every pending ``next()`` fails promptly."""
+
+    def fail_gather(_split):
+        raise ValueError("simulated terminal host gather failure")
+
+    monkeypatch.setattr(tr, "_gather_batch_host_numpy", fail_gather)
+    loader = tr.BatchPrefetcher("train", async_host=True)
+    try:
+        for _ in range(2):
+            with pytest.raises(RuntimeError, match="prefetch producer failed") as exc_info:
+                loader.next()
+            assert isinstance(exc_info.value.__cause__, ValueError)
+    finally:
+        loader.close()
+
+
 def test_dataloader_num_workers_zero(tr, monkeypatch):
     monkeypatch.setattr(tr, "USE_DATALOADER", True)
     monkeypatch.setattr(tr, "NUM_WORKERS", 0)
