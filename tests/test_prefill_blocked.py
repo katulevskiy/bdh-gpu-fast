@@ -87,6 +87,34 @@ def test_strict_tril_raw_score_backward_contract_at_tile_boundary(impl):
     assert torch.count_nonzero(grad_v[:, :, :-1, :]) > 0
 
 
+@pytest.mark.parametrize("impl", [blocked_tril_attn, online_tril_attn])
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_batched_strict_tril_raw_score_backward_contract_partial_tile(
+    impl, value_heads
+):
+    """Batched partial tiles keep strict-tril gradients source-aligned."""
+    B, H, T, N, D = 2, 2, 7, 2, 2
+    Q = torch.arange(1, 1 + B * H * T * N, dtype=torch.float64).view(
+        B, H, T, N
+    ).requires_grad_()
+    K = torch.arange(101, 101 + B * H * T * N, dtype=torch.float64).view(
+        B, H, T, N
+    ).requires_grad_()
+    V = torch.arange(201, 201 + B * value_heads * T * D, dtype=torch.float64).view(
+        B, value_heads, T, D
+    ).requires_grad_()
+
+    got = impl(Q, K, V, block_size=3)
+    grad_q, grad_k, grad_v = torch.autograd.grad(got.sum(), (Q, K, V))
+
+    assert torch.count_nonzero(grad_q[:, :, 0, :]) == 0
+    assert torch.count_nonzero(grad_k[:, :, -1, :]) == 0
+    assert torch.count_nonzero(grad_v[:, :, -1, :]) == 0
+    assert torch.count_nonzero(grad_q[:, :, 1:, :]) > 0
+    assert torch.count_nonzero(grad_k[:, :, :-1, :]) > 0
+    assert torch.count_nonzero(grad_v[:, :, :-1, :]) > 0
+
+
 @pytest.mark.parametrize("value_heads", [1, 2])
 def test_batched_strict_tril_raw_score_contract_partial_tile(value_heads):
     """Batched and head-matched tiles keep exact raw-score masking."""
