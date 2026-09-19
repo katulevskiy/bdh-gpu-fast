@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#58)
+# OPT status — landed work (#1–#59)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `0b80d0b` (`#57` cache-page on `main`). Profile source: `c7a7471` (post-#48; eager unchanged by #49–#57). This PR adds `#58` layout-v2.
+Tip documented here: `fc9283d` (`#58` layout-v2 on `main`; re-profiled in `opt/profile-v5`). Profile source: `fc9283d` (post-#55–#58; default eager attn unchanged by #55–#57; #58 eval encoder cache).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -144,7 +144,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#56)
+## Landed opts (#1–#59)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -206,6 +206,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **56** | `opt/attn-auto` | Opt-in `BDH_ATTN_AUTO` long-S T=1 decode → blocked (thr=512); cold stays IMPL | default eager; AUTO parity; cats=0 | GPU threshold re-tune open |
 | **57** | `opt/cache-page` | Geometric CacheManager page growth + empty+prefix `copy_`; `ensure_capacity`; long-S grow stats | fewer grows/bytes vs linear; cats=0; defaults unchanged | GPU long-S peak still open |
 | **58** | `opt/layout-v2` | Eval cached contiguous encoder `(nh*N,D)` + `F.linear`; train einsum; compile traces einsum | T=1/32 eval ~1.3–1.4× vs train path; T=128 ~noise; gen uses cache | GPU layout still open |
+| **59** | `opt/profile-v5` | Re-profile tip after #55–#58; refresh `OPT_NOTES` / `OPT_BACKLOG` / `OPT_STATUS` tip SHAs | Docs/profile only; `aten::cat`=0; `aten::contiguous`=0; #58 layout visible on generate | No GPU measurements; defaults unchanged |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 

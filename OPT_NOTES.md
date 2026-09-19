@@ -3429,3 +3429,56 @@ OMP_NUM_THREADS=2 python benchmarks/bench_layout_v2.py
 - No default `BDH_ATTN_IMPL` change
 - No softmax / diagonal inclusion / scale
 - No fake GPU speedups from CPU medians
+
+## opt/profile-v5 — re-profile tip after #55–#58 (2026-09-19)
+
+**Branch:** `opt/profile-v5` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `fc9283d` (main after layout-v2 #58; post cache-page #57, attn-auto #56,
+decode-online-v2 #55). Profile windows captured at the same tip `fc9283d`.
+Default **eager** attn unchanged by #55–#57 (opt-in / blocked-only / paging).
+#58 layout-v2 affects **eval/generate** encoder (`F.linear` cache); train stays einsum.
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+Absolute ms are **profiler-inflated** (noisy on short active windows).
+Rank by **% self CPU** and call counts. Chrome traces under `benchmarks/traces/`
+(gitignored). Compare to § opt/profile-v4 (documented tip `f16111b` / profile
+source `c7a7471`).
+
+### New % breakdown (self CPU)
+
+Representative midpoints on this box. Default `BDH_ATTN_IMPL=eager` throughout
+(`BDH_ATTN_AUTO` off; `cache_page_size=None`):
+
+| Mode | Top self-CPU ops | vs profile-v4 / post-#55–#58 note |
+|------|------------------|-----------------------------------|
+| Attention | `mul` ~29%, `bmm` ~24%, `copy_` ~21%, `sub` ~11%, `tril` ~1% | Same eager T×T shape as v4. Mix wobbles (`bmm`↑ / `tril`↓ vs v4 midpoints); **no structural default-attn change** from #55–#58. |
+| Forward | `copy_` ~25%, `bmm` ~24%, `mm` ~23%, `mul` ~12%, LN ~2%, `tril` ~0.6% | Same GEMM+copies shape. **`aten::contiguous` = 0** still (#36). Train path still einsum-led (#58 cache is eval-only). |
+| Generate | `BDH.generate` self ~31% (noisy host attribution), `mm` ~17%, `bmm` ~12%, `mul` ~4%, LN ~3%, `einsum` ~2%; `linear` present (~0.5%) | **`aten::cat` = 0** still (#20+#57). **#58 layout-v2 visible:** eval cached encoder → `mm`/`linear` in mix; `copy_` self much lower than v4’s ~11%. Short prompt=16 does **not** exercise long-S blocked (#55), AUTO thr (#56), or geometric paging (#57). |
+
+### Confirmed landed (profile-visible / structural)
+
+- **#20 / #57 cache-page:** generate still **zero `aten::cat`** (0 calls in traces).
+- **#36 mlp-fuse:** forward still **zero `aten::contiguous`**.
+- **#58 layout-v2:** generate/eval shows cached `F.linear`/`mm` path (train einsum unchanged).
+- **#55 decode-online-v2 / #56 attn-auto:** default eager profile unchanged; long-S / AUTO are opt-in.
+
+### Ranked follow-ups
+
+Unchanged honesty vs backlog: **P0** = GPU measure fused score×V (CPU % above
+are not GPU wins). **P1** = GPU compile train-step + generate/decode GEMM /
+AUTO threshold re-tune on CUDA. #55–#58 already on main — strike from “next.”
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No softmax / diagonal / SDPA
+- No GPU speedup claims from these CPU % figures
+- No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1` on CPU
+
