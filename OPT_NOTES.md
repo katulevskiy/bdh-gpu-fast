@@ -6307,3 +6307,60 @@ or speedup claim is made.
 
 - No default AMP, optimizer, attention, or mask behavior change.
 - No GPU claims; no public PR and no PRs to `pathwaycom/*`.
+
+
+## opt/profile-v14 — CPU re-profile after #141/#142 (2026-09-19)
+
+**Branch:** `opt/profile-v14` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR).
+**Profile source:** `68f949a` (`#142`, after `#141` blocked-tile-v3,
+`#140` docs, and `#139` prefetch-h2d-v2). The profile is CPU-only and makes no
+GPU claim.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+/workspace/bdh-gpu-opt/.venv/bin/python benchmarks/profile_forward.py \
+  --device cpu --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The harness uses two warmups, one wait, and three active steps. Percentages are
+self-CPU percentages from the three active steps; operator counts below are the
+aggregate counts followed by the per-active-call count. `cat` and `contiguous`
+were absent from all three CPU traces (zero calls).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators | copy_ / cat / contiguous |
+|------|-------------------------|---------------------------|
+| Attention | `aten::bmm` **26.11%**, `aten::mul` **23.93%**, `aten::complex` **15.84%**, `aten::copy_` **12.50%**, `aten::add` **7.89%**, `aten::sub` **5.85%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
+| Forward | `aten::bmm` **28.32%**, `aten::mm` **23.89%**, `aten::mul` **15.36%**, `aten::complex` **11.70%**, `aten::copy_` **6.83%**, `aten::clamp_min_` **3.02%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
+| Generate | `aten::mm` **20.32%**, `aten::bmm` **13.16%**, `aten::mul` **3.05%**, `aten::matmul` **2.59%**, `aten::native_layer_norm` **2.38%**, `aten::einsum` **2.18%**, `aten::copy_` **0.88%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
+
+The attention path remains raw scores × strict `tril(diagonal=-1)`: no softmax,
+scale, or SDPA. Relative to profile-v13, the short CPU window preserves the
+same `copy_` counts and cat-free/contiguous-free forward and generate paths.
+These CPU profiler percentages and operator counts are not GPU performance
+measurements.
+
+### Smoke and verdict
+
+```text
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_bf16_train.py tests/test_prefill_blocked.py tests/test_cache_pack.py \
+  tests/test_inc_decode.py tests/test_gen_sample.py -q
+# 131 passed, 3 skipped in 3.09s
+```
+
+No GPU is available on this box, so no GPU timing, kernel win, correctness, or
+speedup claim is made. Defaults and attention semantics remain unchanged.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; private repo only; no public PR.
+- No softmax, scale, diagonal inclusion, or SDPA substitution.
+- No GPU claims from CPU profiler percentages or copy counts.
