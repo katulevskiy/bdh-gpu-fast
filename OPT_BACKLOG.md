@@ -7,7 +7,7 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `F.scaled_dot_product_attention`.
 
 Profile source: `benchmarks/profile_forward.py` on CPU
-(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b126d77` / documented tip `8439c06` (post #64–#66 cuda-decode-v3 + docs-matrix + log-sync; #67 docs refresh; this PR `opt/profile-v6`), cfg `layers=4 d=128 nh=4 B=4 T=128`,
+(`torch 2.14.0+cu130`, `cuda=False`), profile tip `b126d77` / documented tip `0739807` (post #64–#66 cuda-decode-v3 + docs-matrix + log-sync; #67 docs refresh; #68 profile-v6; #69 rope-decode), cfg `layers=4 d=128 nh=4 B=4 T=128`,
 generate prompt=16 / new=32. Absolute ms are **profiler-inflated**; use **%
 self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 
@@ -71,7 +71,9 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 - Compile guidance: warn COMPILE+blocked|online|triton; recommend COMPILE=1 only with eager on CPU (`opt/compile-guidance` #49) — GPU compile still P1
 - Profile-v4 docs refresh (`opt/profile-v4` #50) — tip `527ead2`; profile source `c7a7471`; cats=0; contiguous=0; no GPU measurement
 - Profile-v5 docs refresh (`opt/profile-v5`) — tip `fc9283d`; profile source `fc9283d`; cats=0; contiguous=0; no GPU measurement
-- Profile-v6 docs refresh (`opt/profile-v6`) — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; no GPU measurement
+- Docs matrix v7 refresh (`opt/docs-matrix-v7` #67) — docs-only through #66; documented tip `8439c06`
+- Profile-v6 docs refresh (`opt/profile-v6` #68) — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; no GPU measurement
+- T=1 RoPE apply deepen (`opt/rope-decode` #69) — `rope_rotate_t1` pair stores; table-pair / last-position cis reuse; CPU wall ~0.83× (no win claim); GPU fused/Triton T=1 open
 - Docs matrix v5 refresh (`opt/docs-matrix-v5` #60) — docs-only through #59; documented tip `71ba3a4`
 - Generate host-test repair (`opt/fix-gen-host-test` #61) — updated AUTO decode environ-get floor; semantics unchanged
 - Residual LN deepen: reuse inner LN out via `add_` (fewer add temps; `F.layer_norm` #30 path kept) (`opt/ln-deepen`) — CPU e2e ~noise
@@ -105,7 +107,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Re-profile post-mlp-fuse | **Landed** #40 `opt/profile-v3` — profile source tip `b160469`; documented tip `d3ff475`; cats=0; contiguous=0 |
 | Re-profile post-gen-sample | **Landed** `opt/profile-v4` #50 — tip `527ead2`; profile source `c7a7471`; cats=0; contiguous=0; gen-host host self ↓ |
 | Re-profile post-#55–#58 | **Landed** `opt/profile-v5` #59 — tip `fc9283d`; cats=0; contiguous=0; layout-v2 visible on generate |
-| Re-profile post-#64–#66 | **Landed** `opt/profile-v6` (this PR) — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; #64–#66 off short default window |
+| Re-profile post-#64–#66 | **Landed** `opt/profile-v6` #68 — tip `8439c06`; profile source `b126d77`; cats=0; contiguous=0; #64–#66 off short default window |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |

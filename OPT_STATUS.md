@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `16b71f4` (`#68` profile-v6 on `main`; after `#67` docs / `#66` log-sync). Profile source: tip of `#68` (post-#64–#66; default eager attn unchanged).
+Tip documented here: `0739807` (`#69` rope-decode on `main`; after `#68` profile-v6 / `#67` docs / `#66` log-sync). Profile source: tip of `#68` (post-#64–#66; default eager attn unchanged; #69 adds T=1 RoPE apply after the profile).
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -146,7 +146,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#68)
+## Landed opts (#1–#69)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
