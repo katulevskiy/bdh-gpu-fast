@@ -56,7 +56,7 @@ def _validate_rope_inputs(
                 f"rope out= must match v shape/device, got out={tuple(out.shape)}/"
                 f"{out.device} vs v={tuple(v.shape)}/{v.device}"
             )
-        if out is v:
+        if out is v or torch._C._overlaps(out, v):
             raise ValueError("rope out= must not alias v")
 
 
@@ -89,7 +89,7 @@ def _validate_paired_cis(
                 f"rope out= must match v shape/device, got out={tuple(out.shape)}/"
                 f"{out.device} vs v={tuple(v.shape)}/{v.device}"
             )
-        if out is v:
+        if out is v or torch._C._overlaps(out, v):
             raise ValueError("rope out= must not alias v")
 
 
