@@ -150,6 +150,39 @@ def test_cpu_rope_out_param_mixed_dtype_preserves_parity(T):
     assert torch.equal(triton, ref)
 
 
+@pytest.mark.parametrize("T", [1, 7])
+def test_cpu_rope_mixed_dtype_strided_out_preserves_parity(T):
+    """fp16 RoPE writes only its non-contiguous fp32 cache slot."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    cos, sin = attn.rope_cos_sin(T, 0, torch.device("cpu"))
+    torch.manual_seed(120 + T)
+    v = torch.randn(2, cfg.n_head, T, N, dtype=torch.float16)
+    sentinel = torch.tensor(-123.0, dtype=torch.float32)
+
+    def make_out():
+        backing = torch.full((*v.shape[:-1], N * 2), sentinel.item())
+        return backing, backing[..., ::2]
+
+    ref_backing, ref_out = make_out()
+    ref = eager_rope_rotate(v, cos, sin, out=ref_out)
+    assert ref is ref_out and not ref.is_contiguous()
+
+    paths = (
+        ("pytorch", fused_rope_rotate_pytorch, {}),
+        ("blocked", fused_rope_rotate_blocked, {"block": 3}),
+        ("triton", fused_rope_rotate_triton, {}),
+    )
+    for name, rotate, kwargs in paths:
+        backing, out = make_out()
+        got = rotate(v, cos, sin, out=out, **kwargs)
+        assert got is out, name
+        assert got.dtype == torch.float32 and not got.is_contiguous(), name
+        assert torch.equal(got, ref), name
+        assert torch.equal(backing[..., 1::2], ref_backing[..., 1::2]), name
+
+
 def test_fused_backward_matches_eager():
     _, _, cos, sin, v, _ = _cis_and_v(seed=13)
     ve = v.detach().requires_grad_(True)
