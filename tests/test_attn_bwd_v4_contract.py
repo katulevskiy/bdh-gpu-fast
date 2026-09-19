@@ -239,6 +239,39 @@ def test_noncontiguous_inputs_preserve_strict_tril_backward_contract(impl):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_noncontiguous_upstream_gradient_preserves_backward_contract(impl):
+    """Analytic backward must accept a strided upstream gradient."""
+    generator = torch.Generator().manual_seed(2033)
+    Q = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = torch.randn(
+        2, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    dO_padded = torch.randn(
+        2, 3, 5, 12, generator=generator, dtype=torch.float64
+    )
+    dO = dO_padded[..., ::2]
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert not dO.is_contiguous()
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO.contiguous())
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(K.grad, K_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(V.grad, V_ref.grad, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 def test_backward_preserves_strict_past_at_default_tile_boundary(impl):
     """A query at the first row after the 64-row tile still excludes self/future."""
     generator = torch.Generator().manual_seed(2031)
