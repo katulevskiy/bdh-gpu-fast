@@ -60,7 +60,7 @@ when the ext is built. Default remains **eager**.
 
 | Path | Role |
 |------|------|
-| `attention.py` | cold tril + decode: `_two_gemm_decode`, `blocked_*` / `online_*`, `triton_*`, `_tiled_score_v` |
+| `attention.py` | cold tril + decode: `_two_gemm_decode`, `blocked_*` / `online_*`, `triton_*` (adaptive cold tiles via `pick_triton_cold_tiles`, pair #75/#79), `_tiled_score_v` |
 | `attention_dispatch.py` | `BDH_ATTN_IMPL` → `bdh_attn()` / `bdh_attn_decode()`; opt-in `BDH_ATTN_AUTO` long-T cold + long-S decode |
 | `attention_bwd.py` | Optional `StrictTrilAttnFn` + analytic Q/K/V bwd (`BDH_ATTN_AUTOGRAD=1`); dense M-recompute for eager, **tiled** analytic for blocked/online/triton/cuda (no full T×T) |
 | `cuda_attn.py` | Optional native CUDA/C++ ext + always-on CPU refs (eager + tiled online) |

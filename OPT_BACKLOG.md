@@ -92,7 +92,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Default **eager** still (**GPU blocker**; profile-v7): attn `mul`~29% `bmm`~23% `copy_`~22% `tril`~0.9%; forward `copy_`~26% `mm`~23% `bmm`~23% `mul`~13%. | A100/H100: `bench_gpu_attn.py` (+ fused score×V) | Env blocker |
-| **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold`:** adaptive power-of-2 tiles, fused strict-tril score×V, and broadcast-V staging; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
+| **P0** | **Cold Triton tile/staging validation** | **Landed `opt/triton-cold` + `opt/triton-cold-v2`:** adaptive power-of-2 tiles (grow @T≥256 pair #75/#79), fused strict-tril score×V, broadcast-V staging, CPU→blocked adaptive; GPU validation remains open. | A100/H100 microbench; bit-identical | Env blocker |
 | **P1** | **`torch.compile` GPU train-step next** | Forward still `copy_` ~20%, `mm` ~12%, `mul`/`mul_` ~12%, LN ~4%. **CPU**: recommend `COMPILE=1` **only with eager** + `MODE=default` (#46/#49/#63; blocked/`reduce-overhead` warn). **GPU inductor / CUDA graphs still unmeasured**. | A100/H100: `BDH_COMPILE=0` vs `1` + `MODE=default` vs `reduce-overhead` via `benchmarks/bench_train_step.py` | Low |
 | **P1** | **Decode GEMM / copy tax on generate** | **Host tax cut** #44+#48; **decode-mm** + **decode-online-v2** + **attn-auto** + **triton-decode-v3** + **cuda-decode-v3** + **`opt/prefill-blocked`** + **`opt/auto-tune`**: AUTO long-T cold+decode (adaptive blocked cold @T≥256), with optional independent cold threshold. CPU e2e AUTO **1.26×@1024 / 1.39×@2048**; IMPL=blocked ~1.23–1.43×; short A/B ~1.25× @1024. Remaining = **GPU** measure / re-tune thr. Default still eager. | A100/H100: `bench_generate.py --mode auto-ab` + `--mode impls` + `bench_gpu_attn.py --mode decode`; keep cat-free | Medium |
 
@@ -134,6 +134,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 | Triton decode-v3 | **Landed** `opt/triton-decode-v3` — long-S tiles/Q-hoist scaffold; AUTO prefers triton when avail; CPU→#55 blocked; GPU measure open |
 | CUDA decode-v3 | **Landed** `opt/cuda-decode-v3` — adaptive DECODE_TILE_N + TQ1 Q-hoist; ≡ blocked parity; GPU measure open |
 | CUDA cold-v2 | **Landed** `opt/cuda-cold-v2` — adaptive cold TILE_M/N (pair #75); ≡ blocked/eager; GPU measure open |
+| Triton cold-v2 | **Landed** `opt/triton-cold-v2` — adaptive cold BLOCK_M/N (pair #75/#79); CPU→blocked adaptive; GPU measure open |
 | Memory layout / embed path | **Landed** #12–#13+#16 |
 | Generate Python/host tax | **Landed** #44 `opt/gen-host`; follow-up `opt/gen-sample` fuses T=1 lm_head+sample / top-k (large-V top_k ~1.5×; default V wall ~noise). GPU decode GEMM remains P1 |
 
