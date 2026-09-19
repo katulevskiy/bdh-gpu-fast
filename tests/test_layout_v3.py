@@ -103,6 +103,7 @@ def test_cpu_probe_documents_remaining_layout_materializations():
     assert generate_contig_shapes.count((2, cfg.vocab_size)) == 1
     assert generate_contig_shapes.count((2,)) == 2
 
+
 def test_cpu_probe_covers_scaled_and_topk_sampler_signatures():
     """Cover sampler-owned layout branches without changing model defaults."""
     cfg = _cfg()
@@ -120,10 +121,12 @@ def test_cpu_probe_covers_scaled_and_topk_sampler_signatures():
         for name, kwargs in cases:
             prof = _profile_call(
                 lambda kwargs=kwargs: model.generate(
-                    idx[:, :5], max_new_tokens=1, **kwargs
+                    idx[:, :5], max_new_tokens=2, **kwargs
                 )
             )
             shapes = _event_shapes(prof, "aten::contiguous")
             assert _count(prof, "aten::cat") == 0, name
-            assert shapes.count((2,)) == 1, (name, shapes)
+            # Both the prefill sample and the reused decode logits buffer stay
+            # on the sampler-owned path: one (B,) result per generated token.
+            assert shapes.count((2,)) == 2, (name, shapes)
             assert (2, cfg.vocab_size) not in shapes, (name, shapes)
