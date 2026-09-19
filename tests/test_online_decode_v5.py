@@ -278,3 +278,27 @@ def test_decode_dispatch_nonempty_preserves_float64_query_dtype():
         assert torch.allclose(got, ref, rtol=1e-10, atol=1e-10), (
             f"impl={impl} maxdiff={(got - ref).abs().max().item()}"
         )
+
+
+def test_decode_dispatch_multi_query_preserves_offset_packed_kv_views():
+    """All decode dispatches preserve multi-query offset packed K/V semantics."""
+    B, H, S, Tq, N, D = 2, 3, 1025, 3, 4, 2
+    offset = 7
+    capacity = S + 19
+    g = torch.Generator().manual_seed(1920)
+    K_storage = torch.randn(B, H, offset + capacity, N, generator=g)
+    V_storage = torch.randn(B, 1, offset + capacity, D, generator=g)
+    K = K_storage.narrow(2, offset, S)
+    V = V_storage.narrow(2, offset, S)
+    Q = torch.randn(B, H, Tq, N, generator=g)
+    K_before, V_before = K.clone(), V.clone()
+
+    ref = eager_decode_attn(Q, K, V)
+    for impl in ("eager", "blocked", "online", "triton", "cuda"):
+        got = bdh_attn_decode(Q, K, V, impl=impl, block_size=64)
+        assert got.shape == (B, H, Tq, D)
+        assert torch.allclose(got, ref, rtol=1e-4, atol=1e-5), (
+            f"impl={impl} maxdiff={(got - ref).abs().max().item()}"
+        )
+        assert torch.equal(K, K_before)
+        assert torch.equal(V, V_before)
