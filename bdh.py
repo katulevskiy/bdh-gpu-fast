@@ -212,33 +212,42 @@ class Attention(torch.nn.Module):
             return out, QR, V
 
         # Multi-token chunk with past (prefill continuation / speculative).
-        # Prefer concat + dispatched tril attn when not eager so blocked/triton
-        # stay consistent with the cold path; eager keeps the split form.
+        # Prefer packed past+new via empty+copy_ (no aten::cat) + dispatched
+        # tril attn when not eager so blocked/triton stay consistent with the
+        # cold path; eager keeps the split form (also cat-free).
         if impl != "eager":
             from kernels.attention_dispatch import bdh_attn
 
-            KR_all = torch.cat([past_kr, QR], dim=2)
-            V_all = torch.cat([past_v, V], dim=2)
+            # Contiguous past||new without torch.cat (generate profile cares).
+            _, _, _, Ndim = QR.shape
+            Ddim = V.size(-1)
+            KR_all = QR.new_empty(B, nh, S + T, Ndim)
+            KR_all[:, :, :S].copy_(past_kr)
+            KR_all[:, :, S:].copy_(QR)
+            V_all = V.new_empty(B, 1, S + T, Ddim)
+            V_all[:, :, :S].copy_(past_v)
+            V_all[:, :, S:].copy_(V)
             out_all = bdh_attn(KR_all, KR_all, V_all, impl=impl)
             out = out_all[:, :, S:, :]
             return out, QR, V
 
-        parts = []
-        if S > 0:
-            parts.append(QR @ past_kr.mT)  # (B, nh, T, S)
-        if T > 1:
+        # Eager split: scores vs past + tril self-block; assemble via copy_.
+        if S > 0 and T > 1:
+            scores = QR.new_empty(B, nh, T, S + T)
+            scores[:, :, :, :S] = QR @ past_kr.mT
             self_scores = QR @ QR.mT
             self_scores.tril_(diagonal=-1)
-            parts.append(self_scores)  # (B, nh, T, T)
-
-        if S > 0 and T > 1:
-            scores = torch.cat(parts, dim=-1)  # (B, nh, T, S+T)
-            V_all = torch.cat([past_v, V], dim=2)
+            scores[:, :, :, S:] = self_scores
+            V_all = V.new_empty(B, 1, S + T, V.size(-1))
+            V_all[:, :, :S].copy_(past_v)
+            V_all[:, :, S:].copy_(V)
             out = scores @ V_all
         elif S > 0:
-            out = parts[0] @ past_v
+            out = (QR @ past_kr.mT) @ past_v
         else:
-            out = parts[0] @ V
+            self_scores = QR @ QR.mT
+            self_scores.tril_(diagonal=-1)
+            out = self_scores @ V
 
         return out, QR, V
 
@@ -530,6 +539,7 @@ class BDH(nn.Module):
         *,
         cache_dtype: torch.dtype | None = None,
         amp_dtype: Optional[torch.dtype] = None,
+        cache_page_size: int | None = None,
     ) -> torch.Tensor:
         """Autoregressive decode with packed KR/V cache (preallocated max_seq).
 
@@ -538,6 +548,12 @@ class BDH(nn.Module):
 
         amp_dtype: optional torch.float16 / torch.bfloat16 for autocast over
         forward. Default None keeps fp32 (no autocast). Sampling logits use fp32.
+
+        cache_page_size: optional CacheManager page growth (see bdh_cache).
+        Default None preallocates exactly ``prompt + max_new_tokens``.
+
+        Output tokens are written into a preallocated buffer (no per-step
+        ``torch.cat`` on the token sequence).
         """
         was_training = self.training
         self.eval()
@@ -551,12 +567,18 @@ class BDH(nn.Module):
             device=idx.device,
             compute_dtype=torch.float32,
             storage_dtype=cache_dtype,
+            page_size=cache_page_size,
         )
+        # Preallocate full output — eliminates generate's remaining aten::cat.
+        out = torch.empty(
+            B, max_seq, dtype=idx.dtype, device=idx.device
+        )
+        out[:, :prompt_len].copy_(idx)
         device = idx.device
         with _autocast_context(device, amp_dtype):
             logits, _ = self(idx, cache=cache)
 
-            for _ in range(max_new_tokens):
+            for t in range(max_new_tokens):
                 # Sampling in fp32 for numerical stability under AMP
                 step_logits = logits[:, -1, :].float() / temperature
                 if top_k is not None:
@@ -567,9 +589,10 @@ class BDH(nn.Module):
                     step_logits[step_logits < values[:, [-1]]] = float("-inf")
                 probs = F.softmax(step_logits, dim=-1)
                 idx_next = torch.multinomial(probs, num_samples=1)
-                idx = torch.cat((idx, idx_next), dim=1)
+                pos = prompt_len + t
+                out[:, pos : pos + 1] = idx_next
                 logits, _ = self(idx_next, cache=cache)
 
         if was_training:
             self.train()
-        return idx
+        return out

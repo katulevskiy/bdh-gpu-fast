@@ -1,8 +1,7 @@
-"""Benchmark packed CacheManager vs legacy torch.cat cache: allocs + speed."""
+"""Benchmark packed CacheManager vs legacy torch.cat cache: allocs + speed + cat counts."""
 
 from __future__ import annotations
 
-import gc
 import statistics
 import sys
 import time
@@ -35,22 +34,21 @@ def timed(fn, warmup=2, reps=8):
     return statistics.median(xs)
 
 
-def count_alloc_events(fn, reps=3):
-    """CPU: use torch allocator stats if CUDA; else estimate via tensor count proxy.
+def count_torch_cat(fn):
+    """Hook torch.cat and return call count for one invocation of fn."""
+    cats = {"n": 0}
+    orig = torch.cat
 
-    On CPU we measure peak allocated via a simple RSS-less approach: run under
-    ``torch.cuda`` stats when available; otherwise count how many times
-    ``torch.cat`` would dominate by instrumenting nothing and reporting
-    preallocated bytes + wall time.
-    """
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.empty_cache()
-        for _ in range(reps):
-            fn()
-        return torch.cuda.max_memory_allocated()
-    # CPU: no reliable per-op alloc counter without hooks; return None
-    return None
+    def hooked(*a, **k):
+        cats["n"] += 1
+        return orig(*a, **k)
+
+    torch.cat = hooked
+    try:
+        fn()
+    finally:
+        torch.cat = orig
+    return cats["n"]
 
 
 def legacy_decode(model, prompt, n_new):
@@ -62,7 +60,7 @@ def legacy_decode(model, prompt, n_new):
     return cache
 
 
-def packed_decode(model, prompt, n_new, storage_dtype=None):
+def packed_decode(model, prompt, n_new, storage_dtype=None, page_size=None):
     max_seq = prompt.size(1) + n_new
     cache = CacheManager.from_config(
         model.config,
@@ -70,6 +68,7 @@ def packed_decode(model, prompt, n_new, storage_dtype=None):
         max_seq=max_seq,
         device=prompt.device,
         storage_dtype=storage_dtype,
+        page_size=page_size,
     )
     logits, _ = model(prompt, cache=cache)
     for _ in range(n_new):
@@ -104,19 +103,31 @@ def main():
         with torch.no_grad():
             packed_decode(m, prompt.clone(), n_new, storage_dtype=torch.float16)
 
+    def run_packed_paged():
+        with torch.no_grad():
+            packed_decode(m, prompt.clone(), n_new, page_size=64)
+
+    def run_generate():
+        with torch.no_grad():
+            # greedy-ish via temperature → still hits generate path
+            torch.manual_seed(0)
+            m.generate(prompt.clone(), max_new_tokens=32, temperature=1.0)
+
     t_leg = timed(run_legacy)
     t_pack = timed(run_packed)
     t_fp16 = timed(run_packed_fp16)
+    t_page = timed(run_packed_paged)
 
     # Preallocated footprint
-    nh, D = cfg.n_head, cfg.n_embd
-    N = cfg.mlp_internal_dim_multiplier * D // nh
     max_seq = prompt_len + n_new
     bytes_fp32 = CacheManager.from_config(
         cfg, 1, max_seq, device, storage_dtype=torch.float32
     ).bytes_allocated
     bytes_fp16 = CacheManager.from_config(
         cfg, 1, max_seq, device, storage_dtype=torch.float16
+    ).bytes_allocated
+    bytes_page0 = CacheManager.from_config(
+        cfg, 1, max_seq, device, page_size=64
     ).bytes_allocated
 
     # Legacy peak: after full decode, sum numel of live tensors
@@ -128,17 +139,26 @@ def main():
         for e in leg_cache
     )
 
+    cat_legacy = count_torch_cat(run_legacy)
+    cat_packed = count_torch_cat(run_packed)
+    cat_generate = count_torch_cat(run_generate)
+
     print(f"device={device} layers={cfg.n_layer} d={cfg.n_embd}")
     print(f"decode prompt={prompt_len} + new={n_new} (greedy)")
     print(f"legacy cat-cache median:  {t_leg*1000:.2f} ms")
     print(f"packed fp32 median:       {t_pack*1000:.2f} ms  ({t_leg/t_pack:.2f}x vs legacy)")
     print(f"packed fp16 storage:      {t_fp16*1000:.2f} ms  ({t_leg/t_fp16:.2f}x vs legacy)")
+    print(f"packed page=64 median:    {t_page*1000:.2f} ms  ({t_leg/t_page:.2f}x vs legacy)")
     print(f"legacy final cache bytes: {leg_bytes}")
     print(f"packed fp32 prealloc:     {bytes_fp32}")
     print(f"packed fp16 prealloc:     {bytes_fp16}  ({bytes_fp32/bytes_fp16:.2f}x smaller)")
+    print(f"packed page=64 initial:   {bytes_page0}  (grows toward max_seq)")
+    print(f"torch.cat calls legacy decode:   {cat_legacy}")
+    print(f"torch.cat calls packed decode:   {cat_packed}")
+    print(f"torch.cat calls generate(+32):   {cat_generate}")
     print(
-        "Note: packed avoids per-step torch.cat realloc/copy of growing KR/V; "
-        "CPU medians vary; GPU would amplify bandwidth locality wins."
+        "Note: cache-v2 layer-contiguous + generate prealloc → near-zero aten::cat "
+        "on generate; packed decode path already cat-free for KR/V (T=1)."
     )
 
 

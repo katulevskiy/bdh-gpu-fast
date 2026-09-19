@@ -351,6 +351,54 @@ Python overhead vs amortized cat); expect better locality/bandwidth behavior on 
 ### Non-goals
 - Still no softmax / no diagonal / no SDPA substitution.
 
+## opt/cache-v2 — deepen CacheManager (2026-09-19)
+
+**Branch:** `opt/cache-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `35564ad` (main).
+
+### Goal
+Eliminate remaining `aten::cat` in `generate`, pack KR/V layer-contiguously,
+optional page/block growth — keep `tril(diagonal=-1)` incremental decode.
+
+### What landed
+| Piece | Detail |
+|-------|--------|
+| Layer-contiguous packing | `_kr_buf` `(n_layer,B,nh,capacity,N)`, `_v_buf` `(n_layer,B,1,capacity,D)`; `_kr`/`_v` are views |
+| Page growth | `page_size=` grows capacity in pages up to `max_seq`; `generate(..., cache_page_size=)` |
+| `stage()` | Write new block + return contiguous past+new view (no KR/V `cat`) |
+| Generate out buffer | Preallocate `(B, prompt+new)`; slice-write tokens — **0× `torch.cat`** |
+| Attention multi-token+past | `empty`+`copy_` instead of `torch.cat` (eager + non-eager) |
+
+### Correctness
+```text
+.venv/bin/python -m pytest tests/test_cache_pack.py tests/test_correctness.py \
+  tests/test_attention_mask.py tests/test_vs_baseline.py \
+  tests/test_decode_amp.py tests/test_inc_decode.py -q
+# 66 passed
+```
+
+### Cat-call reduction (`benchmarks/bench_cache_mem.py`, CPU)
+```text
+torch.cat calls legacy decode (64+128):  1024
+torch.cat calls packed decode:              0
+torch.cat calls generate(16→+32):           0   (was 32 on tip after cache-pack;
+                                                 was ~864 in pre-cache-pack profile)
+```
+Profiler generate mode: **no `aten::cat` events**.
+
+### Benchmark (same harness)
+```text
+legacy cat-cache median:  219.50 ms
+packed fp32 median:       194.01 ms  (1.13× vs legacy)
+packed fp16 storage:      209.15 ms
+packed page=64 median:    194.96 ms
+packed page=64 initial:   4_325_376 bytes (grows toward max_seq)
+```
+
+### Non-goals
+- Softmax / diagonal / SDPA still forbidden.
+- Legacy list cache path still uses `torch.cat` (compat only).
+
 ## opt/qkv-fuse — Q/K/V proj + RoPE + attn prep allocs
 
 **Branch:** `opt/qkv-fuse` (private `katulevskiy/bdh-gpu-opt` only).

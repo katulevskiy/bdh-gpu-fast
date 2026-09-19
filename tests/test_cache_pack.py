@@ -230,3 +230,101 @@ if __name__ == "__main__":
     if failed:
         raise SystemExit(1)
     print(f"All {len(tests)} tests passed.")
+
+
+def test_layer_contiguous_packing():
+    """KR/V live in single layer-major buffers; per-layer _kr are views."""
+    cfg = _small_cfg()
+    cm = CacheManager.from_config(cfg, batch_size=2, max_seq=16, device="cpu")
+    assert cm._kr_buf.ndim == 5
+    assert cm._kr_buf.shape[0] == cfg.n_layer
+    assert cm._v_buf.shape[0] == cfg.n_layer
+    # Views share storage with the packed buffer
+    assert cm._kr[0].data_ptr() == cm._kr_buf[0].data_ptr()
+    assert cm._v[1].untyped_storage().data_ptr() == cm._v_buf.untyped_storage().data_ptr()
+
+
+def test_page_growth_then_decode():
+    cfg = _small_cfg()
+    m = _model(cfg, seed=5)
+    x = torch.randint(0, cfg.vocab_size, (1, 6))
+    # Start with page_size=4, max_seq=16 → grows as we decode
+    cm = CacheManager.from_config(
+        cfg, 1, max_seq=16, device=x.device, page_size=4
+    )
+    assert cm.capacity == 4
+    full, _ = m(x)  # needs 6 → grow to 8
+    # Use tokenwise so growth happens mid-stream
+    cm = CacheManager.from_config(
+        cfg, 1, max_seq=16, device=x.device, page_size=4
+    )
+    parts = []
+    for t in range(x.size(1)):
+        logits, _ = m(x[:, t : t + 1], cache=cm)
+        parts.append(logits)
+    tok = torch.cat(parts, dim=1)
+    assert torch.allclose(full, tok, rtol=1e-5, atol=1e-5)
+    assert cm.seq_len == 6
+    assert cm.capacity >= 6
+    assert cm.capacity <= 16
+
+
+def test_stage_returns_contiguous_past_plus_new():
+    cfg = _small_cfg()
+    cm = CacheManager.from_config(cfg, 1, max_seq=32, device="cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    # Prefill 5
+    for level in range(cfg.n_layer):
+        cm.append(
+            level,
+            torch.randn(1, cfg.n_head, 5, N),
+            torch.randn(1, 1, 5, cfg.n_embd),
+        )
+    cm.commit()
+    new_kr = torch.randn(1, cfg.n_head, 3, N)
+    new_v = torch.randn(1, 1, 3, cfg.n_embd)
+    all_kr, all_v = cm.stage(0, new_kr, new_v)
+    assert all_kr.shape[2] == 8
+    assert all_v.shape[2] == 8
+    assert torch.equal(all_kr[:, :, 5:], new_kr)
+    assert torch.equal(all_v[:, :, 5:], new_v)
+    # Contiguous in seq dim (single storage slice)
+    assert all_kr.is_contiguous() or all_kr.stride(-1) == 1
+    cm.commit()
+    assert cm.seq_len == 8
+
+
+def test_generate_zero_torch_cat_calls():
+    """cache-v2: generate must not call torch.cat (preallocated out + packed KR/V)."""
+    cfg = _small_cfg()
+    m = _model(cfg, seed=42)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 4))
+    cats = {"n": 0}
+    orig = torch.cat
+
+    def hooked(*a, **k):
+        cats["n"] += 1
+        return orig(*a, **k)
+
+    torch.cat = hooked
+    try:
+        torch.manual_seed(0)
+        with torch.no_grad():
+            out = m.generate(prompt.clone(), max_new_tokens=8, temperature=1.0)
+    finally:
+        torch.cat = orig
+    assert cats["n"] == 0, f"expected 0 torch.cat in generate, got {cats['n']}"
+    assert out.shape == (1, 12)
+
+
+def test_generate_page_size_matches_fixed():
+    cfg = _small_cfg()
+    m = _model(cfg, seed=3)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 5))
+    torch.manual_seed(7)
+    a = m.generate(prompt.clone(), max_new_tokens=6, temperature=1.0)
+    torch.manual_seed(7)
+    b = m.generate(
+        prompt.clone(), max_new_tokens=6, temperature=1.0, cache_page_size=4
+    )
+    assert torch.equal(a, b)

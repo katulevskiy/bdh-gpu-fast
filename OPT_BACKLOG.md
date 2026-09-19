@@ -23,6 +23,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 - CUDA extension scaffold for tril score×V (optional build)
 - Weight layout: `(B,T,nh,N)` encoder einsum, decoder view+`F.linear`, optional bias fuse (`opt/weight-layout`)
 - CUDA/C++ decode vs packed KR/V under `BDH_ATTN_IMPL=cuda` (scaffold; CPU ref always)
+- CacheManager v2: layer-contiguous KR/V, page growth, generate **0× aten::cat** (`opt/cache-v2`)
 
 ## Ranked next work
 
@@ -30,7 +31,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 |---|------|----------------------------|--------|------|
 | **P0** | **Measure Triton/CUDA fused tril-score×V on real GPU** | Eager path still pays full TxT `bmm` (~12% self) + `tril_` (~6%). Kernels in-tree; no CUDA on this box. | A100/H100 microbench vs eager; bit-identical | Env blocker |
 | **P0** | **Fuse score×V epilogue (no materialize T×T)** | Ideal: `sum_{j<i} (Q_i·K_j) V_j` without full score tensor. | Complete Triton/CUDA fused kernel | High impact |
-| **P1** | **Cache packing / fewer cats** | Generate: `aten::cat` ~10% self CPU, 864 calls, ~201 MB — per-step cat on `kr`/`v`. | Prefill-sized buffer + write ptr | Medium |
+| **P1** | ~~Cache packing / fewer cats~~ | **Landed cache-pack + cache-v2**: generate `aten::cat` **0** (was 32 post-pack / ~864 pre-pack). Layer-contiguous + optional `page_size`. | done | — |
 | **P1** | **`torch.compile` / inductor** | Forward: `copy_` ~23%, `mul` ~16%, LN ~9%, ReLU ~7%. **train-fuse:** optional `BDH_COMPILE=1` + fused AdamW + sync-light loop landed; measure on GPU. | GPU compile parity | Low |
 | **P2** | **Fused / cached RoPE** | Attn: mul/copy/trig/neg ~60% combined self. | **Cached tables landed `opt/rope-cache`**; fused kernel still open | Low–medium |
 | **P2** | **Sparsity follow-through** | Sparse path experimental — measure density; keep only if GPU win. | Density + GPU bench | Speculative |
@@ -48,7 +49,7 @@ self CPU** and call counts. Re-run on GPU before claiming kernel wins.
 ## Suggested order
 
 1. GPU: bench eager vs triton vs CUDA fused score×V
-2. Cache preallocate (kill generate cat storm)
+2. ~~Cache preallocate / cat-free generate~~ (**done** `opt/cache-v2`)
 3. torch.compile on forward
 4. RoPE fuse / layout / sparsity density
 
