@@ -130,8 +130,9 @@ def test_backward_probe_without_targets_preserves_training_grads(
 
 
 @pytest.mark.parametrize("fullgraph", [False, True])
+@pytest.mark.parametrize("caller_training", [False, True])
 def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
-    monkeypatch, capsys, fullgraph
+    monkeypatch, capsys, fullgraph, caller_training
 ):
     """An omitted example batch returns an unprobed wrapper without mutation."""
     import train as tr
@@ -156,7 +157,7 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
 
     monkeypatch.setattr(tr.torch, "compile", compile_spy)
 
-    model = bdh.BDH(_small_cfg()).train()
+    model = bdh.BDH(_small_cfg()).train(caller_training)
     expected_grads = []
     for index, param in enumerate(model.parameters(), start=1):
         grad = torch.full_like(param, float(index))
@@ -175,7 +176,7 @@ def test_compile_without_probe_returns_wrapper_and_preserves_caller_state(
         expected_compile_kwargs["fullgraph"] = True
     assert compile_kwargs == expected_compile_kwargs
     assert out is wrapper
-    assert model.training
+    assert model.training is caller_training
     assert all(
         param.grad is not None and torch.equal(param.grad, expected)
         for param, expected in zip(model.parameters(), expected_grads)
