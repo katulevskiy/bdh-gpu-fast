@@ -4971,6 +4971,7 @@ cuts the **avoidable** QR layout tax. `aten::contiguous` remains 0; generate
 
 **Branch:** `opt/attn-bwd-gpu-scaffold` (private `katulevskiy/bdh-gpu-opt` only).
 **Base tip:** `8e7a4d2` (`main`, copy-tax-v1 / #95).
+**Base tip:** `3cac6d7` (`main`, docs-v17 / #94).
 
 ### Audit and scaffold
 
