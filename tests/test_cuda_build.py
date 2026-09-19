@@ -277,6 +277,38 @@ def test_cuda_path_executable_nvcc_selects_cuda_setup(tmp_path):
     assert "pure-Python install" not in output
 
 
+def test_path_nvcc_falls_back_from_stale_cuda_home(tmp_path):
+    """A stale CUDA_HOME entry must not mask a usable PATH nvcc."""
+    stale_nvcc = tmp_path / "cuda-home" / "bin" / "nvcc"
+    stale_nvcc.parent.mkdir(parents=True)
+    stale_nvcc.write_text("#!/bin/sh\n", encoding="utf-8")
+    stale_nvcc.chmod(0o644)
+
+    nvcc = tmp_path / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    empty_cuda_path = tmp_path / "missing-cuda-path"
+    empty_cuda_path.mkdir()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "CUDA_HOME": str(tmp_path / "cuda-home"),
+            "CUDA_PATH": str(empty_cuda_path),
+            "PATH": str(nvcc.parent),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext WITH CUDA" in output
+    assert "skipping CUDA extension build" not in output
+    assert "pure-Python install" not in output
+
+
 def test_path_executable_nvcc_selects_cuda_setup(tmp_path):
     """An executable nvcc on PATH must select CUDA extension setup."""
     nvcc = tmp_path / "bin" / "nvcc"
