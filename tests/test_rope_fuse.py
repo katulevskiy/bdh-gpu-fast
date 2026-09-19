@@ -941,6 +941,31 @@ def test_t1_noncontiguous_out_buffer_preserves_parity():
     assert torch.equal(out, ref)
 
 
+@pytest.mark.parametrize(
+    ("name", "rotate", "kwargs"),
+    [
+        ("pytorch", fused_rope_rotate_pytorch, {}),
+        ("blocked", fused_rope_rotate_blocked, {"block": 3}),
+        ("triton-cpu-fallback", fused_rope_rotate_triton, {}),
+    ],
+)
+def test_cpu_fused_fresh_output_is_contiguous_for_strided_input(
+    name, rotate, kwargs
+):
+    """CPU-safe fused paths keep fresh outputs dense for strided inputs."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=296)
+    v_nc = v.transpose(1, 2)
+    cos_nc = cos.transpose(1, 2)
+    sin_nc = sin.transpose(1, 2)
+    assert not v_nc.is_contiguous()
+
+    ref = eager_rope_rotate(v_nc, cos_nc, sin_nc)
+    got = rotate(v_nc, cos_nc, sin_nc, **kwargs)
+
+    assert got.is_contiguous(), name
+    assert torch.equal(got, ref), name
+
+
 def test_generate_cache_continuity_fused_and_eager(monkeypatch):
     """Generate tokens match baseline under both rope impls (cache phases)."""
     cfg = _small_cfg(n_layer=2)
