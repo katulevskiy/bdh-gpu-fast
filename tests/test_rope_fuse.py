@@ -17,6 +17,7 @@ import bdh_baseline as baseline
 from kernels.rope import (
     _HAS_TRITON,
     eager_rope_rotate,
+    triton_rope_skip_reason,
     fused_rope_rotate_blocked,
     fused_rope_rotate_paired,
     fused_rope_rotate_pytorch,
@@ -239,6 +240,17 @@ def test_triton_gate_and_backend_info_are_cpu_safe():
     assert info["triton_usable"] is False
 
 
+def test_triton_skip_reason_is_actionable_on_cpu():
+    """The scaffold reports why CPU inputs stay on the safe fallback."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=8, seed=261)
+    reason = triton_rope_skip_reason(v, cos, sin)
+    assert reason in {"triton-not-installed", "v-not-cuda"}
+    assert _can_use_triton_rope(v, cos, sin) is False
+    info = backend_info(torch.device("cpu"))
+    assert info["triton_usable"] is False
+    assert info["triton_skip_reason"] in {"triton-not-installed", "device-not-cuda"}
+
+
 def test_t_gt1_noncontiguous_cpu_parity_and_out():
     """T>1 pair views preserve parity for transposed leading dimensions."""
     _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=27)
@@ -289,6 +301,25 @@ def test_blocked_out_param_and_t1():
     y = fused_rope_rotate_blocked(v, cos, sin, out=out, block=16)
     assert y is out
     assert torch.equal(out, eager_rope_rotate(v, cos, sin))
+
+
+def test_t1_noncontiguous_out_buffer_preserves_parity():
+    """T=1 paired stores honor a strided cache-slot-like output buffer."""
+    cfg = _small_cfg()
+    attn = bdh.Attention(cfg)
+    device = torch.device("cpu")
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    attn.ensure_rope_table(16, device)
+    cos, sin = attn.rope_cos_sin(1, 5, device)
+    torch.manual_seed(291)
+    v = torch.randn(2, cfg.n_head, 1, N)
+    backing = torch.empty(*v.shape[:-1], N * 2)
+    out = backing[..., ::2]
+    ref = eager_rope_rotate(v, cos, sin)
+    got = fused_rope_rotate_blocked(v, cos, sin, out=out, block=3)
+    assert got is out
+    assert not out.is_contiguous()
+    assert torch.equal(out, ref)
 
 
 def test_generate_cache_continuity_fused_and_eager(monkeypatch):

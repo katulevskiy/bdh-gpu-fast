@@ -130,21 +130,21 @@ def _store_pairs(
     For fp32/fp64, pack via ``torch.complex`` + ``view_as_complex(out).copy_`` —
     **one** ``aten::copy_`` instead of two pair-axis setitems, and **no**
     ``aten::cat`` (unlike ``torch.stack``, which cats under the hood). Bit-
-    identical to the historical empty+pair store on CPU. Other dtypes keep
-    the dual setitem path (ComplexHalf is experimental).
+    identical to the historical empty+pair store on CPU. Strided ``out=``
+    buffers keep the dual setitem path because ``view_as_complex`` requires a
+    unit-stride pair axis; other dtypes do the same (ComplexHalf is experimental).
     """
     if out is None:
         out = _alloc_rope_out(v)
+    op = out.reshape(*v.shape[:-1], -1, 2)
     if (
         y0.dtype in (torch.float32, torch.float64)
         and out.dtype == y0.dtype
         and y1.dtype == y0.dtype
+        and op.stride(-1) == 1
     ):
-        torch.view_as_complex(out.reshape(*v.shape[:-1], -1, 2)).copy_(
-            torch.complex(y0, y1)
-        )
+        torch.view_as_complex(op).copy_(torch.complex(y0, y1))
         return out
-    op = out.reshape(*v.shape[:-1], -1, 2)
     op[..., 0] = y0
     op[..., 1] = y1
     return out
@@ -291,6 +291,38 @@ def fused_rope_rotate_blocked(
 _TRITON_ROPE_DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 
+def triton_rope_skip_reason(
+    v: torch.Tensor,
+    *aux: Optional[torch.Tensor],
+) -> str | None:
+    """Explain why a tensor set does not qualify for the Triton entry.
+
+    The reason is deliberately stable and side-effect free so CPU diagnostics
+    and tests can distinguish an expected scaffold skip from a kernel error.
+    ``None`` means the current inputs satisfy the conservative launch gate.
+    """
+    if not _HAS_TRITON:
+        return "triton-not-installed"
+    if not isinstance(v, torch.Tensor):
+        return "v-not-tensor"
+    if not v.is_cuda:
+        return "v-not-cuda"
+    if not torch.cuda.is_available():
+        return "cuda-not-available"
+    if v.dtype not in _TRITON_ROPE_DTYPES:
+        return f"v-dtype-unsupported:{v.dtype}"
+    for index, tensor in enumerate(aux):
+        if tensor is None:
+            continue
+        if not isinstance(tensor, torch.Tensor):
+            return f"aux{index}-not-tensor"
+        if tensor.device != v.device:
+            return f"aux{index}-device-mismatch"
+        if tensor.dtype not in _TRITON_ROPE_DTYPES:
+            return f"aux{index}-dtype-unsupported:{tensor.dtype}"
+    return None
+
+
 def _can_use_triton_rope(
     v: torch.Tensor,
     *aux: Optional[torch.Tensor],
@@ -304,22 +336,7 @@ def _can_use_triton_rope(
     path remains the safe fallback until the caller supplies matching CUDA
     tensors in a Triton-supported dtype.
     """
-    if not _HAS_TRITON:
-        return False
-    if not isinstance(v, torch.Tensor) or not v.is_cuda:
-        return False
-    if not torch.cuda.is_available():
-        return False
-    if v.dtype not in _TRITON_ROPE_DTYPES:
-        return False
-    for tensor in aux:
-        if tensor is None:
-            continue
-        if not isinstance(tensor, torch.Tensor):
-            return False
-        if tensor.device != v.device or tensor.dtype not in _TRITON_ROPE_DTYPES:
-            return False
-    return True
+    return triton_rope_skip_reason(v, *aux) is None
 
 
 if _HAS_TRITON:

@@ -6863,3 +6863,9 @@ CPU validation:
 .venv/bin/python -m pytest tests/test_compile.py -q
 OMP_NUM_THREADS=2 .venv/bin/python -m pytest tests/ -q
 ```
+
+## RoPE GPU scaffold v3 (2026-09-19)
+
+- Added `triton_rope_skip_reason()` and `backend_info()["triton_skip_reason"]` so CPU/CUDA/Triton gate decisions are explicit instead of silent fallback.
+- Added CPU contracts for T=1 paired rotation into a non-contiguous cache-slot-like `out=` buffer and for the existing T>1 tile parity path.
+- Tests remain CPU-only on this box; no fused-GPU timing or speedup claim is made. Defaults and strict `tril(-1)` attention semantics are unchanged.
