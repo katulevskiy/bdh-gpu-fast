@@ -7059,3 +7059,50 @@ OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_cache_page.py --smoke
 The benchmark is CPU accounting only: allocation and grow-copy bytes are not
 GPU memory or GPU timing measurements. Defaults remain unchanged, and attention
 semantics remain raw scores × `tril(diagonal=-1)`.
+
+## opt/profile-v17 — CPU re-profile after #176–#181 (2026-09-19)
+
+**Branch:** `opt/profile-v17` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `f34d908` (`main`, #181 cache-bench-v3 after #180 docs refresh through #179). This profile
+is CPU-only and makes no GPU claim.
+
+### Method
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+/workspace/bdh-gpu-opt/.venv/bin/python benchmarks/profile_forward.py \
+  --device cpu --mode all --warmup 2 --wait 1 --active 3
+# torch 2.14.0+cu130 cuda=False device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The run matches profile-v15/v16: two warmups, one wait, and three active
+steps. Percentages below are self-CPU percentages from the three active steps;
+counts are aggregate counts followed by the per-active-call count. Absolute
+profiler milliseconds are omitted because they are CPU-box and profiler
+dependent. `cat` and `contiguous` were absent from all three traces (zero
+calls).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators | copy_ / cat / contiguous |
+|---|---|---|
+| Attention | `aten::mul` **25.08%**, `aten::bmm` **23.91%**, `aten::complex` **14.88%**, `aten::copy_` **13.55%**, `aten::sub` **7.25%**, `aten::add` **7.24%** | `copy_` **6 / 3 = 2 per call**; `cat=0`; `contiguous=0` |
+| Forward | `aten::bmm` **25.97%**, `aten::mm` **22.60%**, `aten::mul` **17.74%**, `aten::complex` **11.37%**, `aten::copy_` **9.52%**, `aten::clamp_min_` **3.06%** | `copy_` **36 / 3 = 12 per call**; `cat=0`; `contiguous=0` |
+| Generate | `aten::mm` **20.82%**, `aten::bmm` **13.91%**, `aten::mul` **3.04%**, `aten::matmul` **2.51%**, `aten::native_layer_norm` **2.51%**, `aten::einsum` **2.18%**, `aten::copy_` **0.92%** | `copy_` **1,182 / 3 = 394 per call**; `cat=0`; `contiguous=0` |
+
+Relative to profile-v16, the copy/cat/contiguous counts are unchanged:
+attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call,
+with `cat=0` and `contiguous=0`. The self-CPU mix moves modestly within this
+short trace, so the honest result is **flat versus v16**, not a speedup claim.
+The recent #176–#181 scaffolds/docs/AMP contracts are not visible as a hot-path
+CPU change in this matched profile.
+
+### Verdict / non-goals
+
+- CPU operator evidence recorded after #176–#181 on the `f34d908` main tip.
+- Defaults and attention semantics remain unchanged: raw scores × strict
+  `tril(diagonal=-1)`, with no softmax, scaling, or SDPA.
+- No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
+  claimed; real GPU measurement and cold CUDA/Triton validation remain open.
