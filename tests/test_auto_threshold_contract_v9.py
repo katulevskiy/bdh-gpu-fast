@@ -168,6 +168,17 @@ def test_requested_backend_overrides_conflicting_environment(monkeypatch):
     assert resolve_decode_impl(5, requested="cuda") == "cuda"
 
 
+def test_requested_online_alias_overrides_auto_environment(monkeypatch):
+    """The per-call online alias stays blocked on both AUTO gates."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "0")
+
+    assert resolve_cold_impl(1, requested="online") == "blocked"
+    assert resolve_decode_impl(1, requested="online") == "blocked"
+
+
 def test_auto_toggle_releases_and_reenables_both_gates(monkeypatch):
     """Changing AUTO at runtime updates both cold and decode gates."""
     monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
