@@ -719,3 +719,51 @@ def test_online_decode_tiled_zero_stride_shared_v_view_matches_shared_layout():
             f"expanded block_size={block_size} maxdiff="
             f"{(got_expanded - ref).abs().max().item()}"
         )
+
+
+def test_online_decode_tiled_zero_stride_shared_v_preserves_autograd_contract():
+    """Head-expanded shared-V views preserve raw-score gradients."""
+    B, H, S, Tq, N, D = 2, 3, 513, 3, 4, 2
+    offset = 5
+    capacity = S + 17
+    g = torch.Generator().manual_seed(3233)
+    Q0 = torch.randn(B, H, Tq, N, generator=g)
+    K_storage0 = torch.randn(B, H, offset + capacity, N, generator=g)
+    V_storage0 = torch.randn(B, 1, offset + capacity, D, generator=g)
+    weights = torch.randn(B, H, Tq, D, generator=g)
+
+    Q_ref = Q0.detach().clone().requires_grad_()
+    K_storage_ref = K_storage0.detach().clone().requires_grad_()
+    V_storage_ref = V_storage0.detach().clone().requires_grad_()
+    K_ref = K_storage_ref.narrow(2, offset, S)
+    V_ref = V_storage_ref.narrow(2, offset, S)
+    ref = eager_decode_attn(Q_ref, K_ref, V_ref)
+    (ref * weights).sum().backward()
+    ref_grads = (
+        Q_ref.grad.detach().clone(),
+        K_storage_ref.grad.detach().clone(),
+        V_storage_ref.grad.detach().clone(),
+    )
+
+    Q = Q0.detach().clone().requires_grad_()
+    K_storage = K_storage0.detach().clone().requires_grad_()
+    V_storage = V_storage0.detach().clone().requires_grad_()
+    K = K_storage.narrow(2, offset, S)
+    V_shared = V_storage.narrow(2, offset, S)
+    V_expanded = V_shared.expand(B, H, S, D)
+    assert V_expanded.stride() == ((offset + capacity) * D, 0, D, 1)
+
+    got = online_decode_attn(Q, K, V_expanded, block_size=64)
+    assert S * Tq > 1024  # force the tiled per-head-V path
+    (got * weights).sum().backward()
+
+    assert torch.allclose(got, ref.detach(), rtol=1e-4, atol=1e-5), (
+        f"maxdiff={(got - ref.detach()).abs().max().item()}"
+    )
+    for actual, expected in zip(
+        (Q.grad, K_storage.grad, V_storage.grad), ref_grads
+    ):
+        assert actual is not None
+        assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-5), (
+            f"grad maxdiff={(actual - expected).abs().max().item()}"
+        )
