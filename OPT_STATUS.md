@@ -3,7 +3,7 @@
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `f10bdd4` (`#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Profile source: `ca5038f` (post-#75–#77; default eager unchanged; #69–#82 opt-ins are not exercised on the short window; re-profiled in `opt/profile-v7`). #85–#87 add the cache-page microbench, docs alignment, and zero-grad train-path hardening; defaults remain unchanged and GPU validation remains open.
+Tip documented here: `f10bdd4` (`#87` zero-grad harden / `#86` docs through #84 / `#85` cache-page-bench / `#84` compile-fullgraph / `#83` docs matrix / `#82` triton-cold-v2 / `#81` docs align / `#80` profile-v7 / `#79` cuda-cold-v2; `#77` auto-tune / `#75` prefill-blocked). Base documentation tip is `dfc7646` (`#88` docs-v15). Profile source: `f10bdd4` (post-#85–#87; default eager unchanged; short-window opt-ins remain unexercised; re-profiled in proposed `opt/profile-v8`). Defaults remain unchanged and GPU validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**

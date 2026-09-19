@@ -4699,3 +4699,66 @@ BDH_COMPILE=0 .venv/bin/python benchmarks/bench_train_step.py
 - No change to default env knobs
 - No PRs to `pathwaycom/*`; no public PR
 - No softmax / scale / SDPA
+
+## opt/profile-v8 — re-profile tip after #85–#87 (2026-09-19)
+
+**Branch:** `opt/profile-v8` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `f10bdd4` (`#87` zerograd; after `#86` docs and `#85`
+cache-page-bench; `#84` compile-fullgraph and earlier profile-v7 follow-ups).
+Profile windows were captured at `f10bdd4` on this CPU-only box. The #85
+paging bench, #86 docs refresh, and #87 train-only zero-grad hardening do not
+change the short default eval/generate window below. Defaults remain
+`BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTO` off, and the strict lower-triangular
+raw-score attention math.
+
+### Method
+
+```bash
+.venv/bin/python benchmarks/profile_forward.py --mode all
+# torch 2.14.0+cu130  cuda=False  device=cpu
+# cfg: layers=4 d=128 nh=4 B=4 T=128; generate prompt=16 / new=32
+```
+
+The profiler uses three active steps after the harness warmup/wait. Absolute
+CPU milliseconds are **profiler-inflated** and are not GPU measurements; use
+self-CPU percentages and call counts. Chrome traces are under
+`benchmarks/traces/` (gitignored).
+
+### CPU profile highlights (self CPU)
+
+| Mode | Top self-CPU operators (calls) | Notes |
+|------|--------------------------------|-------|
+| Attention | `aten::bmm` **23.43% (6)**, `aten::mul` **21.92% (12)**, `aten::copy_` **20.66% (9)**, `aten::sub` **7.01% (3)**, `aten::tril` **0.81% (3)** | Default eager still forms the full T×T score product before `tril(-1)`; no softmax, scale, or SDPA. |
+| Forward | `aten::copy_` **23.63% (72)**, `aten::mm` **22.79% (27)**, `aten::bmm` **22.45% (36)**, `aten::mul` **12.39% (60)**, `aten::clamp_min_` **2.33% (24)**, `aten::tril` **0.54% (12)** | `aten::contiguous` **0 calls**. GEMM/copy shape is unchanged; the short run does not exercise opt-in long-S/CUDA paths. |
+| Generate | `aten::mm` **15.28% (795)**, `aten::bmm` **15.27% (1,188)**, `aten::native_layer_norm` **4.02% (1,287)**, `aten::mul` **3.46% (1,980)**, `aten::matmul` **2.69% (1,587)**, `aten::select` **2.68% (5,121)**, `aten::einsum` **2.33% (396)** | `aten::cat` **0 calls**; `aten::contiguous` **0 calls**. `aten::copy_` was **1.41% (1,674)** and `aten::tril` **0.55% (12)**. `BDH.generate` record-function self attribution was 29.23% (host/control overhead, not an operator win). |
+
+The trace-level key counts are: attention `cat=0`, `contiguous=0`; forward
+`cat=0`, `contiguous=0`; generate `cat=0`, `contiguous=0`. Generate remains
+cat-free through the preallocated cache path, while layout-v2's cached
+`F.linear`/`mm` path remains visible.
+
+### Interpretation and follow-ups
+
+- #85–#87 are not new default attention kernels: #85 is a paging accounting
+  microbench, #86 is documentation, and #87 hardens the training
+  `set_to_none` path. The default short profile therefore remains structurally
+  the same as profile-v7.
+- The remaining P0 is a **real GPU** measurement of fused strict-tril
+  score×V (Triton/CUDA) against eager. This box has no GPU, so these CPU
+  percentages must not be presented as GPU wins.
+- GPU validation also remains open for cold tiles, decode GEMM/copy tax,
+  fused RoPE, and compile/AMP paths. Keep defaults unchanged until GPU data.
+
+### Correctness smoke
+
+```text
+.venv/bin/python -m pytest tests/test_zerograd.py -q
+# 8 passed
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`; private repo only
+- No softmax / diagonal inclusion / scale / SDPA
+- No GPU speedup claims from profiler-inflated CPU timings
+- No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1`
