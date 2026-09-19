@@ -407,6 +407,8 @@ def test_dataloader_worker_prefetch_contract(tr, monkeypatch):
     src = tr.DataLoaderBatchSource("train")
     try:
         dl = src._loader
+        assert isinstance(dl.dataset, tr._HostBatchIterable)
+        assert dl.dataset.split == "train"
         assert dl.batch_size is None
         assert dl.prefetch_factor == 2
         assert dl.worker_init_fn is tr._dataloader_worker_init
