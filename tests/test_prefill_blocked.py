@@ -115,8 +115,9 @@ def test_batched_strict_tril_raw_score_backward_contract_partial_tile(
     assert torch.count_nonzero(grad_v[:, :, :-1, :]) > 0
 
 
+@pytest.mark.parametrize("impl", [blocked_tril_attn, online_tril_attn])
 @pytest.mark.parametrize("value_heads", [1, 2])
-def test_batched_strict_tril_raw_score_contract_partial_tile(value_heads):
+def test_batched_strict_tril_raw_score_contract_partial_tile(impl, value_heads):
     """Batched and head-matched tiles keep exact raw-score masking."""
     B, H, T, N, D = 2, 2, 7, 2, 2
     Q = torch.arange(-20, -20 + B * H * T * N, dtype=torch.float64).view(
@@ -130,7 +131,7 @@ def test_batched_strict_tril_raw_score_contract_partial_tile(value_heads):
     )
     expected = torch.tril(Q @ K.transpose(-2, -1), diagonal=-1) @ V
 
-    got = blocked_tril_attn(Q, K, V, block_size=3)
+    got = impl(Q, K, V, block_size=3)
     assert torch.equal(got, expected)
 
 
