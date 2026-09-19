@@ -5279,3 +5279,41 @@ The box is CPU-only (`cuda=False`), so this records no GPU claim.
 - No RMSNorm / affine-LN semantic change
 - No attention math or default change
 - No GPU claims from CPU operator counts
+
+## opt/triton-cold-v3 — adaptive wide-head tiles and copy-free CPU fallback (2026-09-19)
+
+**Branch:** `opt/triton-cold-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `7c27817`; pair with merged `#82` Triton cold-v2 and `#93`
+blocked-tile-v2. The branch is rebased onto the current `main` before PR.
+
+### Audit / deepen
+
+- Cold Triton tile selection still grows 64→128 at `T≥256` for the normal
+  BDH head shape (`N≤64`, `D≤128`), but keeps wide-head query/key tiles at
+  64×64 to bound qk/accumulator register pressure instead of applying the
+  long-T width blindly. Explicit `block_m`/`block_n` overrides remain honored.
+- The long CPU fallback from `#93` still flattens `(B,H)` for score `bmm`,
+  while shared `V=(B,1,T,D)` now remains a single `(B,T,D)` view during each
+  score×V tile; it no longer materializes a `(B*H,T,D)` V staging copy.
+- Triton CUDA launch/scaffold behavior remains unchanged except for the
+  dimension-aware picker; CPU-only fallback remains the exercised validation.
+
+### Correctness / limits
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_triton_attn.py tests/test_prefill_blocked.py -q
+# 45 passed, 3 skipped (CPU; CUDA+Triton soft-skipped)
+```
+
+The tests cover eager parity, strict `tril(diagonal=-1)` / `pos0==0`, long CPU
+→ blocked fallback, broadcast and per-head V, adaptive tile thresholds, and
+explicit tile overrides. This box has no usable GPU; no GPU timing, kernel
+validation, or speedup claim is made. Defaults remain eager and AUTO remains
+off.
+
+### Non-goals
+
+- No public or `pathwaycom/*` PRs; private repo only.
+- No default `BDH_ATTN_IMPL` / `BDH_ATTN_AUTO` change.
+- No softmax, scale, diagonal inclusion, or full-score materialization.
