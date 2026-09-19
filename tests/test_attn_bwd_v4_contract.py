@@ -292,6 +292,39 @@ def test_zero_stride_v_input_reduces_base_gradient(impl):
 
 
 @pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
+def test_zero_stride_v_batch_head_view_reduces_base_gradient(impl):
+    """V views shared across batch and heads must reduce to the base."""
+    generator = torch.Generator().manual_seed(2037)
+    Q = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    K = torch.randn(
+        2, 3, 5, 4, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V_base = torch.randn(
+        1, 1, 5, 6, generator=generator, dtype=torch.float64, requires_grad=True
+    )
+    V = V_base.expand(2, 3, 5, 6)
+    dO = torch.randn(2, 3, 5, 6, generator=generator, dtype=torch.float64)
+
+    out = strict_tril_attn(Q, K, V, impl=impl, use_fn=True)
+    Q_ref = Q.detach().clone().requires_grad_(True)
+    K_ref = K.detach().clone().requires_grad_(True)
+    V_ref = V.detach().clone().requires_grad_(True)
+    ref = eager_tril_attn(Q_ref, K_ref, V_ref)
+
+    assert V.stride(0) == 0 and V.stride(1) == 0
+    assert torch.allclose(out, ref, rtol=1e-12, atol=1e-12)
+    out.backward(dO)
+    ref.backward(dO)
+    assert torch.allclose(Q.grad, Q_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(K.grad, K_ref.grad, rtol=1e-12, atol=1e-12)
+    assert torch.allclose(
+        V_base.grad, V_ref.grad.sum(dim=(0, 1), keepdim=True), rtol=1e-12, atol=1e-12
+    )
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton", "cuda"])
 def test_zero_stride_qk_inputs_reduce_base_gradients(impl):
     """Zero-stride Q/K head views must reduce their gradients to the bases."""
     generator = torch.Generator().manual_seed(2035)
