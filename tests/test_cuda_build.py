@@ -37,6 +37,20 @@ def test_default_setup_is_pure_python_noop():
     assert any(line.strip() == "bdh-gpu-opt" for line in output.splitlines())
 
 
+def test_cuda_flag_without_extension_opt_in_is_pure_python_noop():
+    """BDH_BUILD_CUDA alone must not opt into native extension setup."""
+    env = os.environ.copy()
+    env.pop("BDH_BUILD_EXT", None)
+    env.update({"BDH_BUILD_CUDA": "1"})
+    env.pop("BDH_FORCE_CPU_EXT", None)
+
+    output = _setup_name(env)
+
+    assert "pure-Python install" in output
+    assert "skipping CUDA extension build" not in output
+    assert any(line.strip() == "bdh-gpu-opt" for line in output.splitlines())
+
+
 def test_forced_cuda_without_nvcc_is_clear_noop():
     """A CUDA torch wheel without nvcc must skip before CUDAExtension setup."""
     if shutil.which("nvcc"):
