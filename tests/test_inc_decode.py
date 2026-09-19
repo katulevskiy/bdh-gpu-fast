@@ -803,3 +803,44 @@ def test_packed_per_head_t1_decode_oneshot_boundary_cpu_parity(S, B):
     # packed storage; no staging copy is part of this shape contract.
     assert K.reshape(B * H, S, N).data_ptr() == K.data_ptr()
     assert V.reshape(B * H, S, D).data_ptr() == V.data_ptr()
+
+
+@pytest.mark.parametrize("impl", ["eager", "blocked", "online", "triton"])
+def test_packed_per_head_t1_decode_autograd_parity(impl):
+    """Capacity-strided per-head GEMMs keep decode gradients graph-safe."""
+    B, H, S, N, D = 2, 4, _DECODE_ONESHOT_ELEMS + 1, 8, 16
+    capacity = S + 17
+    g = torch.Generator().manual_seed(700)
+    q0 = torch.randn(B, H, 1, N, generator=g, requires_grad=True)
+    k0 = torch.randn(B, H, capacity, N, generator=g, requires_grad=True)
+    v0 = torch.randn(B, H, capacity, D, generator=g, requires_grad=True)
+    weights = torch.randn(B, H, 1, D, generator=g)
+    K = k0.narrow(2, 0, S)
+    V = v0.narrow(2, 0, S)
+
+    ref = eager_decode_attn(q0, K, V)
+    (ref * weights).sum().backward()
+    ref_grads = (
+        q0.grad.detach().clone(),
+        k0.grad.detach().clone(),
+        v0.grad.detach().clone(),
+    )
+
+    q = q0.detach().clone().requires_grad_()
+    k = k0.detach().clone().requires_grad_()
+    v = v0.detach().clone().requires_grad_()
+    got = bdh_attn_decode(
+        q, k.narrow(2, 0, S), v.narrow(2, 0, S), impl=impl
+    )
+    (got * weights).sum().backward()
+
+    assert torch.allclose(got, ref.detach(), rtol=1e-4, atol=1e-5), (
+        f"impl={impl} maxdiff={(got - ref.detach()).abs().max().item()}"
+    )
+    for actual, expected in zip(
+        (q.grad, k.grad, v.grad), ref_grads
+    ):
+        assert actual is not None
+        assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-5), (
+            f"impl={impl} grad maxdiff={(actual - expected).abs().max().item()}"
+        )
