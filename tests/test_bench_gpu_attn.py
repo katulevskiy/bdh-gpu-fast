@@ -50,6 +50,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
         }
     ]
     assert summary["timing_scope"] == "none"
+    assert "results" not in summary
     assert summary["cuda_available"] is False
     assert isinstance(summary["cuda_built"], bool)
     assert isinstance(summary["cuda_device_count"], int)
