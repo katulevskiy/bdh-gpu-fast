@@ -72,8 +72,9 @@ when the ext is built. Default remains **eager**.
 | Symbol | Role |
 |--------|------|
 | `tril_score_v_ref(q,k,v)` | Golden eager full tril — **bit-identical**, always works |
-| `tril_score_v_tiled_ref(...)` | CPU mirror of CUDA tiled online cold (TILE_M/N=16; no full T×T) |
+| `tril_score_v_tiled_ref(...)` | CPU mirror of CUDA tiled online cold (adaptive TILE_M/N; no full T×T) |
 | `tril_score_v(q,k,v)` | Native ext if built; else tiled (large T) / eager (small T) |
+| `pick_cuda_cold_tiles(T, Dk)` | Long-T cold tile picker (pair #75; smem-aware) |
 | `tril_decode_ref(q,k_past,v)` | Decode ref — vectorized small S; tiles large past |
 | `tril_decode_tiled_ref(...)` | CPU mirror of CUDA tiled online decode (adaptive tile) |
 | `pick_cuda_decode_tile_n(S, Dk)` | Long-S past tile picker (pair #55/#62) |
@@ -106,14 +107,16 @@ kernels.cuda_attn` never raises, tests skip CUDA paths, and CPU refs still run.
 
 `tril_attn_cuda.cu`:
 
-- Cold: **tiled online** — grid `(ceil(T/16), B·H, ceil(Dv/32))`, block `(32, 16)`;
-  shared Q/K/V tiles; register `score×V`; smem>48 KiB → fused naive (still no T×T)
+- Cold: **tiled online** + **adaptive** TILE_M/N (16/32 × 16/32/64 via
+  `pick_cold_tiles`; pair #75 @T≥256); grid `(ceil(T/TM), B·H, ceil(Dv/32))`;
+  shared Q/K/V; register `score×V`; smem>48 KiB → fused naive (still no T×T)
 - Decode: **tiled online** packed-past score×V; **adaptive** past tiles
   (32/64/128 via `pick_decode_tile_n`); Tq=1 thin grid + Q hoist; naive fallback
 
-CPU tiled refs in `cuda_attn.py` / `tril_attn_cpu.cpp` use the same TILE_M/N=16
-cold tiles and adaptive decode tiles (up to 512 on CPU) so a GPU drop-in build
-can reuse the tested online structure. Numerically ≡ blocked (#55) / eager.
+CPU tiled refs in `cuda_attn.py` / `tril_attn_cpu.cpp` use adaptive cold tiles
+(up to 128 on CPU — pair #75) and adaptive decode tiles (up to 512 on CPU) so a
+GPU drop-in build can reuse the tested online structure. Numerically ≡ blocked
+(#75/#55) / eager.
 
 ## RoPE rotate (`BDH_ROPE_IMPL`)
 

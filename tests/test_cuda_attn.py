@@ -14,10 +14,15 @@ import torch
 
 from kernels.cuda_attn import (
     CUDA_TILE_M,
+    CUDA_TILE_M_CPU_MAX,
+    CUDA_TILE_M_MAX,
     CUDA_TILE_N,
+    CUDA_TILE_N_CPU_MAX,
+    CUDA_TILE_N_MAX,
     ext_status,
     has_cuda_ext,
     has_cuda_kernel,
+    pick_cuda_cold_tiles,
     tril_score_v,
     tril_score_v_ref,
     tril_score_v_tiled_ref,
@@ -128,7 +133,7 @@ def test_tiled_ref_matches_eager(device):
 def test_tiled_ref_broadcast_v_and_multi_tile(device):
     """T spanning >1 CUDA TILE_M + V=(B,1,...) broadcast."""
     torch.manual_seed(11)
-    assert CUDA_TILE_M == 16 and CUDA_TILE_N == 16
+    assert CUDA_TILE_M == 16 and CUDA_TILE_N == 16  # base constants
     B, H, T, Dk, Dv = 1, 4, 40, 8, 16  # T > 2 * TILE_M
     q = torch.randn(B, H, T, Dk, device=device)
     k = torch.randn(B, H, T, Dk, device=device)
@@ -223,6 +228,95 @@ def test_cuda_tiled_cold_matches_ref_multi_tile():
     torch.manual_seed(8)
     device = torch.device("cuda")
     B, H, T, Dk, Dv = 2, 4, 40, 32, 48
+    q = torch.randn(B, H, T, Dk, device=device)
+    k = torch.randn(B, H, T, Dk, device=device)
+    v = torch.randn(B, 1, T, Dv, device=device)
+    out = tril_score_v(q, k, v)
+    gold = tril_score_v_ref(q, k, v)
+    assert out.shape == gold.shape
+    assert torch.allclose(out, gold, rtol=1e-3, atol=1e-3)
+    assert torch.allclose(out[:, :, 0, :], torch.zeros_like(out[:, :, 0, :]))
+
+
+def test_pick_cuda_cold_tiles_long_t():
+    """cuda-cold-v2: adaptive tiles grow with T (pair #75 BS@T≥256)."""
+    assert CUDA_TILE_M == 16 and CUDA_TILE_N == 16
+    tm, tn = pick_cuda_cold_tiles(32)
+    assert tm == 16 and tn == 16
+    tm, tn = pick_cuda_cold_tiles(128)
+    assert tm == 32 and tn == 32
+    tm, tn = pick_cuda_cold_tiles(512)
+    assert tm == 128 and tn == 128  # CPU refs up to 128
+    assert tm <= CUDA_TILE_M_CPU_MAX and tn <= CUDA_TILE_N_CPU_MAX
+    # Smem-aware caps at MAX (32/64)
+    tm_s, tn_s = pick_cuda_cold_tiles(512, Dk=64, for_smem=True)
+    assert tm_s <= CUDA_TILE_M_MAX and tn_s <= CUDA_TILE_N_MAX
+    assert tm_s >= CUDA_TILE_M and tn_s >= CUDA_TILE_N
+    # Explicit override
+    tm_e, tn_e = pick_cuda_cold_tiles(512, tile_m=16, tile_n=16)
+    assert tm_e == 16 and tn_e == 16
+
+
+def test_tiled_ref_long_t_adaptive_matches_eager(device):
+    """Long-T adaptive tiled CPU ref ≡ eager; diagonal excluded; no full T×T claim."""
+    torch.manual_seed(20)
+    B, H, T, Dk, Dv = 1, 2, 96, 8, 12  # T>64 → TM/TN=32
+    q = torch.randn(B, H, T, Dk, device=device)
+    k = torch.randn(B, H, T, Dk, device=device)
+    v = torch.randn(B, H, T, Dv, device=device)
+    tm, tn = pick_cuda_cold_tiles(T, Dk)
+    assert tm == 32 and tn == 32
+    tiled = tril_score_v_tiled_ref(q, k, v)
+    gold = tril_score_v_ref(q, k, v)
+    assert tiled.shape == gold.shape
+    assert torch.allclose(tiled, gold, rtol=1e-5, atol=1e-5)
+    assert torch.allclose(tiled[:, :, 0, :], torch.zeros_like(tiled[:, :, 0, :]))
+    # Fixed small tiles still match
+    tiled16 = tril_score_v_tiled_ref(q, k, v, tile_m=16, tile_n=16)
+    assert torch.allclose(tiled16, gold, rtol=1e-5, atol=1e-5)
+
+
+def test_tiled_ref_long_t_broadcast_v_matches_blocked(device):
+    """T≥256 adaptive tiles + V broadcast ≡ blocked (#75) and eager."""
+    from kernels.attention import blocked_tril_attn
+
+    torch.manual_seed(21)
+    B, H, T, Dk, Dv = 1, 2, 260, 8, 8
+    q = torch.randn(B, H, T, Dk, device=device)
+    k = torch.randn(B, H, T, Dk, device=device)
+    v = torch.randn(B, 1, T, Dv, device=device)
+    tm, tn = pick_cuda_cold_tiles(T, Dk)
+    assert tm == 128 and tn == 128
+    tiled = tril_score_v_tiled_ref(q, k, v)
+    gold = tril_score_v_ref(q, k, v)
+    blocked = blocked_tril_attn(q, k, v)
+    assert torch.allclose(tiled, gold, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(tiled, blocked, rtol=1e-4, atol=1e-4)
+    assert torch.allclose(tiled[:, :, 0, :], torch.zeros_like(tiled[:, :, 0, :]))
+
+
+def test_tril_score_v_dispatch_long_t_uses_tiled(device):
+    """Large T soft-fallback prefers tiled online (no ext) vs eager golden."""
+    torch.manual_seed(22)
+    # T*T > 256*256 → tiled path in tril_score_v
+    T = 288
+    q = torch.randn(1, 1, T, 8, device=device)
+    k = torch.randn(1, 1, T, 8, device=device)
+    v = torch.randn(1, 1, T, 4, device=device)
+    out = tril_score_v(q, k, v)
+    gold = tril_score_v_ref(q, k, v)
+    assert torch.allclose(out, gold, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.skipif(
+    not (has_cuda_kernel() and torch.cuda.is_available()),
+    reason="CUDA kernel not built or no CUDA device",
+)
+def test_cuda_adaptive_cold_long_t_matches_ref():
+    """Soft-skip without GPU: adaptive cold CUDA vs eager @ long T + V broadcast."""
+    torch.manual_seed(23)
+    device = torch.device("cuda")
+    B, H, T, Dk, Dv = 1, 2, 96, 32, 48
     q = torch.randn(B, H, T, Dk, device=device)
     k = torch.randn(B, H, T, Dk, device=device)
     v = torch.randn(B, 1, T, Dv, device=device)
