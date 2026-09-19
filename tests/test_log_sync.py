@@ -64,6 +64,22 @@ def test_logger_no_item_on_non_log_steps():
     assert item_calls["n"] == 1, item_calls
 
 
+def test_logger_async_request_is_cpu_noop():
+    """CPU ignores async CUDA requests without pinned storage or events."""
+    logger = tr.TrainLossLogger(
+        log_freq=1, device=torch.device("cpu"), async_cuda=True, max_iters=1
+    )
+    assert logger.uses_deferred_cuda is False
+    assert logger._host is None
+    with redirect_stdout(io.StringIO()) as out:
+        logger.update(torch.tensor(2.0), step=0)
+    assert "Step: 0/1 loss 2" in out.getvalue()
+    assert logger._pending_step is None
+    assert logger._event is None
+    assert logger._host is None
+    logger.close()
+
+
 def test_logger_inplace_add_and_fp32():
     acc_dtypes = []
     logger = tr.TrainLossLogger(log_freq=100, device=torch.device("cpu"), async_cuda=False, max_iters=2)
