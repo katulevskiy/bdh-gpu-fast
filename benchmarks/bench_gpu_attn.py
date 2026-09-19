@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 5
+SUMMARY_SCHEMA_VERSION = 6
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -119,16 +119,29 @@ def _select_device(*, cuda_available: bool, force_cpu: bool) -> torch.device:
     return torch.device("cuda" if cuda_available and not force_cpu else "cpu")
 
 
-def _cuda_runtime_diagnostics() -> dict[str, Any]:
+def _cuda_runtime_diagnostics(
+    *, cuda_available: bool | None = None
+) -> dict[str, Any]:
     """Return CPU-safe CUDA build/device diagnostics for skip handoffs."""
+    cuda_built = bool(torch.backends.cuda.is_built())
+    cuda_device_count = int(torch.cuda.device_count())
+    if not cuda_built:
+        runtime_state = "not_built"
+    elif cuda_device_count == 0:
+        runtime_state = "no_visible_device"
+    elif cuda_available is False:
+        runtime_state = "runtime_unavailable"
+    else:
+        runtime_state = "available"
     return {
-        "cuda_built": bool(torch.backends.cuda.is_built()),
-        "cuda_device_count": int(torch.cuda.device_count()),
+        "cuda_built": cuda_built,
+        "cuda_device_count": cuda_device_count,
+        "cuda_runtime_state": runtime_state,
     }
 
 
 def _skip_summary(*, mode: str) -> dict[str, Any]:
-    cuda_runtime = _cuda_runtime_diagnostics()
+    cuda_runtime = _cuda_runtime_diagnostics(cuda_available=False)
     return {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "status": "skip",
@@ -252,6 +265,7 @@ def main() -> int:
             f"cuda_version={summary['cuda_version']}  "
             f"cuda_built={summary['cuda_built']}  "
             f"cuda_device_count={summary['cuda_device_count']}  "
+            f"cuda_runtime_state={summary['cuda_runtime_state']}  "
             f"backend_info={summary['backend_info']}"
         )
         print("GPU_ATTN_SUMMARY " + json.dumps(summary, sort_keys=True))
@@ -283,7 +297,7 @@ def main() -> int:
         ref_fn = eager_tril_attn
 
     info = backend_info()
-    cuda_runtime = _cuda_runtime_diagnostics()
+    cuda_runtime = _cuda_runtime_diagnostics(cuda_available=cuda_ok)
     props = torch.cuda.get_device_properties(0) if device.type == "cuda" else None
     gpu_name = props.name if props else "cpu"
     print(f"device={device}  gpu={gpu_name!r}  dtype={dtype}  mode={mode}")
