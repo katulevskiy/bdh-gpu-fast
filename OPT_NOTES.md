@@ -4830,3 +4830,27 @@ unexecuted; blocked is the CPU tile parity fallback.
 - No change to default `BDH_ROPE_IMPL=eager`
 - No fake GPU speedups from CPU medians
 - No attention math / `tril(-1)` / CacheManager changes
+
+## opt/prefetch-h2d — CUDA side-stream staging scaffold (2026-09-19)
+
+**Branch:** `opt/prefetch-h2d` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `fd6d62d` (`origin/main`, profile-v8 / #89).
+
+`BatchPrefetcher` now keeps one CUDA batch staged ahead when async host
+prefetching is enabled: producer batches are pinned, `x`/`y` H2D copies are
+queued on a dedicated side stream, and the caller stream waits on an event only
+when consuming that batch. `record_stream` keeps pinned host storage safe for
+the asynchronous copy. CPU remains a no-op for the CUDA path and keeps the
+existing host-thread behavior.
+
+**Env:** `BDH_PREFETCH_H2D=1` (default; CUDA side-stream lookahead),
+`BDH_PREFETCH_H2D=0` (host prefetch retained, H2D on caller stream),
+`BDH_PREFETCH_ASYNC=0` (synchronous debug/A-B). The constructor's
+`cuda_staging=` keyword overrides the H2D flag for tests/A-B and is ignored on
+CPU.
+
+**Validation (this CPU-only box):** `python -m pytest -q tests/test_dataloader.py`
+→ 14 passed, 1 skipped (CUDA-specific); `python benchmarks/bench_prefetch.py`
+→ gather 0.069 ms, synthetic overlap 1.56×, tiny train loop sync 1.999 ms vs
+async 2.180 ms. These are CPU smoke/noise measurements; GPU H2D overlap and
+throughput remain unmeasured.

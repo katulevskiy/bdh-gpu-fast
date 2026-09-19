@@ -81,6 +81,39 @@ def test_to_train_device_cpu_passthrough(tr):
     assert torch.equal(x, xd) and torch.equal(y, yd)
 
 
+def test_batch_prefetcher_cuda_staging_is_cpu_noop(tr):
+    """The CUDA opt-in must not create streams or alter CPU semantics."""
+    loader = tr.BatchPrefetcher("train", cuda_staging=True)
+    try:
+        assert loader._cuda_staging is False
+        assert loader._stream is None
+        x, y = loader.next()
+        assert x.device.type == "cpu" and y.device.type == "cpu"
+        assert torch.equal(x[:, 1:], y[:, :-1])
+    finally:
+        loader.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for H2D staging")
+def test_batch_prefetcher_cuda_staging_device_lookahead(tr, monkeypatch):
+    """CUDA staging returns device batches and keeps one staged lookahead."""
+    monkeypatch.setattr(tr, "device", torch.device("cuda"))
+    monkeypatch.setattr(tr, "_train_data", None)
+    monkeypatch.setattr(tr, "_val_data", None)
+    monkeypatch.setattr(tr, "_offsets", None)
+    loader = tr.BatchPrefetcher("train", async_host=True, cuda_staging=True)
+    try:
+        x, y = loader.next()
+        assert loader._cuda_staging is True
+        assert loader._stream is not None
+        assert loader._device_next is not None
+        assert x.device.type == "cuda" and y.device.type == "cuda"
+        assert x.shape == (tr.BATCH_SIZE, tr.BLOCK_SIZE)
+    finally:
+        loader.close()
+        torch.cuda.synchronize()
+
+
 def test_batch_prefetcher_next(tr):
     loader = tr.BatchPrefetcher("train")
     try:
