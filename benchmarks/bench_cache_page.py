@@ -50,6 +50,14 @@ def _elem_stride_bytes(cm: CacheManager) -> int:
     )
 
 
+def _footprint_bytes(cm: CacheManager) -> Tuple[int, int]:
+    """Return (bytes per slot, packed allocation) with a layout sanity check."""
+    elem_stride = _elem_stride_bytes(cm)
+    allocated = cm.bytes_allocated
+    assert allocated == cm.capacity * elem_stride
+    return elem_stride, allocated
+
+
 def _linear_next_capacity(self: CacheManager, need: int) -> int:
     """Linear ``+page_size`` growth (historical; for A/B only)."""
     ps = self.page_size
@@ -88,23 +96,26 @@ def _run_policy(
     if next_cap is not None:
         # Bind linear policy without mutating the class for other instances.
         cm._next_capacity = next_cap.__get__(cm, CacheManager)  # type: ignore[method-assign]
+    initial_capacity = cm.capacity
+    initial_allocated_bytes = cm.bytes_allocated
     t0 = time.perf_counter()
     _tokenwise_fill(cm, max_seq)
     wall_ms = (time.perf_counter() - t0) * 1000.0
     assert cm.seq_len == max_seq
     assert cm.capacity == max_seq
-    elem_stride = _elem_stride_bytes(cm)
+    elem_stride, allocated_bytes = _footprint_bytes(cm)
     live_bytes = cm.seq_len * elem_stride
     return {
         "page": page,
         "max_seq": max_seq,
-        "initial_capacity": min(max_seq, page),
+        "initial_capacity": initial_capacity,
         "final_capacity": cm.capacity,
         "n_grows": cm.n_grows,
         "bytes_copied": cm.bytes_copied_on_grow,
         "elem_stride": elem_stride,
         "live_bytes": live_bytes,
-        "allocated_bytes": cm.bytes_allocated,
+        "allocated_bytes": allocated_bytes,
+        "initial_allocated_bytes": initial_allocated_bytes,
         "wall_ms": wall_ms,
     }
 
@@ -177,6 +188,7 @@ def _generate_smoke(
         torch.manual_seed(1)
         paged = _paged_gen()
 
+    elem_stride, final_allocated_bytes = _footprint_bytes(cm)
     return {
         "prompt": prompt_len,
         "new": n_new,
@@ -185,7 +197,10 @@ def _generate_smoke(
         "aten_cat": cats,
         "n_grows": cm.n_grows,
         "bytes_copied": cm.bytes_copied_on_grow,
+        "capacity_initial": min(max_seq, page),
         "capacity_final": cm.capacity,
+        "allocated_initial_bytes": min(max_seq, page) * elem_stride,
+        "allocated_final_bytes": final_allocated_bytes,
     }
 
 
@@ -244,7 +259,7 @@ def main() -> int:
     )
     print()
     hdr = (
-        f"{'page':>6} {'capacity':>13} {'alloc_KiB':>10} "
+        f"{'page':>6} {'capacity':>13} {'start_KiB':>10} {'alloc_KiB':>10} "
         f"{'geo_grows':>9} {'lin_grows':>9} {'geo_bytes':>12} "
         f"{'lin_bytes':>12} {'bytes_x':>8} {'grows_x':>8} {'geo_ms':>8}"
     )
@@ -277,10 +292,15 @@ def main() -> int:
         assert geo["initial_capacity"] == lin["initial_capacity"]
         assert geo["final_capacity"] == lin["final_capacity"] == args.max_seq
         assert geo["allocated_bytes"] == lin["allocated_bytes"]
+        assert geo["initial_allocated_bytes"] == lin["initial_allocated_bytes"]
+        assert geo["initial_allocated_bytes"] == (
+            geo["initial_capacity"] * geo["elem_stride"]
+        )
         capacity = f"{geo['initial_capacity']}→{geo['final_capacity']}"
+        start_kib = geo["initial_allocated_bytes"] / 1024
         alloc_kib = geo["allocated_bytes"] / 1024
         print(
-            f"{page:6d} {capacity:>13} {alloc_kib:10.1f} "
+            f"{page:6d} {capacity:>13} {start_kib:10.1f} {alloc_kib:10.1f} "
             f"{geo['n_grows']:9d} {lin['n_grows']:9d} "
             f"{geo['bytes_copied']:12d} {lin['bytes_copied']:12d} "
             f"{bx:7.1f}× {gx:7.1f}× {geo['wall_ms']:7.1f}"
@@ -293,6 +313,7 @@ def main() -> int:
                 "initial_capacity": geo["initial_capacity"],
                 "final_capacity": geo["final_capacity"],
                 "allocated_bytes": geo["allocated_bytes"],
+                "initial_allocated_bytes": geo["initial_allocated_bytes"],
                 "geo_bytes": geo["bytes_copied"],
                 "lin_bytes": lin["bytes_copied"],
                 "bytes_x": bx,
@@ -309,6 +330,9 @@ def main() -> int:
         f"generate prompt={smoke['prompt']} +new={smoke['new']} "
         f"cache_page_size={smoke['page']}: "
         f"match_fixed={smoke['match_fixed']} aten::cat={smoke['aten_cat']} "
+        f"capacity={smoke['capacity_initial']}→{smoke['capacity_final']} "
+        f"alloc_KiB={smoke['allocated_initial_bytes'] / 1024:.1f}→"
+        f"{smoke['allocated_final_bytes'] / 1024:.1f} "
         f"mirror_decode n_grows={smoke['n_grows']} "
         f"bytes_copied={smoke['bytes_copied']}"
     )
