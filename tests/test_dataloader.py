@@ -376,6 +376,25 @@ def test_batch_prefetcher_close_idempotent(tr):
     loader.close()  # second close must not raise
 
 
+def test_batch_prefetcher_sync_close_clears_host_slot(tr, monkeypatch):
+    """Sync shutdown releases the preloaded host batch and stays idempotent."""
+    batch = (
+        torch.zeros((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64),
+        torch.ones((tr.BATCH_SIZE, tr.BLOCK_SIZE), dtype=torch.int64),
+    )
+    monkeypatch.setattr(tr.BatchPrefetcher, "_gather_pinned_host", lambda self: batch)
+
+    loader = tr.BatchPrefetcher("train", async_host=False)
+    assert loader._thread is None
+    assert loader._q is None
+    assert loader._host_next is batch
+
+    loader.close()
+    assert loader._host_next is None
+    assert loader._device_next is None
+    loader.close()
+
+
 def test_batch_prefetcher_producer_failure_is_terminal(tr, monkeypatch):
     """Once the CPU producer fails, every pending ``next()`` fails promptly."""
 
