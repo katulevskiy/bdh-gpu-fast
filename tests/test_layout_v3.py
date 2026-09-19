@@ -909,6 +909,7 @@ def test_sampler_padded_nonunit_probability_buffer_preserves_zero_stride_output(
 
     cases = (
         ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-narrow", dict(scale=0.7, do_topk=True, top_k_n=8)),
         ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
         ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
     )
@@ -941,6 +942,8 @@ def test_sampler_padded_nonunit_probability_buffer_preserves_zero_stride_output(
         assert torch.equal(probs_storage[..., 1], probs_before[..., 1]), name
         assert torch.equal(probs_storage[:, 0], probs_before[:, 0]), name
         assert torch.equal(probs_storage[:, -1], probs_before[:, -1]), name
+        if name == "topk-narrow":
+            assert torch.equal(probs_storage, probs_before), name
 
         torch.manual_seed(17)
         ref = bdh.BDH._sample_from_logits(
