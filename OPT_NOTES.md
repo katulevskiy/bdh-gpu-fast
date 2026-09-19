@@ -4009,6 +4009,7 @@ does not on CPU when new-token count is small relative to prefill.
 Defaults unchanged (`BDH_ATTN_AUTO` off, `BDH_ATTN_IMPL=eager`). Do **not** claim
 GPU wins from these CPU medians.
 
+
 ### Correctness (this box, CPU)
 
 ```text
@@ -4023,3 +4024,76 @@ GPU wins from these CPU medians.
 - No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
 - No fake GPU speedups from CPU medians
 - No claiming AUTO e2e wall win when measured ~parity
+
+## opt/attn-mem-probe — peak mem eager vs blocked vs online (2026-09-19)
+
+**Branch:** `opt/attn-mem-probe` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `04afb2f` (main after `#72` gen-long-bench).
+
+### Goal
+
+Honest **CPU** peak-memory probe for cold strict-tril attention across growing
+`T`: compare `eager` vs `blocked` vs `online`. Document when **blocked wins on
+peak score memory even if wall time is slower**. Defaults unchanged
+(`BDH_ATTN_IMPL=eager`). No GPU claims. `tril(diagonal=-1)` preserved.
+
+### What landed
+
+| Piece | Role |
+|-------|------|
+| `benchmarks/bench_attn_mem.py` | Growing-T probe: score-elem bound + measured Q@K.T peak + wall median; `--smoke` for CI |
+| `tests/test_attn_mem.py` | Smoke: default eager; pos0==0; bound mid-T; bench `--smoke`; helper peak spy |
+| Docs | This note + light `OPT_STATUS` / `OPT_BACKLOG` pointers |
+
+```bash
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_attn_mem.py
+OMP_NUM_THREADS=2 .venv/bin/python benchmarks/bench_attn_mem.py --smoke
+.venv/bin/python -m pytest tests/test_attn_mem.py -q
+```
+
+### Measured (this box, 2026-09-19 Europe/Podgorica)
+
+`B=1 H=2 N=32 D=64`, `BS=DEFAULT_BLOCK_COLD=64`, CPU `torch 2.14.0+cu130`,
+`cuda=False`. Primary peak = measured Q@K.T score elems → MiB as `B·H·elems·4`.
+`online` ≡ `blocked` (alias).
+
+| T | eager bound | blocked bound | pk_eager | pk_blocked | eager MiB | blocked MiB | eager ms | blocked ms | e/b | peak_win |
+|---|-------------|---------------|----------|------------|-----------|-------------|----------|------------|-----|----------|
+| 32 | 1024 | 4096 | 1024 | 1024 | 0.008 | 0.008 | 0.020 | 0.037 | 0.53× | no |
+| 64 | 4096 | 4096 | 4096 | 4096 | 0.031 | 0.031 | 0.038 | 0.051 | 0.74× | no |
+| 128 | 16384 | 8128 | 16384 | 4096 | 0.125 | 0.031 | 0.034 | 0.102 | 0.33× | **YES** |
+| 256 | 65536 | 16320 | 65536 | 12288 | 0.500 | 0.094 | 0.116 | 0.278 | 0.42× | **YES** |
+| 512 | 262144 | 32704 | 262144 | 28672 | 2.000 | 0.219 | 1.189 | 0.574 | 2.07× | **YES** |
+| 1024 | 1048576 | 65472 | 1048576 | 61440 | 8.000 | 0.469 | 5.089 | 1.506 | 3.38× | **YES** |
+
+### When blocked wins peak mem (even if wall slower)
+
+- **T ≤ BS (64 here):** score peak ≈ eager (single diagonal tile can be `T×T`);
+  no peak win; wall still slower → keep default eager.
+- **T ∈ {128, 256} (this box):** blocked peak-score **≪** eager (`0.031` vs
+  `0.125` MiB @128; `0.094` vs `0.500` @256) **while wall is slower**
+  (~0.3–0.4× eager). **This is the intended use of `BDH_ATTN_IMPL=blocked` on
+  CPU:** peak-score budget / OOM headroom, **not** wall speedup.
+- **T ∈ {512, 1024}:** blocked wins **both** peak and wall on this CPU cold
+  prefill microbench (long-T GEMM + `tril` tax). Still **not** a default flip —
+  mid-T train shapes stay eager-faster; GPU unmeasured.
+
+**tracemalloc note:** blocked’s many small tiles can show *higher* Python
+allocator peaks than eager; ignore that for OOM reasoning — use score-elem /
+score-MiB columns.
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_attn_mem.py \
+  tests/test_fuse_scorev.py::test_default_impl_remains_eager \
+  tests/test_attention_mask.py::test_tril_diagonal_minus_one_position_zero_is_exactly_zero -q
+# 8 passed — default eager; tril(-1) pos0==0; mid-T bound; smoke bench
+```
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager`
+- No softmax / scale / SDPA; `tril(diagonal=-1)` preserved
+- No GPU / CUDA speedup claims from these CPU medians

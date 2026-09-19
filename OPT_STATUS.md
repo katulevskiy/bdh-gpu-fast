@@ -1,4 +1,4 @@
-# OPT status — landed work (#1–#71+)
+# OPT status — landed work (#1–#72+)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
@@ -222,6 +222,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **70** | `opt/dropout-compile` | Harden dropout=0 / eval identity for compile; FX/Dynamo tests; COMPILE=1 dropout A/B bench | Identity + 0 Dynamo breaks; CPU dropout A/B ~noise | GPU compile still P1 |
 | **71** | `opt/docs-matrix` (through #69) | Refresh optimization matrix through #69 (`962a3b6`) | Docs only | — |
 | **72** | `opt/gen-long-bench` | `bench_generate.py --mode auto-ab`: long-S generate AUTO 0/1 (S∈{256,1024,2048}); validate #55/#56 outside microbench | AUTO fires; match; cats=0; e2e AUTO ~parity (prefill dominates); IMPL=blocked 1.14–1.22× | GPU thr re-tune open |
+| **73** | `opt/attn-mem-probe` | CPU peak-mem probe eager vs blocked vs online (`bench_attn_mem.py`) | Mid-T: peak↓ wall↑; long-T both; default eager | No GPU claims |
 
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
@@ -256,6 +257,7 @@ python -m pytest tests/ -q
 python benchmarks/profile_forward.py --mode all
 BDH_BENCH_COMPILE=1 BDH_BENCH_COMPILE_MODE=1 BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py
 python benchmarks/bench_sparse_probe.py
+python benchmarks/bench_attn_mem.py --smoke
 # on a CUDA box:
 python benchmarks/bench_gpu_attn.py
 python benchmarks/bench_gpu_attn.py --mode decode --T 512
