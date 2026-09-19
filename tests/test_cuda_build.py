@@ -58,3 +58,16 @@ def test_forced_cuda_without_nvcc_is_clear_noop():
     assert "skipping CUDA extension build" in output
     assert "nvcc not found" in output
     assert "CPU refs remain available" in output
+
+
+def test_forced_cpu_ext_smoke_is_explicit():
+    """BDH_FORCE_CPU_EXT=1 selects the CPU-only extension setup branch."""
+    env = os.environ.copy()
+    env.update({"BDH_BUILD_EXT": "1", "BDH_FORCE_CPU_EXT": "1"})
+    env.pop("BDH_BUILD_CUDA", None)
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext CPU-only" in output
+    assert "skipping CUDA extension build" not in output
+    assert "pure-Python install" not in output

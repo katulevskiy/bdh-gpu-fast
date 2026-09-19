@@ -6943,3 +6943,37 @@ python benchmarks/bench_attn_bwd.py
 No GPU timing or training claim is made on this CPU-only box. Defaults remain
 `BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTOGRAD=0`, and raw scores ×
 `tril(diagonal=-1)`.
+## opt/cuda-cold-v5 — explicit CPU-only extension smoke contract (2026-09-19)
+
+**Branch:** `opt/cuda-cold-v5` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `f95c143` (main after #173; rebased from the requested #170 tip
+`1d12071`).
+
+### Audit / deepen
+
+The CUDA cold path keeps the #146 actionable native skip diagnostics and strict
+raw score × `tril(diagonal=-1)` CPU mirrors. Build smoke now also covers the
+explicit `BDH_FORCE_CPU_EXT=1` branch: setup selects the CPU-only native
+extension configuration without entering CUDA setup, while the default remains
+pure Python and missing-`nvcc` CUDA requests remain a clear no-op. No CUDA
+compiler, hardware execution, timing, or speedup is claimed on this CPU-only
+box.
+
+### CPU-safe validation
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest tests/test_cuda_build.py tests/test_cuda_attn.py -q -rs
+# 21 passed, 5 skipped
+
+OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 \
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest -q -rs
+# 575 passed, 19 skipped, 3 warnings
+```
+
+### Non-goals
+
+- No default eager or AUTO behavior change.
+- No softmax, scaling, diagonal inclusion, or change to raw score × strict
+  `tril(diagonal=-1)` semantics.
+- No GPU claim, timing, or public PR.
