@@ -32,12 +32,13 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["skips"] == [
         {
             "scope": "run",
+            "status": "skip",
             "reason": "cuda_unavailable",
             "detail": "torch.cuda.is_available() is false",
         }
@@ -85,7 +86,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
