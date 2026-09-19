@@ -169,6 +169,35 @@ def test_cuda_path_nvcc_directory_is_clear_noop(tmp_path):
     assert "CPU refs remain available" in output
 
 
+def test_cuda_path_executable_nvcc_selects_cuda_setup(tmp_path):
+    """An executable nvcc under CUDA_PATH must select CUDA extension setup."""
+    nvcc = tmp_path / "cuda-path" / "bin" / "nvcc"
+    nvcc.parent.mkdir(parents=True)
+    nvcc.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nvcc.chmod(0o755)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    empty_cuda_home = tmp_path / "cuda-home"
+    empty_cuda_home.mkdir()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "BDH_BUILD_EXT": "1",
+            "BDH_BUILD_CUDA": "1",
+            "CUDA_HOME": str(empty_cuda_home),
+            "CUDA_PATH": str(tmp_path / "cuda-path"),
+            "PATH": str(empty_path),
+        }
+    )
+
+    output = _setup_name(env)
+
+    assert "Building bdh_cuda_ext WITH CUDA" in output
+    assert "skipping CUDA extension build" not in output
+    assert "pure-Python install" not in output
+
+
 def test_path_non_executable_nvcc_stub_is_clear_noop(tmp_path):
     """A stale PATH nvcc entry must not enter CUDAExtension setup."""
     nvcc = tmp_path / "bin" / "nvcc"
