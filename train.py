@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import os
+import queue
+import threading
 from contextlib import nullcontext
 
 import bdh
@@ -127,6 +129,9 @@ USE_FUSED_ADAMW = os.environ.get("BDH_FUSED_ADAMW", "1") not in ("0", "false", "
 # Data path: default = vectorized get_batch + BatchPrefetcher; optional torch DataLoader
 USE_DATALOADER = os.environ.get("BDH_DATALOADER", "0") in ("1", "true", "True")
 NUM_WORKERS = int(os.environ.get("BDH_NUM_WORKERS", "2" if USE_DATALOADER else "0"))
+# Async host-thread double-buffer for BatchPrefetcher (overlap gather with train_step).
+# Set BDH_PREFETCH_ASYNC=0 to force synchronous preload (debug / A/B).
+USE_PREFETCH_ASYNC = os.environ.get("BDH_PREFETCH_ASYNC", "1") not in ("0", "false", "False")
 
 input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
 
@@ -197,6 +202,27 @@ def _to_train_device(x: torch.Tensor, y: torch.Tensor):
     return x, y
 
 
+def _gather_batch_host_numpy(split: str):
+    """Producer-thread gather via numpy — avoids OpenMP steal from train_step.
+
+    Same window semantics as ``_gather_batch_host`` (contiguous LM x/y), but
+    uses ``np.random`` + numpy indexing so the background thread does not
+    contend on PyTorch's intra-op threadpool. Not seed-compatible with
+    ``torch.manual_seed`` (prefetch samples are still valid IID).
+    """
+    _load_splits()
+    data_t = _train_data if split == "train" else _val_data
+    assert data_t is not None
+    data = data_t.numpy() if data_t.device.type == "cpu" else data_t.cpu().numpy()
+    n = len(data) - BLOCK_SIZE
+    ix = np.random.randint(0, n, size=BATCH_SIZE)
+    offsets = np.arange(BLOCK_SIZE + 1)
+    windows = data[ix[:, None] + offsets[None, :]]
+    x = torch.from_numpy(np.ascontiguousarray(windows[:, :-1], dtype=np.int64))
+    y = torch.from_numpy(np.ascontiguousarray(windows[:, 1:], dtype=np.int64))
+    return x, y
+
+
 def get_batch(split):
     """Vectorized get_batch: host gather + pin/non_blocking H2D when CUDA."""
     x, y = _gather_batch_host(split)
@@ -243,34 +269,149 @@ def make_torch_dataloader(split: str = "train") -> torch.utils.data.DataLoader:
 
 
 class BatchPrefetcher:
-    """One-slot prefetch: build/copy next batch while the current step runs.
+    """One-slot double-buffer: next host gather (+ H2D) overlaps train_step.
 
-    On CUDA, host→device copies use a side stream so they can overlap with
-    backward/optimizer on the default stream. On CPU this still pipelines
-    the (cheap) gather ahead of the next forward.
+    Hot-loop contract (see ``__main__``)::
+
+        loss = train_step(model, opt, x, y)
+        x, y = loader.next()  # wait for ready slot; producer already refilling
+
+    Async mode (default, ``BDH_PREFETCH_ASYNC=1``): a daemon host thread keeps
+    one pinned host batch in a ``queue.Queue(maxsize=1)``. While ``train_step``
+    runs, the producer refills the slot. ``next()`` only blocks if the step
+    finished before the gather (rare when step ≫ gather).
+
+    CUDA: producer does gather + ``pin_memory``; caller enqueues H2D on a
+    side stream and waits on the recorded event before returning tensors.
+    CPU: producer does gather; caller ``.to(device)`` (no-op copy elision).
+
+    Sync mode (``BDH_PREFETCH_ASYNC=0`` or ``async_host=False``): same one-slot
+    API but preload runs on the caller thread (A/B / debug).
     """
 
-    def __init__(self, split: str = "train"):
+    def __init__(self, split: str = "train", *, async_host: bool | None = None):
         self.split = split
-        self._next = None
+        self._async = USE_PREFETCH_ASYNC if async_host is None else bool(async_host)
         self._stream = torch.cuda.Stream() if device.type == "cuda" else None
+        self._q: queue.Queue | None = None
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._host_next: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._error: BaseException | None = None
+        if self._async:
+            self._q = queue.Queue(maxsize=1)
+            self._thread = threading.Thread(
+                target=self._producer_loop,
+                name="bdh-prefetch",
+                daemon=True,
+            )
+            self._thread.start()
+        else:
+            self.preload()
 
-    def preload(self):
+    def _gather_pinned_host(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Host gather for the producer thread.
+
+        Uses a numpy advanced-index path so the background thread does not
+        launch PyTorch OpenMP work that steals cores from ``train_step``.
+        Public ``get_batch`` / ``_gather_batch_host`` stay on the torch path
+        (seed-stable for tests). Training sample streams remain valid IID.
+        """
+        x, y = _gather_batch_host_numpy(self.split)
+        if device.type == "cuda":
+            if not x.is_pinned():
+                x = x.pin_memory()
+            if not y.is_pinned():
+                y = y.pin_memory()
+        return x, y
+
+    def _producer_loop(self) -> None:
+        assert self._q is not None
+        while not self._stop.is_set():
+            try:
+                batch = self._gather_pinned_host()
+            except BaseException as e:  # noqa: BLE001 — surface on next()
+                self._error = e
+                break
+            # Block until consumer takes the slot or stop is requested.
+            while not self._stop.is_set():
+                try:
+                    self._q.put(batch, timeout=0.05)
+                    break
+                except queue.Full:
+                    continue
+
+    def _to_device(
+        self, x: torch.Tensor, y: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Caller-thread device transfer (CUDA side-stream when available)."""
         if self._stream is not None:
             with torch.cuda.stream(self._stream):
-                self._next = get_batch(self.split)
-        else:
-            self._next = get_batch(self.split)
+                xd = x.to(device, non_blocking=True)
+                yd = y.to(device, non_blocking=True)
+                ev = self._stream.record_event()
+            torch.cuda.current_stream().wait_event(ev)
+            return xd, yd
+        return _to_train_device(x, y)
 
-    def next(self):
-        if self._next is None:
+    def preload(self) -> None:
+        """Sync path only: fill the one host slot on the caller thread."""
+        if self._async:
+            return
+        self._host_next = self._gather_pinned_host()
+
+    def _take_host(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._async:
+            assert self._q is not None
+            while True:
+                if self._error is not None:
+                    raise RuntimeError("prefetch producer failed") from self._error
+                try:
+                    return self._q.get(timeout=0.05)
+                except queue.Empty:
+                    if self._thread is not None and not self._thread.is_alive():
+                        if self._error is not None:
+                            raise RuntimeError(
+                                "prefetch producer failed"
+                            ) from self._error
+                        raise RuntimeError("prefetch producer thread exited")
+                    continue
+        if self._host_next is None:
             self.preload()
-        if self._stream is not None:
-            torch.cuda.current_stream().wait_stream(self._stream)
-        batch = self._next
-        self._next = None
-        self.preload()  # kick next copy/gather immediately
-        return batch
+        host = self._host_next
+        self._host_next = None
+        assert host is not None
+        return host
+
+    def next(self) -> tuple[torch.Tensor, torch.Tensor]:
+        host = self._take_host()
+        if not self._async:
+            # Sync: refill before return (same as historical one-slot behavior).
+            self.preload()
+        # Async: producer already blocked on the empty slot and will refill
+        # while the caller runs train_step — no kick needed here.
+        return self._to_device(*host)
+
+    def close(self) -> None:
+        """Stop producer thread / clear sync slot (tests / shutdown)."""
+        self._stop.set()
+        if self._q is not None:
+            # Unblock a producer stuck on Full / consumer waiting.
+            try:
+                self._q.get_nowait()
+            except queue.Empty:
+                pass
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._thread = None
+        self._q = None
+        self._host_next = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class DataLoaderBatchSource:
@@ -450,7 +591,7 @@ if __name__ == "__main__":
     loss_steps = 0
     for step in range(MAX_ITERS):
         loss = train_step(model, optimizer, x, y)
-        x, y = loader.next()  # already prefetched during step on CUDA side-stream
+        x, y = loader.next()  # host gather overlapped previous train_step; CUDA H2D on side-stream
         det = loss.detach()
         loss_acc = det if loss_acc is None else (loss_acc + det)
         loss_steps += 1
