@@ -1,8 +1,8 @@
-# OPT status — landed work (#1–#376; docs-v74)
+# OPT status — landed work (#1–#388; docs-v75)
 
 Private sandbox: `katulevskiy/bdh-gpu-opt`.
 
-Documentation coverage: #350–#376. This branch is based on current main tip `5c32568` (#378); #377 and #378 landed after the requested refresh range and remain outside this documentation scope. The documented landing tip is `f2a8203` (#376).
+Documentation coverage: #350–#388. This branch is based on current main tip `dabc3db` (#388); the documented landing tip is `dabc3db` (#388).
 
 ## Evidence boundary
 
@@ -17,15 +17,15 @@ This sandbox is CPU-only (`torch 2.14.0+cu130`, `cuda=False`). CPU tests establi
 | Area | Current contract | Evidence boundary |
 |---|---|---|
 | Device | CPU-only; CUDA/Triton paths skip or fall back cleanly here | No GPU claim |
-| Attention | `eager` default; `blocked`, `online`, `triton`, and `cuda` opt-in; strict-past backward and padded/strided V contracts covered on CPU | Raw strict-tril parity on CPU; GPU measure open |
-| AUTO | Off by default; decode threshold remains independent from the optional cold threshold; blank/whitespace fallback and decode-only overrides preserve the gates | CPU dispatch/parity only |
-| RoPE | `eager` default; fused path opt-in; paired output-slot aliasing is rejected safely | CPU shape/parity only; fused GPU validation open |
+| Attention | `eager` default; `blocked`, `online`, `triton`, and `cuda` opt-in; strict-past backward plus padded/strided Q/K/V and packed-decode V contracts are covered on CPU | Raw strict-tril parity on CPU; GPU measure open |
+| AUTO | Off by default; decode threshold remains independent from the optional cold threshold; blank/whitespace fallback and clearing a prior cold override resume the live decode gate | CPU dispatch/parity only |
+| RoPE | `eager` default; fused path opt-in; paired output-slot aliasing is rejected safely; mixed-dtype paired T=1 output parity is covered | CPU shape/parity only; fused GPU validation open |
 | Compile | Off by default; invalid and normalized `BDH_COMPILE_PROBE` values fail closed to `train_bwd` without changing defaults | CUDA graphs/inductor unmeasured |
 | AMP | fp32/off by default; bf16/fp16 CPU contexts are contract-covered | CPU smoke only; GPU train throughput open |
 | Sparse ReLU | Off by default; explicit probe guardrails distinguish no-sample and density failure exits and skip crossover work | CPU density/control flow only; no sparse-kernel result |
-| DataLoader | Repeated worker-backed batches preserve CPU tensor identity without CUDA setup | CPU identity contract only; H2D overlap unmeasured |
-| Sampling | Strided singleton output views preserve RNG parity, identity, and neighbor isolation | CPU contract only |
-| Packed generate | Cache path remains cat-free (`aten::cat=0`) | CPU operator contract, not GPU timing |
+| DataLoader | Repeated worker-backed batches preserve CPU tensor identity and the CPU H2D opt-out remains clean without CUDA setup | CPU identity/opt-out contracts only; H2D overlap unmeasured |
+| Sampling | Strided and zero-stride singleton output views preserve RNG parity, identity, and neighbor isolation | CPU contract only |
+| Packed generate | Cache path remains cat-free (`aten::cat=0`); interrupted cat probes restore their hook; packed decode preserves raw score×V semantics across capacity-strided V layouts | CPU operator contract, not GPU timing |
 
 The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call for forward, and 394/call for generate, with `aten::cat=0` and `aten::contiguous=0`. These are CPU call-count observations, not GPU performance claims.
 
@@ -60,6 +60,18 @@ The retained profile-v20 baseline is `aten::copy_` 2/call for attention, 12/call
 | **#374** | `opt/amp-train-v14` / AMP | Active CPU bf16/fp16 contexts never report a CUDA throughput claim | CPU contract only |
 | **#375** | `opt/sparse-probe-v14` / sparse probe | Density-guardrail failure has a distinct exit and skips CPU crossover work | CPU contract only; no GPU claim |
 | **#376** | `opt/blocked-tile-v14` / blocked prefill | Low-precision capacity-padded, non-contiguous V views preserve dtype, first-row masking, and raw strict-tril parity | CPU contract only |
+| **#377** | `opt/auto-thr-v15` / AUTO | Clearing a previously parsed blank cold-threshold override resumes the live decode threshold, including strict equality and above-threshold behavior | CPU contract only |
+| **#378** | `opt/online-decode-v15` / online decode | Nonempty float64 tiled decode preserves query dtype while matching eager raw score×V semantics | CPU contract only; no GPU claim |
+| **#379** | `opt/docs-v74` / docs | Previous matrix/backlog refresh through #376 | Docs-only; P0 unchanged |
+| **#380** | `opt/scorev-v15` / score-V | Capacity-strided Q/K/V views preserve blocked/online output parity with eager strict-tril score×V math | CPU contract only |
+| **#381** | `opt/layout-v14` / sampling | Zero-stride `(B, 1)` outputs preserve multinomial/top-k identity, RNG parity, and neighbor isolation | CPU contract only |
+| **#382** | `opt/gen-bench-v13` / generate benchmark | Interrupted `count_torch_cat` probes restore the temporary `torch.cat` hook | CPU contract only |
+| **#383** | `opt/rope-fuse-v14` / RoPE | Paired T=1 fp16-input/fp32-cache output parity remains covered | CPU contract only; fused GPU validation open |
+| **#384** | `opt/compile-v15` / compile | Unsupported probe names preserve the CPU-safe `train_bwd` cleanup contract | CPU contract only |
+| **#385** | `opt/cuda-build-v13` / CUDA build | `nvcc` directory discovery remains covered without changing force-CPU opt-in behavior | CPU contract only |
+| **#386** | `opt/attn-bwd-v14` / attention backward | Analytic strict-tril backward parity holds for non-contiguous Q/K/V views | CPU contract only |
+| **#387** | `opt/prefetch-v14` / DataLoader | CPU DataLoader H2D opt-out remains explicit and clean under the deeper contract | CPU contract only; overlap unmeasured |
+| **#388** | `opt/decode-gemm-v13` / decode | Shared and per-head capacity-strided V layouts preserve raw score×V semantics across CPU-safe decode dispatch | CPU contract only; no GPU timing |
 
 ## Defaults and operator guidance
 
