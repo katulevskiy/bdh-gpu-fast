@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#44)
+# OPT status — landed work (#1–#49)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip documented here: `f7c69bf` (`#45` docs through #44). This PR: `opt/compile-blocked` — compile×blocked×AUTOGRAD matrix + SelfAttnFn Dynamo fix.
+Tip documented here: `c7a7471` (`#48` gen-sample). This PR: `opt/compile-guidance` — warn COMPILE+blocked; document eager compile path.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -21,7 +21,7 @@ Hard constraint (all opts): attention stays **raw scores** × **strict lower-tri
 | Kernel wins (Triton / CUDA fused score×V, fused RoPE, AMP train throughput) | **Not measured** — scaffolds + harnesses in-tree; GPU benches skip cleanly |
 | Default train / attn path | Still **eager** + **fp32** — opt-in env flags only |
 | CPU `blocked` / `triton` (→blocked) attn | Usually **slower** than eager (Python tile loop); keep for parity / peak-memory, not default |
-| CPU `BDH_COMPILE=1` | Small warm-inductor train-step win possible (~1.5× on tiny cfg after cache); **not** a CUDA-graph / GPU claim |
+| CPU `BDH_COMPILE=1` | **Only with `IMPL=eager`**: ~1.5× warm train-step (#46: 5.25 vs 7.76 ms). `COMPILE=1`+blocked|online|triton = measured regression (~70–100×); `maybe_compile` warns. GPU compile still open |
 | CPU AMP (`BDH_AMP_DTYPE`) | Correctness smoke; often **slower** than fp32 on CPU |
 | Sparse ReLU | **Default OFF**; short-train densifies but not to paper ~5%; CPU sparse≪dense |
 
@@ -75,9 +75,20 @@ export BDH_ROPE_IMPL=fused
 
 `generate()` is `@torch.compiler.disable`. Changing `BDH_ATTN_IMPL` after compile → recompile. On CPU, `reduce-overhead` does **not** give CUDA graphs.
 
+**Operator guidance (CPU, after #46):** recommend `BDH_COMPILE=1` **only** with
+`BDH_ATTN_IMPL=eager` (optionally `BDH_ATTN_AUTOGRAD=1` — still 0 Dynamo graph
+breaks). `maybe_compile` logs a clear warning if `COMPILE=1` with
+`IMPL∈{blocked,online,triton}` (measured CPU regression). Defaults unchanged
+(`COMPILE=0`, `IMPL=eager`). **GPU** inductor / CUDA graphs still unmeasured.
+
 ```bash
 BDH_COMPILE=0 python train.py
-BDH_COMPILE=1 BDH_COMPILE_PROBE=train python train.py
+# recommended CPU compile train path:
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_COMPILE_PROBE=train python train.py
+# optional analytic bwd (still 0 graph breaks on eager):
+BDH_COMPILE=1 BDH_ATTN_IMPL=eager BDH_ATTN_AUTOGRAD=1 python train.py
+# warns (CPU regression) — do not use as default train:
+BDH_COMPILE=1 BDH_ATTN_IMPL=blocked python train.py
 ```
 
 ### `BDH_PREFETCH_ASYNC` — host batch prefetch (default `1`)
@@ -114,7 +125,7 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 
 ---
 
-## Landed opts (#1–#44)
+## Landed opts (#1–#49)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -162,6 +173,11 @@ BDH_AMP_DTYPE=float16 python train.py    # GradScaler only on CUDA
 | **42** | `opt/prefetch-v2` | Host-thread depth-1 batch prefetch, numpy producer gather, optional CUDA pin/H2D overlap; `BDH_PREFETCH_ASYNC=0` sync A/B | Synthetic overlap ~1.7×; real CPU e2e ~noise/modest | GPU pin/H2D overlap unmeasured |
 | **43** | `opt/docs-matrix-v2` | Refreshed `OPT_STATUS` / `OPT_BACKLOG` through #40 and README pointer | Docs only | — |
 | **44** | `opt/gen-host` | Warm full-span RoPE table; hoist dispatch/sampling; `inference_mode`; preserve cat-free generate and default eager math | CPU generate ~52.34→39.84 ms (~1.31×); `arange` 33→1; tokens match | No GPU measurement |
+| **45** | `opt/docs-matrix-v3` | Refresh OPT matrix / backlog through #44 | Docs only | — |
+| **46** | `opt/compile-blocked` | Compile×blocked×AUTOGRAD train matrix; `StrictTrilSelfAttnFn` Dynamo fix | COMPILE+eager ~1.5×; COMPILE+blocked ~70–100× slower; 0 graph breaks | GPU open |
+| **47** | `opt/encoder-fuse` | Hybrid encoder: default einsum; optional bias → `F.linear` epilogue | Always-on linear lost on CPU; hybrid landed | GPU linear epilogue open |
+| **48** | `opt/gen-sample` | Fuse T=1 lm_head+sample / optional fused top-k; reuse logits/probs buffers | Large-V top_k ~1.5×; default-V wall ~noise; tokens-match | GPU decode open |
+| **49** | `opt/compile-guidance` | Warn COMPILE+blocked/online/triton; document eager compile path | Advisory warn; defaults unchanged | GPU still open |
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
@@ -177,7 +193,7 @@ Related early landings without a #1–#33 slot (still on main, documented in not
 | `BDH_ATTN_IMPL` | `eager` | GPU after microbench win; or `blocked` for peak-mem experiments |
 | `BDH_ATTN_AUTOGRAD` | off / unset | `1` when training with non-eager attn; blocked/online → tiled analytic bwd |
 | `BDH_ROPE_IMPL` | `eager` | `fused` after GPU RoPE bench |
-| `BDH_COMPILE` | `0` | `1` after probe succeeds; prefer GPU for real win |
+| `BDH_COMPILE` | `0` | CPU: `1` **only with `IMPL=eager`** (#46/#49); GPU inductor still open |
 | `BDH_PREFETCH_ASYNC` | `1` | `0` for synchronous preload / A-B; GPU pin/H2D overlap still needs measurement |
 | `BDH_AMP_DTYPE` | `float32` | `bf16`/`fp16` on CUDA train boxes |
 | Sparse ReLU | OFF | Only if density + GPU sparse kernel win |
@@ -206,5 +222,6 @@ python benchmarks/bench_gpu_attn.py --mode decode --T 512
 - PRs or pushes to `pathwaycom/*`
 - Claiming GPU speedups from CPU medians or profiler-inflated absolute times
 - Defaulting `BDH_ATTN_IMPL=blocked` on CPU
+- Recommending `BDH_COMPILE=1` with `blocked`/`online`/`triton` on CPU (warns; #46/#49)
 - Re-introducing `aten::cat` in packed `generate`
 - Wiring sparse ReLU into default `BDH.forward` without a measured win

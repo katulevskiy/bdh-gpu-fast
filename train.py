@@ -469,12 +469,25 @@ def maybe_compile(
     - ``generate()`` is dynamic-length and marked ``torch.compiler.disable``.
     - RoPE table cache skips Python attribute writes while Dynamo is tracing.
     - ``BDH_ATTN_IMPL`` / env are specialized at compile time (change → recompile).
+    - On CPU, recommend ``BDH_COMPILE=1`` only with ``BDH_ATTN_IMPL=eager``
+      (#46); ``blocked``/``online``/``triton`` log a warning (measured regression).
     - CUDA graphs (``mode='reduce-overhead'``) need a real GPU + static shapes;
       on CPU this mode is accepted but does **not** claim graph capture wins.
     """
     if not USE_COMPILE:
         print("torch.compile disabled (set BDH_COMPILE=1 to enable)")
         return model
+
+    # CPU matrix (#46): COMPILE=1 + eager ~5.25 ms vs ~7.76 eager baseline;
+    # COMPILE=1 + blocked ~70–100× slower. Warn only — do not change defaults.
+    _attn_raw = os.environ.get("BDH_ATTN_IMPL", "eager").strip().lower()
+    if _attn_raw in ("blocked", "online", "triton"):
+        print(
+            f"torch.compile warning: BDH_ATTN_IMPL={_attn_raw} with BDH_COMPILE=1 "
+            "is a measured CPU train-step regression vs eager compile "
+            "(#46: blocked ~70–100× slower than COMPILE=1+eager). "
+            "Prefer BDH_ATTN_IMPL=eager when compiling on CPU; GPU still open."
+        )
 
     probe = COMPILE_PROBE if COMPILE_PROBE in ("eval", "train", "train_bwd") else "train"
     device_tag = f"{device.type}" + (
