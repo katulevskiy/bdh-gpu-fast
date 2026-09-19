@@ -206,14 +206,20 @@ def test_auto_cold_mirrors_decode_threshold(monkeypatch):
     assert resolve_cold_impl(thr + 1) != "eager"
 
 
-def test_auto_cold_dispatch_preserves_blocked_contract_cpu(monkeypatch):
-    """AUTO cold dispatch selects CPU blocked and preserves strict-tril parity."""
+@pytest.mark.parametrize("value_heads", [1, 2])
+def test_auto_cold_dispatch_preserves_blocked_contract_cpu(monkeypatch, value_heads):
+    """AUTO cold dispatch keeps raw-score parity for shared/head-matched V."""
     monkeypatch.setenv("BDH_ATTN_AUTO", "1")
     monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "256")
     monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
     _bump()
 
-    Q, K, V = _qkv(257, B=2, H=2, N=5, D=4, seed=211)
+    Q, K, V_shared = _qkv(257, B=2, H=2, N=5, D=4, seed=211)
+    if value_heads == 1:
+        V = V_shared
+    else:
+        g = torch.Generator().manual_seed(212)
+        V = torch.randn(2, value_heads, 257, 4, generator=g)
     assert resolve_cold_impl(Q.size(2)) == "blocked"
     got = bdh_attn(Q, K, V)
     ref = eager_tril_attn(Q, K, V)
