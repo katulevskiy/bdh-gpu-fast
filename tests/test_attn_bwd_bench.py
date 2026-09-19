@@ -20,3 +20,14 @@ def test_bench_skips_cleanly_without_cuda(monkeypatch, capsys):
     monkeypatch.setattr(bench_attn_bwd.torch.cuda, "is_available", lambda: False)
     assert bench_attn_bwd.main([]) == 0
     assert "SKIP: CUDA unavailable" in capsys.readouterr().out
+
+
+def test_bench_nograd_skip_reason_is_explicit():
+    exc = RuntimeError("element 0 of tensors does not require grad")
+    reason = bench_attn_bwd._nograd_skip_reason("0", "cuda", exc)
+    assert reason == (
+        "cuda forward exposes no autograd graph with AUTOGRAD=0: "
+        "element 0 of tensors does not require grad"
+    )
+    assert bench_attn_bwd._nograd_skip_reason("1", "cuda", exc) is None
+    assert bench_attn_bwd._nograd_skip_reason("0", "blocked", exc) is None
