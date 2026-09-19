@@ -239,6 +239,9 @@ class BDH(nn.Module):
         self.attn = Attention(config)
 
         self.ln = nn.LayerNorm(D, elementwise_affine=False, bias=False)
+        # Cached for F.layer_norm (same eps / shape as self.ln; no affine params).
+        self._ln_shape = (D,)
+        self._ln_eps = 1e-5
         self.embed = nn.Embedding(config.vocab_size, D)
         self.drop = nn.Dropout(config.dropout)
         self.encoder_v = nn.Parameter(torch.zeros((nh, D, N)).normal_(std=0.02))
@@ -256,6 +259,26 @@ class BDH(nn.Module):
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def _ln(self, x: torch.Tensor) -> torch.Tensor:
+        """Affine-free LayerNorm over the last dim (bit-identical to ``self.ln``)."""
+        return F.layer_norm(x, self._ln_shape, eps=self._ln_eps)
+
+    @staticmethod
+    def _proj_relu(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        """Encoder / encoder_v GEMM + in-place ReLU (one buffer, no 2nd ReLU alloc)."""
+        return F.relu(x @ weight, inplace=True)
+
+    def _residual_ln(self, x: torch.Tensor, y_mlp: torch.Tensor) -> torch.Tensor:
+        """``LN(x + LN(y_mlp))`` reusing the inner LN buffer for the residual sum.
+
+        Avoids a separate ``x + y`` temporary. Autograd-safe: in-place add into the
+        inner LN *output* (backward still has ``y_mlp``); bit-identical to
+        ``self.ln(x + self.ln(y_mlp))``.
+        """
+        y = F.layer_norm(y_mlp, self._ln_shape, eps=self._ln_eps)
+        y.add_(x)
+        return F.layer_norm(y, self._ln_shape, eps=self._ln_eps)
 
     def forward(
         self,
@@ -280,7 +303,7 @@ class BDH(nn.Module):
         N = D * C.mlp_internal_dim_multiplier // nh
 
         x = self.embed(idx).unsqueeze(1)
-        x = self.ln(x)
+        x = self._ln(x)
 
         packed = isinstance(cache, CacheManager)
         rope_start = 0
@@ -292,9 +315,12 @@ class BDH(nn.Module):
         # One cos/sin for all layers (same T, rope_start) — cuts RoPE trig allocs.
         cos_sin = self.attn.rope_cos_sin(T, rope_start, x.device)
 
+        # Inference-only: safe in-place mul on ReLU buffers (training needs ReLU mask).
+        grad_enabled = torch.is_grad_enabled()
+
         for level in range(C.n_layer):
             # Q/K latent: fuse ReLU in-place onto encoder GEMM output (no 2nd buffer).
-            x_sparse = F.relu(x @ self.encoder, inplace=True)
+            x_sparse = self._proj_relu(x, self.encoder)
 
             past_kr = past_v = None
             if packed:
@@ -323,18 +349,23 @@ class BDH(nn.Module):
                         "v": torch.cat([past_v, new_v], dim=2),
                     }
 
-            yKV = self.ln(yKV)
+            yKV = self._ln(yKV)
 
             # encoder_v projection + in-place ReLU (same fuse as Q path)
-            y_sparse = F.relu(yKV @ self.encoder_v, inplace=True)
-            xy_sparse = x_sparse * y_sparse
+            y_sparse = self._proj_relu(yKV, self.encoder_v)
+            if grad_enabled:
+                xy_sparse = x_sparse * y_sparse
+            else:
+                # Reuse x_sparse storage; ReLU outputs not needed for backward.
+                x_sparse.mul_(y_sparse)
+                xy_sparse = x_sparse
             xy_sparse = self.drop(xy_sparse)
 
             # Contiguous (B, T, nh, N) before merge — friendlier for compile/GEMM
             xy = xy_sparse.permute(0, 2, 1, 3).contiguous().view(B, 1, T, N * nh)
             yMLP = xy @ self.decoder
-            y = self.ln(yMLP)
-            x = self.ln(x + y)
+            # Residual + double LN: reuse inner LN buffer for (x + LN(yMLP)).
+            x = self._residual_ln(x, yMLP)
 
         if packed:
             cache.commit()

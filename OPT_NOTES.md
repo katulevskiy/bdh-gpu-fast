@@ -661,6 +661,34 @@ out = tril(Q @ K.T, diagonal=-1) @ V   # no softmax, no 1/sqrt(d)
 | cached tokenwise decode | float16 / bfloat16 | 5e-1 | 5e-1 |
 
 Decode accumulates step error under CPU autocast (observed bf16 max up to ~0.3).
+## opt/ln-fuse — LayerNorm + residual + encoder projection temps
+
+**Branch:** `opt/ln-fuse` (private `katulevskiy/bdh-gpu-opt` only).
+
+### Goals
+
+Cut temporaries on the block epilogue `LN(yMLP)` → residual add → `LN(x+y)` and
+keep encoder / encoder_v `GEMM+ReLU` fused. Preserve bit-identical logits/grads
+vs baseline (`torch.equal` / existing pytest). Leave `tril(-1)`, `CacheManager`,
+qkv-fuse RoPE sharing, and `BDH_ATTN_IMPL` untouched.
+
+### Changes (`bdh.py`)
+
+1. **`_ln` / cached shape** — `F.layer_norm(x, self._ln_shape, eps=1e-5)` with
+   `_ln_shape=(D,)` matching affine-free `self.ln` (module kept for API /
+   state_dict compatibility; no affine params).
+
+2. **`_residual_ln(x, y_mlp)`** — `y = LN(y_mlp); y.add_(x); return LN(y)`.
+   Reuses the inner LN output buffer for the residual sum so the block no longer
+   allocates a separate `x + y` tensor. Autograd-safe (in-place into LN *output*;
+   backward still has `y_mlp`). Bit-identical to `LN(x + LN(y_mlp))`.
+
+3. **`_proj_relu`** — shared helper for `F.relu(x @ weight, inplace=True)` on
+   encoder and encoder_v (same fuse as `opt/qkv-fuse`).
+
+4. **Inference `x_sparse.mul_(y_sparse)`** — when `not torch.is_grad_enabled()`,
+   product reuses the Q ReLU buffer (training still uses out-of-place `*` so the
+   ReLU mask stays valid for backward).
 
 ### Correctness
 
@@ -681,6 +709,38 @@ No GPU on this box — AMP is for CUDA throughput.
 - No PRs to `pathwaycom/bdh`
 - No softmax / diagonal inclusion / scale
 - No duplicate doubling cache alongside CacheManager
+.venv/bin/python -m pytest tests/ -v
+# 74 passed, 4 skipped
+# includes test_vs_baseline (logits/grads/attn), tril(-1), CacheManager,
+# BDH_ATTN_IMPL hooks, attn-bwd
+```
+
+No intentional numerical approximations (fp32 bit-identical vs prior optimized path
+and vs `bdh_baseline.py` on dropout=0).
+
+### CPU timing (honest, noisy box)
+
+```text
+.venv/bin/python benchmarks/bench_forward.py
+# device=cpu  layers=4 d=128 B=4 T=128
+# forward baseline median:  2269.02 ms
+# forward optimized median: 2021.95 ms  (1.12× cumulative vs frozen baseline)
+# generate(32) baseline:      93.04 ms
+# generate(32) optimized:     31.63 ms  (2.94× — mostly KV cache from earlier opts)
+
+# Residual LN microbench only (4× LN(y)+LN(x+y) vs LN(y);y.add_(x);LN(y), fresh tensors):
+# old ~287 ms → new ~204 ms median (~1.4× on that slice)
+```
+
+Absolute ms are load-inflated on this multi-agent CPU box; treat ratios as rough.
+No CUDA here — LN+residual fuse is an alloc/traffic win that should also help GPU
+eager / compile, not a new kernel.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- No change to attention math / `BDH_ATTN_IMPL`
+- No affine LN / RMSNorm swap
 ## opt/inc-decode — efficient single-token decode (2026-09-19)
 
 **Branch:** `opt/inc-decode` (private `katulevskiy/bdh-gpu-opt` only).
