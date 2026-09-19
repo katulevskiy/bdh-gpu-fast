@@ -240,6 +240,12 @@ def test_triton_gate_and_backend_info_are_cpu_safe():
     assert info["triton_usable"] is False
 
 
+def test_triton_skip_reason_rejects_non_tensor_before_runtime_probe():
+    """Invalid primary inputs get a stable contract reason on every host."""
+    assert triton_rope_skip_reason(None) == "v-not-tensor"
+    assert _can_use_triton_rope(None) is False
+
+
 def test_triton_skip_reason_is_actionable_on_cpu():
     """The scaffold reports why CPU inputs stay on the safe fallback."""
     _, _, cos, sin, v, _ = _cis_and_v(T=8, seed=261)

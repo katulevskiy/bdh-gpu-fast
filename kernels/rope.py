@@ -301,10 +301,12 @@ def triton_rope_skip_reason(
     and tests can distinguish an expected scaffold skip from a kernel error.
     ``None`` means the current inputs satisfy the conservative launch gate.
     """
-    if not _HAS_TRITON:
-        return "triton-not-installed"
+    # Validate the primary input before probing optional runtime state so the
+    # diagnostic remains stable even when Triton is unavailable.
     if not isinstance(v, torch.Tensor):
         return "v-not-tensor"
+    if not _HAS_TRITON:
+        return "triton-not-installed"
     if not v.is_cuda:
         return "v-not-cuda"
     if not torch.cuda.is_available():
