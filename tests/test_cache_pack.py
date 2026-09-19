@@ -425,3 +425,137 @@ def test_get_past_never_contiguous_call():
     finally:
         torch.Tensor.contiguous = orig
     assert calls["n"] == 0
+
+
+def test_geometric_growth_fewer_grows_than_linear():
+    """cache-page: doubling beats linear +page_size reallocs on long S."""
+    cfg = _small_cfg()
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    page, max_seq = 16, 512
+    cm = CacheManager.from_config(
+        cfg, batch_size=1, max_seq=max_seq, device="cpu", page_size=page
+    )
+    assert cm.capacity == page
+    # Tokenwise fill to max_seq — each step may grow.
+    for _ in range(max_seq):
+        for level in range(cfg.n_layer):
+            cm.append(
+                level,
+                torch.zeros(1, cfg.n_head, 1, N),
+                torch.zeros(1, 1, 1, cfg.n_embd),
+            )
+        cm.commit()
+    assert cm.seq_len == max_seq
+    assert cm.capacity == max_seq
+    # Linear would need (max_seq/page - 1) = 31 grows; geometric ≈ log2.
+    linear_grows = max_seq // page - 1
+    assert cm.n_grows < linear_grows // 2, (
+        f"expected << {linear_grows} linear grows, got {cm.n_grows}"
+    )
+    assert cm.n_grows <= 6  # 16→32→64→128→256→512
+    # Total prefix recopied ≪ triangular sum of linear growth.
+    # Linear copies ~ page*(1+2+...+(n-1)) * stride; geometric ~ O(S)*stride.
+    elem_stride = cfg.n_layer * 1 * (cfg.n_head * N + cfg.n_embd) * 4
+    linear_bytes = elem_stride * page * (linear_grows * (linear_grows + 1) // 2)
+    assert cm.bytes_copied_on_grow < linear_bytes // 2
+
+
+def test_ensure_capacity_single_grow():
+    cfg = _small_cfg()
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    cm = CacheManager.from_config(
+        cfg, 1, max_seq=256, device="cpu", page_size=8
+    )
+    cm.ensure_capacity(200)
+    assert cm.n_grows == 1
+    assert cm.capacity >= 200
+    assert cm.capacity <= 256
+    # Further appends to 200 must not grow again.
+    grows_after = cm.n_grows
+    for _ in range(200):
+        for level in range(cfg.n_layer):
+            cm.append(
+                level,
+                torch.randn(1, cfg.n_head, 1, N),
+                torch.randn(1, 1, 1, cfg.n_embd),
+            )
+        cm.commit()
+    assert cm.n_grows == grows_after
+    assert cm.seq_len == 200
+
+
+def test_reserve_and_stage_across_page_grow():
+    """reserve/stage keep written values across a mid-stream geometric grow."""
+    cfg = _small_cfg()
+    N = cfg.mlp_internal_dim_multiplier * cfg.n_embd // cfg.n_head
+    cm = CacheManager.from_config(
+        cfg, 1, max_seq=64, device="cpu", page_size=4
+    )
+    # Fill first page
+    for level in range(cfg.n_layer):
+        kr = torch.full((1, cfg.n_head, 4, N), 1.0)
+        v = torch.full((1, 1, 4, cfg.n_embd), 2.0)
+        cm.append(level, kr, v)
+    cm.commit()
+    assert cm.capacity == 4
+    # reserve forces grow (need 5); write markers, commit
+    for level in range(cfg.n_layer):
+        dst_kr, dst_v = cm.reserve(level, 1)
+        dst_kr.fill_(3.0)
+        dst_v.fill_(4.0)
+    cm.commit()
+    assert cm.n_grows >= 1
+    assert cm.capacity >= 5
+    past_kr, past_v = cm.get_past(0)
+    assert past_kr.shape[2] == 5
+    assert torch.allclose(past_kr[:, :, :4], torch.full_like(past_kr[:, :, :4], 1.0))
+    assert torch.allclose(past_kr[:, :, 4:], torch.full_like(past_kr[:, :, 4:], 3.0))
+    assert torch.allclose(past_v[:, :, :4], torch.full_like(past_v[:, :, :4], 2.0))
+    assert torch.allclose(past_v[:, :, 4:], torch.full_like(past_v[:, :, 4:], 4.0))
+
+    # stage a multi-token block that may grow again
+    new_kr = torch.full((1, cfg.n_head, 3, N), 5.0)
+    new_v = torch.full((1, 1, 3, cfg.n_embd), 6.0)
+    all_kr, all_v = cm.stage(0, new_kr, new_v)
+    for level in range(1, cfg.n_layer):
+        cm.stage(
+            level,
+            torch.full((1, cfg.n_head, 3, N), 5.0),
+            torch.full((1, 1, 3, cfg.n_embd), 6.0),
+        )
+    assert all_kr.shape[2] == 8
+    assert torch.equal(all_kr[:, :, 5:], new_kr)
+    assert torch.equal(all_v[:, :, 5:], new_v)
+    cm.commit()
+    assert cm.seq_len == 8
+
+
+def test_generate_paged_long_zero_cat_and_matches():
+    """Long paged generate: still aten::cat=0 and matches fixed-capacity path."""
+    cfg = _small_cfg()
+    m = _model(cfg, seed=17)
+    prompt = torch.randint(0, cfg.vocab_size, (1, 8))
+    n_new = 48
+    cats = {"n": 0}
+    orig = torch.cat
+
+    def hooked(*a, **k):
+        cats["n"] += 1
+        return orig(*a, **k)
+
+    torch.manual_seed(123)
+    a = m.generate(prompt.clone(), max_new_tokens=n_new, temperature=1.0)
+    torch.cat = hooked
+    try:
+        torch.manual_seed(123)
+        with torch.no_grad():
+            b = m.generate(
+                prompt.clone(),
+                max_new_tokens=n_new,
+                temperature=1.0,
+                cache_page_size=8,
+            )
+    finally:
+        torch.cat = orig
+    assert cats["n"] == 0, f"expected 0 torch.cat, got {cats['n']}"
+    assert torch.equal(a, b)

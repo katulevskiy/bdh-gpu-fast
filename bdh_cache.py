@@ -15,6 +15,13 @@ v3 (decode-copy):
     (skips a host ``copy_`` when storage dtype matches compute).
   - ``get_past`` / ``stage`` return ``narrow`` views — never ``.contiguous()``.
   - ``copy_`` into packed slots casts without an intermediate ``.to()`` alloc.
+v4 (cache-page):
+  - Geometric page growth (``≥2×`` capacity, page-aligned, ≤``max_seq``) so
+    long generate realloc copies stay O(S) instead of O(S²) linear ``+page``.
+  - ``_grow`` uses ``torch.empty`` + prefix ``copy_`` (no zero-fill of free slots).
+  - ``ensure_capacity(need)`` public hint; ``n_grows`` / ``bytes_copied_on_grow``.
+  - ``reserve`` / ``stage`` still grow-before-write; prior views are invalidated
+    by a grow (forward already reserves before ``get_past``).
 
 Optional ``storage_dtype=torch.float16`` stores half and casts back to
 ``compute_dtype`` (default fp32) before attention matmuls so RoPE score GEMMs
@@ -74,6 +81,9 @@ class CacheManager:
         self.page_size = page_size
         self.seq_len = 0
         self._pending_t: Optional[int] = None
+        # Paging stats (cache-page): realloc count + bytes of live prefix recopied.
+        self.n_grows = 0
+        self.bytes_copied_on_grow = 0
 
         # Initial capacity: full max_seq unless paging (start with one page).
         if page_size is None:
@@ -139,8 +149,31 @@ class CacheManager:
             page_size=page_size,
         )
 
+    def ensure_capacity(self, need: int) -> None:
+        """Public grow hint so ``need`` slots fit (geometric when paging).
+
+        No-op when already large enough. Useful for long generate when the
+        caller knows final S and set ``page_size`` — one realloc instead of
+        mid-stream grows. Default ``generate`` still preallocates full
+        ``max_seq`` when ``cache_page_size is None`` (unchanged).
+        """
+        self._ensure_capacity(need)
+
+    def _next_capacity(self, need: int) -> int:
+        """Geometric page growth: ``max(need, 2*capacity)``, page-aligned, ≤max_seq.
+
+        Linear ``capacity + page_size`` recopied the live prefix every page on
+        long S (≈ O(S²) bytes). Doubling keeps total grow-copy bytes ≈ O(S).
+        """
+        ps = self.page_size
+        assert ps is not None
+        target = max(int(need), self.capacity * 2)
+        # Round up to a whole number of pages.
+        target = ((target + ps - 1) // ps) * ps
+        return min(self.max_seq, target)
+
     def _ensure_capacity(self, need: int) -> None:
-        """Grow by ``page_size`` until ``need`` fits, hard-capped at ``max_seq``."""
+        """Grow until ``need`` fits (geometric pages), hard-capped at ``max_seq``."""
         if need <= self.capacity:
             return
         if need > self.max_seq:
@@ -151,15 +184,13 @@ class CacheManager:
             raise RuntimeError(
                 f"cache overflow: need {need} slots but max_seq={self.max_seq}"
             )
-        new_cap = self.capacity
-        while new_cap < need:
-            new_cap = min(self.max_seq, new_cap + self.page_size)
-        self._grow(new_cap)
+        self._grow(self._next_capacity(need))
 
     def _grow(self, new_cap: int) -> None:
         if new_cap <= self.capacity:
             return
-        new_kr = torch.zeros(
+        # empty: free slots are written before read (reserve/append/stage).
+        new_kr = torch.empty(
             self.n_layer,
             self.batch_size,
             self.n_head,
@@ -168,7 +199,7 @@ class CacheManager:
             dtype=self.storage_dtype,
             device=self.device,
         )
-        new_v = torch.zeros(
+        new_v = torch.empty(
             self.n_layer,
             self.batch_size,
             1,
@@ -182,9 +213,15 @@ class CacheManager:
         if used > 0:
             new_kr[:, :, :, :used].copy_(self._kr_buf[:, :, :, :used])
             new_v[:, :, :, :used].copy_(self._v_buf[:, :, :, :used])
+            elem = self._kr_buf.element_size()
+            # KR: (L,B,nh,used,N) + V: (L,B,1,used,D)
+            self.bytes_copied_on_grow += used * self.n_layer * self.batch_size * (
+                self.n_head * self.n_latent + self.n_embd
+            ) * elem
         self._kr_buf = new_kr
         self._v_buf = new_v
         self.capacity = new_cap
+        self.n_grows += 1
 
     def get_past(
         self, level: int
@@ -227,6 +264,10 @@ class CacheManager:
         tensors (storage dtype). Does not advance ``seq_len`` — call
         ``commit`` after all layers. When ``T`` mismatches other layers'
         pending width, raises like ``append``.
+
+        May geometrically grow the packed buffers first; any previously
+        returned ``get_past`` / ``reserve`` / ``stage`` views are then
+        invalid (``BDH.forward`` reserves before ``get_past`` for this reason).
         """
         if T < 1:
             raise ValueError("reserve T must be >= 1")
@@ -263,6 +304,9 @@ class CacheManager:
         run tril over a single slice. Does not advance ``seq_len`` (call
         ``commit`` after all layers). Returned tensors are cast to
         ``compute_dtype`` when storage differs. Never calls ``.contiguous()``.
+
+        Grows geometrically when paging and ``seq_len+T`` exceeds capacity;
+        returned views always reference post-grow storage.
         """
         end = self._write_block(level, new_kr, new_v)
         kr = self._kr_buf[level].narrow(2, 0, end)
@@ -282,6 +326,8 @@ class CacheManager:
     def reset(self) -> None:
         self.seq_len = 0
         self._pending_t = None
+        self.n_grows = 0
+        self.bytes_copied_on_grow = 0
 
     @property
     def bytes_allocated(self) -> int:
