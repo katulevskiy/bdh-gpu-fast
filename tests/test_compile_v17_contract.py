@@ -485,3 +485,68 @@ def test_eval_probe_is_no_grad_and_restores_caller_state(
         )
     assert "torch.compile enabled (mode=default, probe=eval" in captured
     assert "first probe failed" not in captured
+
+
+@pytest.mark.parametrize("caller_training", [False, True])
+def test_failed_eval_probe_discards_wrapper_and_restores_state(
+    monkeypatch, capsys, caller_training
+):
+    """A failed eval probe keeps the eager module and its caller state."""
+    import train as tr
+
+    monkeypatch.setenv("BDH_COMPILE", "1")
+    monkeypatch.setenv("BDH_COMPILE_PROBE", "eval")
+    monkeypatch.setenv("BDH_COMPILE_MODE", "default")
+    monkeypatch.setenv("BDH_COMPILE_FULLGRAPH", "0")
+    importlib.reload(tr)
+
+    compile_kwargs = {}
+
+    class FailingEvalProbe(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+            self.calls = 0
+
+        def forward(self, x, y=None):
+            self.calls += 1
+            raise RuntimeError("synthetic eval probe failure")
+
+    model = bdh.BDH(_small_cfg()).train(caller_training)
+    expected_grads = []
+    for index, param in enumerate(model.parameters(), start=1):
+        grad = torch.full_like(param, float(index))
+        param.grad = grad
+        expected_grads.append(grad.clone())
+    wrapper = FailingEvalProbe(model)
+
+    def compile_spy(compiled_model, **kwargs):
+        assert compiled_model is model
+        compile_kwargs.update(kwargs)
+        return wrapper
+
+    monkeypatch.setattr(tr.torch, "compile", compile_spy)
+
+    x = torch.randint(0, 256, (2, 8))
+    try:
+        out = tr.maybe_compile(model, example_x=x)
+    finally:
+        monkeypatch.setenv("BDH_COMPILE", "0")
+        monkeypatch.setenv("BDH_COMPILE_PROBE", "train_bwd")
+        importlib.reload(tr)
+
+    captured = capsys.readouterr().out
+    assert compile_kwargs == {"mode": "default"}
+    assert wrapper.calls == 1
+    assert out is model
+    assert out.training is caller_training
+    assert model.training is caller_training
+    assert all(
+        param.grad is not None and torch.equal(param.grad, expected)
+        for param, expected in zip(model.parameters(), expected_grads)
+    )
+    assert "torch.compile first probe failed" in captured
+    assert "synthetic eval probe failure" in captured
+    assert "the compiled wrapper is discarded" in captured
+    assert "probe=eval" in captured
+    assert "torch.compile enabled" not in captured
