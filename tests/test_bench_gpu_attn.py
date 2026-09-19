@@ -244,6 +244,70 @@ def test_no_cuda_skip_stays_structured_when_device_probe_fails(
     assert "median ms" not in output
 
 
+def test_device_probe_failure_skips_before_cuda_measurement(
+    monkeypatch, tmp_path, capsys
+):
+    """A true availability probe cannot bypass a failed device probe."""
+    namespace: dict[str, object] = {
+        "__name__": "bench_gpu_attn_test",
+        "__file__": str(SCRIPT),
+    }
+    exec(compile(SCRIPT.read_text(), str(SCRIPT), "exec"), namespace)
+    torch = namespace["torch"]
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.backends.cuda, "is_built", lambda: True)
+
+    def fail_device_probe():
+        raise RuntimeError("driver query failed")
+
+    monkeypatch.setattr(torch.cuda, "device_count", fail_device_probe)
+    monkeypatch.setitem(
+        namespace,
+        "_select_device",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("device-probe failure entered measurement")
+        ),
+    )
+    summary_path = tmp_path / "device-probe-failure-summary.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--json-out", str(summary_path)],
+    )
+
+    assert namespace["main"]() == 0
+    summary = json.loads(summary_path.read_text())
+    output = capsys.readouterr().out
+
+    assert summary["status"] == "skip"
+    assert summary["reason"] == "cuda_unavailable"
+    assert summary["timing_scope"] == "none"
+    assert summary["cuda_available"] is True
+    assert summary["cuda_runtime_state"] == "runtime_unavailable"
+    assert summary["cuda_device_count"] == 0
+    assert summary["cuda_device_probe_error"] == (
+        "RuntimeError: driver query failed"
+    )
+    assert summary["skips"] == [
+        {
+            "scope": "run",
+            "status": "skip",
+            "reason": "cuda_unavailable",
+            "detail": "CUDA device probe raised RuntimeError: driver query failed",
+            "timing_scope": "none",
+            "cuda_available": True,
+            "cuda_runtime_state": "runtime_unavailable",
+            "cuda_built": True,
+            "cuda_built_probe_error": None,
+            "cuda_device_count": 0,
+            "cuda_device_probe_error": "RuntimeError: driver query failed",
+            "cuda_available_probe_error": None,
+        }
+    ]
+    assert "GPU_ATTN_SKIP status=skip reason=cuda_unavailable" in output
+    assert "CUDA device probe raised RuntimeError: driver query failed" in output
+    assert "median ms" not in output
+
 def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
     """Forced smoke timings are explicitly marked as CPU-only."""
     summary_path = tmp_path / "cpu-summary.json"
