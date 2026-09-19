@@ -65,6 +65,38 @@ def test_sparse_probe_exit_codes(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "density_guardrail=fail" in captured.out
     assert "density re-smoke guardrail failed" in captured.err
+    assert "exit_code=2 reason=guardrail_failed" in captured.err
+
+
+def test_sparse_probe_default_off_is_hard_noop(monkeypatch, capsys):
+    """The default-off gate must avoid both training and crossover work."""
+    monkeypatch.delenv(sp.SPARSE_PROBE_ENV, raising=False)
+
+    def unexpected_work(**_):
+        raise AssertionError("disabled sparse probe must not do work")
+
+    monkeypatch.setattr(probe, "short_train_density", unexpected_work)
+    monkeypatch.setattr(probe, "bench_matmul", unexpected_work)
+    assert probe.main([]) == probe.EXIT_OK
+    assert "exit_code=0 reason=probe_disabled" in capsys.readouterr().out
+
+
+def test_sparse_probe_enforcement_requires_samples(monkeypatch, capsys):
+    """Enforcement cannot silently pass when training was skipped."""
+    monkeypatch.setenv(sp.SPARSE_PROBE_ENV, "1")
+    assert (
+        probe.main(
+            [
+                "--enforce-density-guardrail",
+                "--skip-train",
+                "--skip-crossover",
+            ]
+        )
+        == probe.EXIT_GUARDRAIL_NO_SAMPLES
+    )
+    captured = capsys.readouterr()
+    assert "density_guardrail=unavailable" in captured.err
+    assert "exit_code=3 reason=guardrail_no_samples" in captured.err
 
 
 def test_relu_density_random_approx_half():
