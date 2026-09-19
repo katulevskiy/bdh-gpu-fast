@@ -7436,3 +7436,18 @@ Relative to profile-v18, every requested count is unchanged: attention
 - Attention remains raw scores × strict `tril(diagonal=-1)`.
 - No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
   claimed; real GPU measurement remains open.
+
+
+## opt/prefetch-v5 — harden unavailable-CUDA skip diagnostics (2026-09-19)
+
+**Branch:** `opt/prefetch-v5` from `0a42a67` (`main`, private repository
+only).
+
+The CPU-safe H2D gate now also handles a CUDA availability probe that raises
+`AssertionError` or `RuntimeError`, returning a stable skip reason before any
+stream/event construction. This preserves the existing CPU identity contract,
+the unavailable-runtime no-allocation contract, and both prefetch defaults.
+
+Validation is CPU-only; the focused tests cover CPU, false availability, and
+availability-probe exceptions. No CUDA H2D correctness, overlap, timing, or
+speedup claim is made.

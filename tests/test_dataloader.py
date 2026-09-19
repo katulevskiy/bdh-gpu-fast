@@ -146,6 +146,41 @@ def test_prefetch_h2d_skip_reason_is_cpu_safe(tr, monkeypatch):
         loader.close()
 
 
+@pytest.mark.parametrize("exc_type", [AssertionError, RuntimeError])
+def test_prefetch_h2d_skip_reason_handles_cuda_probe_errors(
+    tr, monkeypatch, exc_type
+):
+    """A failing CUDA availability probe remains a no-allocation skip."""
+    monkeypatch.setattr(tr, "device", torch.device("cuda"))
+
+    def raise_probe_error():
+        raise exc_type("simulated CUDA runtime failure")
+
+    monkeypatch.setattr(tr.torch.cuda, "is_available", raise_probe_error)
+    assert (
+        tr.prefetch_h2d_skip_reason()
+        == f"CUDA unavailable: torch.cuda.is_available() raised {exc_type.__name__}"
+    )
+
+    def fail_cuda_factory(*_args, **_kwargs):
+        pytest.fail("failed CUDA probe must not construct stream/event objects")
+
+    monkeypatch.setattr(tr.torch.cuda, "Stream", fail_cuda_factory)
+    monkeypatch.setattr(tr.torch.cuda, "Event", fail_cuda_factory)
+    monkeypatch.setattr(
+        tr.BatchPrefetcher,
+        "_gather_pinned_host",
+        lambda self: (torch.zeros(1, 1, dtype=torch.int64),) * 2,
+    )
+    loader = tr.BatchPrefetcher("train", async_host=False, cuda_staging=True)
+    try:
+        assert loader._cuda_staging is False
+        assert loader._stream is None
+        assert loader._device_next is None
+    finally:
+        loader.close()
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(),
     reason="CUDA required: CPU-only runs cover the no-op contract, not H2D lookahead",
