@@ -151,3 +151,18 @@ def test_explicit_non_eager_impl_stays_selected_on_both_auto_gates(
     assert resolve_decode_impl(1) == expected
     assert resolve_cold_impl(1, requested=impl) == expected
     assert resolve_decode_impl(1, requested=impl) == expected
+
+
+def test_requested_backend_overrides_conflicting_environment(monkeypatch):
+    """Per-call backend requests take precedence over the AUTO environment."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "4")
+    monkeypatch.setenv("BDH_ATTN_AUTO_COLD_THRESHOLD", "4")
+
+    monkeypatch.setenv("BDH_ATTN_IMPL", "blocked")
+    assert resolve_cold_impl(1, requested="eager") == "eager"
+    assert resolve_decode_impl(1, requested="eager") == "eager"
+
+    monkeypatch.setenv("BDH_ATTN_IMPL", "eager")
+    assert resolve_cold_impl(5, requested="cuda") == "cuda"
+    assert resolve_decode_impl(5, requested="cuda") == "cuda"
