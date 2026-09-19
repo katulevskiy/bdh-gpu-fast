@@ -25,6 +25,30 @@ def test_triton_cold_skip_reason_marks_cpu_safe_contract():
         assert reason.startswith(("Triton unavailable:", "CUDA unavailable:"))
 
 
+def test_triton_cold_skip_reason_covers_import_and_device_gates(monkeypatch):
+    """Both skip gates are deterministic, and import failure avoids CUDA probes."""
+    import kernels.attention as attention
+
+    monkeypatch.setattr(attention, "_HAS_TRITON", False)
+
+    def unexpected_cuda_probe():
+        raise AssertionError("import failure must short-circuit before CUDA probing")
+
+    monkeypatch.setattr(torch.cuda, "is_available", unexpected_cuda_probe)
+    import_reason = attention.triton_cold_skip_reason()
+    assert import_reason.startswith("Triton unavailable:")
+    assert import_reason.endswith("(CPU-safe skip)")
+
+    monkeypatch.setattr(attention, "_HAS_TRITON", True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert attention.triton_cold_skip_reason() == (
+        "CUDA unavailable: torch.cuda.is_available() is false (CPU-safe skip)"
+    )
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert attention.triton_cold_skip_reason() is None
+
+
 @pytest.mark.parametrize("v_heads", [1, 3])
 def test_cpu_triton_fallback_matches_blocked_long_t(v_heads):
     """Long CPU fallback stays parity-equivalent for shared and per-head V."""

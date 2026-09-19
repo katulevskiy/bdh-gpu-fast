@@ -7301,7 +7301,6 @@ attention `copy_`=2/call, forward `copy_`=12/call, and generate
 - No GPU timing, kernel-on-hardware result, or CPU-to-GPU extrapolation is
   claimed; real GPU measurement remains open.
 
-
 ## opt/cache-bench-v4 — cover partial final-page accounting (2026-09-19)
 
 **Branch:** `opt/cache-bench-v4` (private `katulevskiy/bdh-gpu-opt` only).
@@ -7328,3 +7327,15 @@ OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 .venv/bin/python benchmarks/bench_cache_page
 ```
 
 The accounting is CPU-only; no GPU timing, memory, or speedup claim is made.
+
+## opt/triton-cold-v6 — deterministic CPU-safe gate contract (2026-09-19)
+
+**Branch:** `opt/triton-cold-v6` on private `katulevskiy/bdh-gpu-opt`.
+**Base tip:** `61af5e0` (#212, after #211).
+
+The cold harness now exercises each `triton_cold_skip_reason()` gate
+deterministically: an import-unavailable path must short-circuit before probing
+CUDA, the CUDA-unavailable path preserves its exact actionable CPU-safe marker,
+and an available import/device pair returns `None`. This deepens skip-reason
+contract coverage without allocating CUDA tensors, launching kernels, changing
+strict raw `tril(diagonal=-1)` attention math, or making GPU claims.
