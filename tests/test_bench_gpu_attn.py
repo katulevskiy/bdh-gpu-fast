@@ -44,6 +44,8 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
             "detail": "torch.cuda.is_available() is false",
             "timing_scope": "none",
             "cuda_runtime_state": summary["cuda_runtime_state"],
+            "cuda_built": summary["cuda_built"],
+            "cuda_device_count": summary["cuda_device_count"],
         }
     ]
     assert summary["timing_scope"] == "none"
