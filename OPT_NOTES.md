@@ -7256,3 +7256,19 @@ does not enter the CUDA setup. Defaults and raw score × strict
 
 Validation is CPU-only; no CUDA compiler, hardware execution, compile timing, or
 speedup is claimed.
+## opt/prefetch-v4 — explicit unavailable-CUDA skip gate (2026-09-19)
+
+**Branch:** `opt/prefetch-v4` from `c25aa9f` (`main`, private repository
+only).
+
+The opt-in H2D path now exposes `prefetch_h2d_skip_reason()` before any CUDA
+stream or event construction. CPU devices report `device-not-cuda: cpu`; a
+requested CUDA device without a live runtime reports
+`CUDA unavailable: torch.cuda.is_available() is false`. `BatchPrefetcher` uses
+that gate so a stale or mocked CUDA device cannot create a stream/event or keep
+a device lookahead on a CPU-only run. Defaults remain
+`BDH_PREFETCH_ASYNC=1` and `BDH_PREFETCH_H2D=1`.
+
+Validation is CPU-only; the focused prefetch tests cover the CPU identity path
+and the unavailable-runtime gate. No CUDA H2D correctness, overlap, timing, or
+speedup claim is made.
