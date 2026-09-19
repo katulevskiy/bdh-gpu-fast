@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#215; #160 docs scope retained)
+# OPT status — landed work (#1–#219; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `eafe65c` (generate benchmark environment contracts, #215) follows #214 sparse guardrail terminal coverage, #213 Triton cold skip-gate coverage, #212 CUDA cold shape validation, #211 partial cache-page accounting, and #210 docs refresh through #209. Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #210 is docs-only; #211 adds CPU-only partial-page accounting; #212 adds CPU-only cold-shape validation before optional native dispatch; #213 deepens CPU-safe Triton import/device gate coverage; #214 adds CPU-only sparse guardrail terminal coverage; and #215 adds CPU-only generate-benchmark environment restoration coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `d218150` (B=1 non-flat score×V views, #219) follows #218 online decode raw-score contract (`50d40f5`), #217 docs refresh through #215 (`fb80c34`), #216 AUTO threshold lower-bound coverage (`265b25c`), and #215 generate-benchmark environment contracts (`eafe65c`). Profile-v18 records a matched CPU-only re-profile after #199–#201: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`; the self-CPU mix is flat versus v17. #216 adds CPU-only lower-bound validation for both AUTO gates; #217 is docs-only; #218 adds CPU-only raw-score decode contract coverage; and #219 adds CPU-only B=1 non-flat score×V view parity coverage. None adds CUDA timing or GPU speedup evidence. Real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -178,7 +178,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#215)
+## Landed opts (#1–#219)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -395,6 +395,10 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **213** | `opt/triton-cold-v6` | Exercise Triton import, CUDA-unavailable, and available skip-reason branches deterministically without CUDA work | CPU-only gate coverage; no GPU timing or kernel claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 | **214** | `test/sparse-probe-contract-v5` | Make an enforced sparse-density guardrail failure terminal before CPU crossover work; keep sparse opt-in and production wiring unchanged | CPU-only terminal exit contract; no attention, GPU timing, or sparse-kernel claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
 | **215** | `test/bench-generate` | Verify interrupted generate-benchmark dispatch and AUTO threshold scopes restore their environment contracts | CPU-only environment-contract coverage; no GPU timing or generate-performance claim | **P1** GPU generate measurement remains open |
+| **216** | `opt/auto-thr-v5` | Reject negative `BDH_ATTN_AUTO_THRESHOLD` and `BDH_ATTN_AUTO_COLD_THRESHOLD` values before dispatch | CPU-only threshold-contract coverage; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **217** | `opt/docs-v54` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #215 while preserving profile-v18 counts and the real-GPU P0 blocker | Docs only | — |
+| **218** | `opt/online-v6` | Lock CPU online decode raw-score semantics across blocked, online, Triton-fallback, and CUDA-reference dispatch; no softmax, scale, or fused attention op | CPU-only contract coverage; no GPU timing or speedup claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **219** | `opt/scorev-v6` | Add CPU parity coverage for B=1 non-flat packed K views on the score×V path; preserve 4-D strides, avoid staging, and match eager decode | CPU-only parity/stride coverage; no GPU timing or performance claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -448,7 +452,11 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#213** Triton cold skip-gate tests merged as `bd809b9`; covers import/device branches deterministically without CUDA work or GPU claims.
 - **#214** sparse probe guardrail tests merged as `8ec4b16`; failed enforced density guardrails stop before CPU crossover work, with no attention or GPU claim.
 - **#215** generate-benchmark environment tests merged as `eafe65c`; interrupted dispatch and AUTO threshold scopes restore their environment contracts without GPU timing or performance claims.
-- **Current tip #215** `eafe65c` deepens CPU-safe benchmark contracts; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#216** AUTO threshold tests merged as `265b25c`; both decode and cold thresholds reject negative values before dispatch, with CPU-only contract coverage.
+- **#217** docs refresh merged as `fb80c34`; carries the matrix through #215 while preserving profile-v18 counts and the real-GPU P0 blocker.
+- **#218** online decode score tests merged as `50d40f5`; blocked, online, Triton-fallback, and CUDA-reference paths retain raw scores without softmax or scale, with CPU-only contract coverage.
+- **#219** B=1 non-flat score×V tests merged as `d218150`; CPU parity confirms non-flat packed K views retain the 4-D path without staging, with no GPU timing or performance claim.
+- **Current tip #219** `d218150` deepens the CPU-safe score×V view contract; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
