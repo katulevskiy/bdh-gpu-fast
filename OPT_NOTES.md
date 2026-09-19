@@ -7212,7 +7212,7 @@ RoPE win is claimed.
 
 **Branch:** `opt/scorev-v5` (private `katulevskiy/bdh-gpu-opt` only; no
 public PR and no PRs to `pathwaycom/*`).
-**Base tip:** `c133110` (`main`, post-#191).
+**Base tip:** `4bd410a` (`main`, post-#193 docs).
 
 The score×V follow-on adds CPU coverage for the remaining B=1 edge cases after
 #165/#135: a long, capacity-strided CacheManager prefix must keep the direct
