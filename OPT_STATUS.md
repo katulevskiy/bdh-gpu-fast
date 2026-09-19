@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#306; #160 docs scope retained)
+# OPT status — landed work (#1–#314+; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `3e87aaa` (#306 GPU-measure skip boundary) follows #305 packed multi-query decode GEMM contract, #304 self-attention backward dispatch contract, #303 successful compile-probe cleanup, #302 CUDA flag opt-in boundary, #301 paired RoPE position contract, and #299 full-vocab sampler output layout contract. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
+Tip pointer: `8e4ce85` (#314 packed shared-V online-decode parity) follows the gen-bench threshold-sweep contract at `6d575a3`, #312 AUTO cold-threshold validation, #311 blocked-prefill dispatch coverage, #310 AMP forward-only toggle coverage, #309 sparse latest-sample guardrail coverage, #308 docs-v67, and #307 prefetch H2D identity coverage. The sandbox is CPU-only (`cuda=False`), so these are CPU-safe contracts only: real GPU measurement and cold CUDA–Triton validation remain the P0 blocker.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -137,7 +137,7 @@ BDH_PREFETCH_ASYNC=0 python train.py  # sync debug / A-B
 |-----|---------|---------|
 | `BDH_PREFETCH_H2D` | `1` | On CUDA, stage one pinned batch ahead on a dedicated side stream and hand it to the caller stream via an event; `0` keeps H2D on the caller stream |
 
-This flag is a CPU no-op. #139 makes that contract explicit, #203 gates unavailable CUDA before stream/event construction, and #270 plus #291 cover opt-out before CUDA probing/allocation on configured CUDA devices. On unavailable-CUDA paths, the device/runtime gate runs before any CUDA stream/event construction, CPU reports `device-not-cuda: cpu`, and a requested CUDA device without a live runtime reports `CUDA unavailable: torch.cuda.is_available() is false`. No staged device lookahead is created on CPU or unavailable-CUDA paths, and `_to_device` preserves the original CPU tensor objects. It applies to the async host-prefetch path;
+This flag is a CPU no-op. #139 makes that contract explicit, #203 gates unavailable CUDA before stream/event construction, and #270, #291, and #307 cover opt-out/identity before CUDA probing or allocation on configured CUDA devices. On unavailable-CUDA paths, the device/runtime gate runs before any CUDA stream/event construction, CPU reports `device-not-cuda: cpu`, and a requested CUDA device without a live runtime reports `CUDA unavailable: torch.cuda.is_available() is false`. No staged device lookahead is created on CPU or unavailable-CUDA paths, and `_to_device` preserves the original CPU tensor objects. It applies to the async host-prefetch path;
 `BDH_PREFETCH_ASYNC=0` remains the synchronous debug/A-B mode. GPU H2D
 overlap and throughput are unmeasured. The `cuda_staging=` constructor override
 is available for tests/A-B and is ignored on CPU or unavailable-CUDA paths.
@@ -158,7 +158,7 @@ BDH_PREFETCH_H2D=0 python train.py  # caller-stream H2D
 Optional `BDH_AMP_FORWARD_ONLY=1` (#54/#119): autocast **logits only**; CE in fp32 outside.
 Default `0` keeps `model(x,y)` under the same autocast ctx.
 
-CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here). #119/#142/#179 make capability checks transactional, soft-skip unsupported matrix arms, and report full vs forward-only scope plus scaler state; #207 verifies an unavailable CPU request preserves the complete prior AMP configuration state.
+CPU AMP is for parity smoke, not speed (`amp_throughput_claim_device() → none` here). #119/#142/#179 make capability checks transactional, soft-skip unsupported matrix arms, and report full vs forward-only scope plus scaler state; #207 verifies an unavailable CPU request preserves the complete prior AMP configuration state; #310 completes the CPU-safe `BDH_AMP_FORWARD_ONLY=0` and explicit-override contract.
 **AMP helps on GPU** (Tensor Cores / HBM); never cite CPU medians as speedups.
 Decode path AMP (older #5) is separate from this train knob (#24+#54).
 
@@ -172,7 +172,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#292 + prefetch H2D tip coverage)
+## Landed opts (#1–#314+; prefetch, docs-v67, sparse, AMP, blocked, AUTO, packed shared-V, and gen-bench tip coverage)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -462,8 +462,15 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **304** | `tests/test_attn_bwd_v4_contract.py` | CPU-only self-attention alias backward parity across eager, blocked, online, Triton-fallback, and CUDA-reference dispatch; raw strict-tril semantics preserved, with no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **305** | `tests/test_decode_gemm_v9.py` | CPU-only packed multi-query decode GEMM parity for shared-value and per-head K/V layouts across blocked, online, and Triton fallback; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
 | **306** | `tests/test_bench_gpu_attn.py` | CPU-only unavailable-CUDA skip returns before device selection or timing; no GPU timing or speedup claim | **P0** real GPU measurement remains open |
-| **tip** | `tests/test_bench_gpu_attn.py` | Tip `3e87aaa`: GPU-measure skip boundary; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
-| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `8b562f4`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #270–#284 and #301–#306 add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
+| **307** | `opt/prefetch-v9` | CPU-safe `BatchPrefetcher.next()` H2D identity coverage; requesting CUDA staging on CPU avoids CUDA probing and stream/event construction | CPU-only identity/no-allocation contract; no H2D timing or overlap claim | **P1** GPU H2D overlap remains unmeasured |
+| **308** | `opt/docs-v67` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #306 | Docs only; no GPU evidence | — |
+| **309** | `opt/sparse-v10` | CPU sparse density guardrail evaluates the latest sample so a late collapse cannot be masked by an earlier pass; probe remains default-off | CPU-only guardrail contract; no sparse-kernel or GPU claim | **P0** real GPU measurement / sparse validation remains open |
+| **310** | `opt/amp-v10` | Complete CPU-safe `BDH_AMP_FORWARD_ONLY=0` coverage and verify explicit `forward_only=True` overrides the environment default | CPU-only AMP configuration contract; no GPU throughput claim | **P3** GPU AMP train measurement remains open |
+| **311** | `opt/blocked-v10` | Exercise the public cold/prefill AUTO route above threshold on CPU and preserve strict lower-triangular raw-score parity on a non-divisible tile | CPU-only blocked-dispatch parity; no GPU performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **312** | `opt/auto-thr-v10` | Reject malformed and negative `BDH_ATTN_AUTO_COLD_THRESHOLD` values before cold dispatch and recover after a valid update | CPU-only AUTO threshold contract; no GPU timing or threshold claim | **P0** GPU threshold/tile validation remains open |
+| **314** | `tests/test_online_decode_v5.py` | CPU-only multi-query online decode preserves packed shared-V views across tiled `Tq=3`, `S=353` parity coverage | CPU-only packed-view parity; no GPU timing or performance claim | **P0** real GPU measurement / cold CUDA–Triton validation remains open |
+| **tip** | `tests/test_bench_gpu_attn.py` | Tip `8e4ce85`: packed shared-V online decode parity follows the gen-bench threshold sweep; no CUDA run or GPU evidence | **P0** real GPU measurement / cold CUDA-Triton validation remains open |
+| **tip** | `OPT_NOTES.md` (profile-v20) | Retain matched CPU operator counts through `8e4ce85`: attention/forward/generate `copy_`=2/12/394 per call, `cat=0`, `contiguous=0`; #307–#312, #314, and follow-up threshold-sweep tests add CPU-safe contract/skip or docs coverage only | CPU-only profile evidence and contract coverage; no GPU timing or speedup claim | **P0** real GPU measurement / cold CUDA-Triton validation remains open
 ### Concurrent main updates
 
 - **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
@@ -599,7 +606,15 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 - **#304** `fdae58e` adds CPU-only self-attention alias backward parity across supported dispatches with raw strict-tril semantics; no GPU timing or performance claim.
 - **#305** `6f6e871` adds CPU-only packed multi-query decode GEMM parity for shared-value and per-head K/V layouts; no GPU timing or performance claim.
 - **#306** `3e87aaa` adds CPU-only unavailable-CUDA skip coverage that returns before device selection or timing; no GPU timing or speedup claim.
-- **Current tip** `3e87aaa` carries the flat profile-v20 counts plus CPU-only contracts/docs through #306; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
+- **#307** `de0c2bc` adds CPU-only prefetch H2D identity/no-allocation coverage; no H2D timing or overlap claim.
+- **#308** `7e7ce99` refreshes the optimization matrix through #306; docs-only.
+- **#309** `3ad7872` ensures the sparse guardrail evaluates the latest sample; sparse remains default-off with no GPU claim.
+- **#310** `f3ee9af` completes CPU-safe AMP forward-only toggle/explicit-override coverage; no GPU throughput claim.
+- **#311** `fce51fe` covers the public blocked/prefill AUTO route and non-divisible strict-tril parity on CPU; no GPU performance claim.
+- **#312** `5100b01` adds CPU-safe malformed/negative AUTO cold-threshold validation and recovery; no GPU timing claim.
+- **#314** `8e4ce85` adds CPU-only multi-query online decode parity for packed shared-V views across a tiled boundary; no GPU performance claim.
+- **Tip follow-up** `6d575a3` (gen-bench threshold sweep) de-duplicates decode thresholds and mirrors the cold gate; it adds no GPU evidence.
+- **Current tip** `8e4ce85` carries the flat profile-v20 counts plus CPU-only contracts/docs through #314+; the matrix remains CPU/docs evidence only and the real-GPU P0 blocker is unchanged.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 

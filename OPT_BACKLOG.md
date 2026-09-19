@@ -6,7 +6,8 @@ Constraint (hard): attention stays **raw scores** × **strict lower-triangular**
 `tril(diagonal=-1)` — **no softmax**, **no `1/√d`**, **no**
 `F.scaled_dot_product_attention`.
 
-Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), with profile-v20 counts unchanged: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, `cat=0`, and `contiguous=0`. Through tip `3e87aaa`, #287–#295, #296 docs refresh, #297–#299, and #301–#306 add CPU-safe contract/harness coverage only; none adds a CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation. Absolute ms are **profiler-inflated**; use `% self CPU` and call counts. Re-run on GPU before claiming kernel wins.
+Profile source: `benchmarks/profile_forward.py` on CPU (`torch 2.14.0+cu130`, `cuda=False`), with profile-v20 counts unchanged: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, `cat=0`, and `contiguous=0`. Through tip `8e4ce85`, #307 prefetch, #308 docs-v67, #309 sparse, #310 AMP, #311 blocked-prefill, #312 AUTO validation, #314 packed shared-V online-decode parity, and the gen-bench threshold-sweep follow-ups add CPU-safe contract/harness/docs coverage only; none adds a CUDA run, GPU timing, GPU speedup, sparse-kernel result, or cold CUDA–Triton validation. Absolute ms are **profiler-inflated**; use `% self CPU` and call counts. Re-run on GPU before claiming kernel wins.
+Post-#307–#312+ and #314 current tip (`8e4ce85`): #307 deepens CPU H2D-prefetch identity/no-allocation behavior; #308 is the docs-v67 refresh through #306; #309 makes the sparse density guardrail evaluate the latest sample; #310 completes CPU-safe AMP forward-only toggle coverage and explicit override precedence; #311 exercises blocked/prefill AUTO dispatch above threshold with non-divisible strict-tril parity; #312 rejects malformed/negative AUTO cold thresholds before dispatch with clean recovery after a valid update; and #314 preserves packed shared-V online decode parity across a tiled multi-query boundary. The gen-bench threshold-sweep follow-up de-duplicates decode thresholds and mirrors the cold gate. All evidence is CPU-only; sparse remains opt-in/default-off, defaults remain eager/fp32/AUTO-off, and real GPU measurement plus cold CUDA–Triton validation remain P0.
 
 Post-#95 re-profile (`opt/profile-v9`, source `8e7a4d2`; current docs tip `1363794` after #96–#102): forward warmed harness `aten::copy_` is 48 over three active calls (16/call), while an isolated one-forward check reproduces #95's **18**; forward and generate remain `aten::cat=0` and `aten::contiguous=0`. Generate `aten::copy_` is 1,674 over three active calls (558/call), so generate remains copy_-heavy. CPU-only evidence; **GPU still the blocker.** See `OPT_NOTES.md` § opt/profile-v9.
 
@@ -448,7 +449,7 @@ eager still pays full T×T `bmm`+`tril`. See `OPT_NOTES.md` § opt/profile-v2.
 
 ## Ranked next work
 
-Current evidence boundary through `3e87aaa`: #285–#286 are docs-only; #287 adds raw strict-tril backward contract coverage, #288 adds shared-V tiled decode autograd parity, #289 adds CPU-safe AMP forward-only configuration coverage, #290 keeps GPU-harness synchronization device-local, #291 adds global prefetch H2D opt-out coverage, #292 adds sparse guardrail threshold coverage, #293 adds CPU-only batched partial-tile strict-tril coverage, #294 adds CPU-safe fail-closed AUTO input validation, #295 adds CPU-safe empty/whitespace AUTO cold-threshold fallback coverage, #296 is docs-only, #297 adds CPU-only tiled multi-query online decode coverage, #298 adds CPU-only aliased score-V dispatch gradient parity, #299 adds CPU-only full-vocab sampler output-layout coverage, #301 adds CPU-only paired RoPE position coverage, #302 adds CPU-only CUDA-flag setup coverage, #303 adds CPU-only successful compile-probe cleanup coverage, #304 adds CPU-only self-attention alias backward parity, and #305 adds CPU-only packed multi-query decode GEMM parity, #306 adds CPU-only unavailable-CUDA skip coverage before measurement. No CUDA run, GPU timing, GPU speedup, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
+Current evidence boundary through `8e4ce85`: #307–#312, #314, and the gen-bench threshold-sweep follow-ups add only CPU-safe prefetch, docs-v67, sparse, AMP, blocked-prefill, packed shared-V online-decode, AUTO-threshold, and harness-contract coverage. No CUDA run, GPU timing, GPU speedup, sparse-kernel result, or cold CUDA–Triton validation was added. Keep the real-GPU measurement / cold CUDA–Triton validation blocker at P0.
 
 | P | Item | Why (from profile / notes) | Target | Risk |
 |---|------|----------------------------|--------|------|
@@ -683,7 +684,15 @@ Current evidence boundary through `3e87aaa`: #285–#286 are docs-only; #287 add
 | Self-attention backward dispatch #304 | **Landed** `fdae58e` — CPU-only aliased-Q/K raw strict-tril backward parity across supported dispatches; no GPU timing/performance claim
 | Packed multi-query decode GEMM #305 | **Landed** `6f6e871` — CPU-only shared-value/per-head packed K/V parity across blocked/online/Triton fallback; no GPU timing/performance claim
 | GPU-measure skip boundary #306 | **Landed** `3e87aaa` — CPU-only unavailable-CUDA skip returns before device selection or timing; no GPU timing/speedup claim
-| Current tip | **Landed** at `3e87aaa` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #301–#306 add CPU-safe contracts only, and the real-GPU P0 blocker remains open
+| Prefetch H2D identity #307 | **Landed** `de0c2bc` — CPU-only `BatchPrefetcher.next()` identity/no-allocation coverage; no H2D timing or overlap claim |
+| Docs-v67 #308 | **Landed** `7e7ce99` — docs-only refresh through #306; no GPU evidence |
+| Sparse latest-sample guardrail #309 | **Landed** `3ad7872` — late density collapse cannot be masked by an earlier pass; sparse remains default-off with no GPU claim |
+| AMP forward-only toggle #310 | **Landed** `f3ee9af` — CPU-safe `BDH_AMP_FORWARD_ONLY=0` and explicit-override coverage; no GPU throughput claim |
+| Blocked prefill dispatch #311 | **Landed** `fce51fe` — CPU strict-tril parity for public cold/prefill AUTO route above threshold; no GPU performance claim |
+| AUTO cold-threshold validation #312 | **Landed** `5100b01` — malformed/negative values reject before dispatch and recover after valid update; no GPU timing claim |
+| Packed shared-V online decode #314 | **Landed** `8e4ce85` — CPU multi-query tiled parity preserves packed shared-V views; no GPU timing or performance claim |
+| Gen-bench threshold sweep tip | **Landed** `6d575a3` — de-duplicates decode thresholds and mirrors the cold gate; CPU harness contract only |
+| Current tip | **Landed** at `8e4ce85` — profile-v20 counts remain 2/12/394 with `cat=0` and `contiguous=0`; #307–#312, #314, and threshold-sweep follow-ups add CPU-safe contract coverage only; the real-GPU P0 blocker remains open |
 | Analytic tril attn train path | **Landed** #39 `opt/attn-bwd-train` — default AUTOGRAD off; eager profile unchanged |
 | Blocked/online tiled analytic bwd | **Landed** #41 `opt/blocked-autograd` — blocked|online+AUTOGRAD=1; dense M-recompute only for eager |
 | Batch prefetch overlap | **Landed** #42 `opt/prefetch-v2` — host queue/numpy producer; GPU pin/H2D overlap remains open |
@@ -792,7 +801,7 @@ ext). Prints median ms, tok/s, tokens-match-eager, `aten::cat` count.
 
 `--mode auto-ab` (`opt/gen-long-bench`): prompt `S∈{256,1024,2048}` ×
 `BDH_ATTN_AUTO=0|1` (thr=512). Cold+decode switch when
-`past_len > thr`. Validates `#55`/`#56`/`#75`/`#77` outside score×V microbench.
+`past_len > thr`. The threshold-sweep follow-up de-duplicates decode thresholds and mirrors the cold gate while preserving seeded parity and `aten::cat=0`. Validates `#55`/`#56`/`#75`/`#77` outside score×V microbench.
 
 ```bash
 python benchmarks/bench_generate.py
