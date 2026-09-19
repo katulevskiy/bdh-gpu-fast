@@ -393,6 +393,26 @@ def test_batch_prefetcher_producer_failure_is_terminal(tr, monkeypatch):
         loader.close()
 
 
+def test_batch_prefetcher_terminal_failure_shutdown_is_clean(tr, monkeypatch):
+    """A terminal producer error leaves no live thread or queued resources."""
+
+    def fail_gather(_split):
+        raise ValueError("simulated shutdown host gather failure")
+
+    monkeypatch.setattr(tr, "_gather_batch_host_numpy", fail_gather)
+    loader = tr.BatchPrefetcher("train", async_host=True)
+    with pytest.raises(RuntimeError, match="prefetch producer failed") as exc_info:
+        loader.next()
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert loader._thread is not None
+    assert not loader._thread.is_alive()
+
+    loader.close()
+    assert loader._thread is None
+    assert loader._q is None
+    loader.close()
+
+
 def test_dataloader_num_workers_zero(tr, monkeypatch):
     monkeypatch.setattr(tr, "USE_DATALOADER", True)
     monkeypatch.setattr(tr, "NUM_WORKERS", 0)
