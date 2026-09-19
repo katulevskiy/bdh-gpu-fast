@@ -2531,3 +2531,77 @@ unmeasured (no CUDA on this runner).
 - No PRs to `pathwaycom/*`
 - No change to default `BDH_ATTN_IMPL` / attention math
 - No fake GPU wins from CPU medians
+
+
+## opt/gen-host — cut generate Python/host overhead (2026-09-19)
+
+**Branch:** `opt/gen-host` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `bf93a11` (main after #42+#43 docs/prefetch).
+
+### Goal
+
+Profile showed `BDH.generate` ~26% self CPU after cats=0 / decode-copy. Cut
+remaining **Python/host tax** (loop, sampling, repeated getattr/dispatch,
+RoPE trig per decode step) without changing default attn math. Keep
+`aten::cat=0` and `tril(diagonal=-1)`.
+
+### What changed
+
+1. **`Attention.ensure_rope_table(max_T)`** — one cos/sin table for
+   `[0, max_seq)`; `rope_cos_sin` `narrow`s for prefill + decode (no per-step
+   `arange`+trig). `generate` warms it once.
+2. **Eager-import `bdh_rope_rotate` / `resolve_attn_impl`** — no lazy import
+   inside `Attention.rope` every layer/step.
+3. **Env resolve caches** in `attention_dispatch` / `rope_dispatch` (skip
+   strip/lower/alias when env string unchanged). `online`→`blocked` alias kept.
+4. **`generate` hoists `resolve_attn_impl()`** into `Attention._attn_impl_override`
+   for the decode loop (cleared in `finally`); warms rope resolve once.
+5. **`@torch.inference_mode()`** (was `@torch.no_grad()`); tighter sampling
+   (skip temp scale when `temperature==1.0`; hoist softmax/multinomial;
+   `masked_fill_` for top-k; write `out[:, pos]` without slice cat).
+6. **`CacheManager.storage_matches_compute`** — hoisted dtype equality for the
+   packed in-place RoPE path.
+
+Preserved: default `BDH_ATTN_IMPL=eager`, `tril(-1)`, no softmax/scale,
+`aten::cat=0`, tokens-match-eager / vs-baseline generate tests.
+
+### Measured (this box, 2026-09-19 Europe/Podgorica, CPU-honest)
+
+Isolated subprocess tip `8e2f5a0` vs this branch — cfg `layers=4 d=128 nh=4`,
+`prompt=16 new=32`, warmup=3 iters=7, `temperature=1.0`, `cuda=False`:
+
+```text
+BEFORE  median=52.34 ms  ~611 tok/s  arange=33  environ.get=268  aten::cat=0
+AFTER   median=39.84 ms  ~803 tok/s  arange=1   environ.get=142  aten::cat=0
+DELTA   wall −12.5 ms (~1.31×)  arange 33→1  env.get 268→142  tokens match tip
+```
+
+Official harness:
+
+```text
+python benchmarks/bench_generate.py --warmup 2 --iters 5 --impls eager
+# eager median≈40–50 ms  match_eager=yes  aten::cat=0  (CPU; not a GPU claim)
+```
+
+### Correctness
+
+```text
+.venv/bin/python -m pytest tests/test_gen_host.py tests/ -q
+# test_gen_host: RoPE table slices, arange=1, cat=0, tokens vs baseline,
+#   hoist clears override, environ.get reduced
+# Full suite: 293 passed, 9 skipped (CUDA/native) on CPU-only box
+```
+
+### Honest limits
+
+- CPU-only box — absolute ms are wall times, not GPU kernel wins.
+- `environ.get` still hits on the rope path each layer (cached resolve); attn
+  override removes the decode-loop attn gets.
+- Default attn math unchanged; no claim of Triton/CUDA speedup.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No default `BDH_ATTN_IMPL` change
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / diagonal inclusion / scale

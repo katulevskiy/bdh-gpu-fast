@@ -69,6 +69,8 @@ class CacheManager:
         self.device = torch.device(device)
         self.compute_dtype = compute_dtype
         self.storage_dtype = storage_dtype or compute_dtype
+        # Hoisted equality — generate/forward checks this every layer/step.
+        self.storage_matches_compute = self.storage_dtype == self.compute_dtype
         self.page_size = page_size
         self.seq_len = 0
         self._pending_t: Optional[int] = None
@@ -198,7 +200,7 @@ class CacheManager:
         # narrow avoids an extra Python slice chain on the layer index.
         kr = self._kr_buf[level].narrow(2, 0, self.seq_len)
         v = self._v_buf[level].narrow(2, 0, self.seq_len)
-        if self.storage_dtype != self.compute_dtype:
+        if not self.storage_matches_compute:
             # fp16 storage → fp32 for RoPE score GEMMs / V multiply
             kr = kr.to(self.compute_dtype)
             v = v.to(self.compute_dtype)
@@ -265,7 +267,7 @@ class CacheManager:
         end = self._write_block(level, new_kr, new_v)
         kr = self._kr_buf[level].narrow(2, 0, end)
         v = self._v_buf[level].narrow(2, 0, end)
-        if self.storage_dtype != self.compute_dtype:
+        if not self.storage_matches_compute:
             kr = kr.to(self.compute_dtype)
             v = v.to(self.compute_dtype)
         return kr, v

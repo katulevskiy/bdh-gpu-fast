@@ -49,19 +49,39 @@ _VALID = ("eager", "blocked", "triton", "cuda")
 _ALIASES = {"online": "blocked"}
 
 
+# Env resolve cache: generate hits this every layer/step; skip strip/lower
+# when the raw env string is unchanged. Explicit ``requested=`` bypasses cache.
+_ATTN_IMPL_ENV: object | None = object()
+_ATTN_IMPL_RESOLVED: ImplName = "eager"
+
+
 def resolve_attn_impl(requested: str | None = None) -> ImplName:
     """Resolve BDH_ATTN_IMPL (or explicit override) to a concrete backend name.
 
-    ``online`` is accepted and mapped to ``blocked``.
+    ``online`` is accepted and mapped to ``blocked``. Env string is cached so
+    generate (n_layer × steps) skips repeated strip/lower/alias when unchanged.
+    Explicit ``requested=`` bypasses the env cache.
     """
-    raw = requested if requested is not None else os.environ.get("BDH_ATTN_IMPL", "eager")
-    raw = (raw or "eager").strip().lower()
-    raw = _ALIASES.get(raw, raw)
-    if raw not in _VALID:
-        raise ValueError(
-            f"BDH_ATTN_IMPL must be {'|'.join(_VALID)}|online, got {raw!r}"
-        )
-    return raw  # type: ignore[return-value]
+    global _ATTN_IMPL_ENV, _ATTN_IMPL_RESOLVED
+
+    def _normalize(raw: str) -> ImplName:
+        raw = (raw or "eager").strip().lower()
+        raw = _ALIASES.get(raw, raw)
+        if raw not in _VALID:
+            raise ValueError(
+                f"BDH_ATTN_IMPL must be {'|'.join(_VALID)}|online, got {raw!r}"
+            )
+        return raw  # type: ignore[return-value]
+
+    if requested is not None:
+        return _normalize(requested)
+    env = os.environ.get("BDH_ATTN_IMPL", "eager")
+    if env is _ATTN_IMPL_ENV or env == _ATTN_IMPL_ENV:
+        return _ATTN_IMPL_RESOLVED
+    resolved = _normalize(env or "eager")
+    _ATTN_IMPL_ENV = env
+    _ATTN_IMPL_RESOLVED = resolved
+    return _ATTN_IMPL_RESOLVED
 
 
 def bdh_attn(
