@@ -687,3 +687,48 @@ def test_sampler_probability_buffer_preserves_strided_neighbors():
 
         # Channel 1 is the neighboring storage excluded by the scratch view.
         assert torch.equal(probs_storage[..., 1], before[..., 1]), name
+
+
+def test_sampler_probability_buffer_preserves_padded_neighbors():
+    """Full-vocab sampling must honor an offset, padded scratch view."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+    probs_storage = torch.full((2, 34), -777.0)
+    probs_buf = probs_storage[:, 1:-1]
+    before = probs_storage.clone()
+    assert probs_buf.shape == (2, 32)
+    assert probs_buf.stride() == (34, 1)
+    assert probs_buf.storage_offset() == 1
+
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        probs_storage.copy_(before)
+        destination = torch.empty(2, 1, dtype=torch.long)
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=probs_buf,
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=destination,
+        )
+        assert got is destination, name
+
+        assert torch.equal(probs_storage[:, 0], before[:, 0]), name
+        assert torch.equal(probs_storage[:, -1], before[:, -1]), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty(2, 32),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
