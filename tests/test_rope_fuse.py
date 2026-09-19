@@ -284,6 +284,20 @@ def test_paired_rope_out_shape_contract_rejects_before_store():
     assert torch.equal(out, before)
 
 
+@pytest.mark.parametrize("impl", ["eager", "fused"])
+def test_public_paired_rope_out_shape_contract_rejects_before_store(impl):
+    """Public paired dispatch preserves output validation for each backend."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=1, seed=119)
+    cos_p = cos.reshape(*cos.shape[:-1], -1, 2)
+    sin_p = sin.reshape(*sin.shape[:-1], -1, 2)
+    out = torch.full((*v.shape[:-1], v.shape[-1] - 2), -77.0)
+    before = out.clone()
+
+    with pytest.raises(ValueError, match="rope out"):
+        bdh_rope_rotate_paired(v, cos_p, sin_p, out=out, impl=impl)
+    assert torch.equal(out, before), impl
+
+
 def test_rope_shape_contracts_reject_unbroadcastable_cis():
     """Cis leading dimensions must broadcast before pair math starts."""
     _, _, cos, sin, v, _ = _cis_and_v(T=2, seed=113)
