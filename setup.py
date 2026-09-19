@@ -20,7 +20,7 @@ Env flags
 BDH_BUILD_EXT=1     Opt-in: compile ``csrc/`` into ``bdh_cuda_ext``.
                     Absent / any other value → pure-Python install (no compile).
 BDH_BUILD_CUDA=1    With BDH_BUILD_EXT: force CUDAExtension + ``tril_attn_cuda.cu``.
-BDH_FORCE_CPU_EXT=1 With BDH_BUILD_EXT: skip CUDA objects even if a GPU is present.
+BDH_FORCE_CPU_EXT=1 With BDH_BUILD_EXT: skip CUDA probing and objects even if a GPU is present.
 
 If the native build fails (common on mismatched g++/torch), training and tests
 still use ``kernels.cuda_attn`` CPU refs — soft import, never hard-fail at
@@ -65,7 +65,8 @@ def _extensions():
     extra_compile_args = {"cxx": ["-O3", "-std=c++20"]}
 
     force_cpu = os.environ.get("BDH_FORCE_CPU_EXT", "") == "1"
-    use_cuda = torch.cuda.is_available() and not force_cpu
+    # An explicit CPU-only request must not probe CUDA availability at all.
+    use_cuda = not force_cpu and torch.cuda.is_available()
     # An explicit CPU-only request takes precedence when both flags are set.
     force_cuda = os.environ.get("BDH_BUILD_CUDA", "") == "1" and not force_cpu
 
