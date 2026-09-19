@@ -6,7 +6,7 @@ from benchmarks import bench_attn_bwd
 
 
 def test_bench_matrix_covers_all_impl_autograd_pairs():
-    assert bench_attn_bwd.IMPLS == ("eager", "blocked", "triton", "cuda")
+    assert bench_attn_bwd.IMPLS == ("eager", "blocked", "online", "triton", "cuda")
     assert bench_attn_bwd.AUTOGRAD_FLAGS == ("0", "1")
 
 

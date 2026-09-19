@@ -5007,6 +5007,27 @@ python -m pytest tests/test_attn_bwd.py tests/test_attn_bwd_bench.py -q
 No GPU timing or speedup is claimed from this CPU-only box. Defaults remain
 `BDH_ATTN_IMPL=eager`, `BDH_ATTN_AUTOGRAD=0`, and no attention math changes.
 
+## opt/attn-bwd-v2 — keep blocked/online train spellings in the GPU matrix (2026-09-19)
+
+**Branch:** `opt/attn-bwd-v2` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `45b4afe` (`main`).
+
+The #96 harness matrix now includes the documented `IMPL=online` alias next
+to `IMPL=blocked`, each crossed with `AUTOGRAD=0|1`. This is a runbook-level
+parity guard: `online` resolves to the same tiled backend, so it must not be
+omitted from GPU train-step comparisons. The CPU contract test checks the
+matrix and the CUDA-only benchmark still exits cleanly with `SKIP` before
+allocation when CUDA is unavailable.
+
+```text
+python benchmarks/bench_attn_bwd.py
+# CPU: SKIP: CUDA unavailable; ... (exit 0)
+python -m pytest tests/test_attn_bwd.py tests/test_attn_bwd_bench.py -q
+```
+
+No GPU timing, speedup, or kernel claim is added. Defaults remain eager with
+`BDH_ATTN_AUTOGRAD=0`; attention remains raw scores × `tril(diagonal=-1)`.
+
 ## opt/profile-v9 — re-profile copy-tax-v1 tip (2026-09-19)
 
 **Branch:** `opt/profile-v9` (private `katulevskiy/bdh-gpu-opt` only).

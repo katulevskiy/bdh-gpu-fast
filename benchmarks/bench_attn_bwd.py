@@ -1,7 +1,9 @@
 """CUDA-only train-step harness for analytic strict-tril attention.
 
 The default run is an honest CUDA A/B matrix: every ``IMPL``
-(``eager|blocked|triton|cuda``) is crossed with ``AUTOGRAD=0|1``.  A small
+(``eager|blocked|online|triton|cuda``) is crossed with ``AUTOGRAD=0|1``.
+``online`` is the explicit alias of ``blocked`` and is retained in the matrix
+to prove that the two documented spellings stay parity-equivalent.  A small
 forward/backward parity probe runs before timing, so a backend that silently
 loses gradients cannot be reported as a win.  ``triton`` and ``cuda`` report
 their effective fallback when the optional kernel/extension is unavailable.
@@ -37,7 +39,9 @@ os.environ.setdefault("BDH_COMPILE", "0")
 import bdh  # noqa: E402
 from kernels.attention_dispatch import backend_info  # noqa: E402
 
-IMPLS = ("eager", "blocked", "triton", "cuda")
+# Keep the public alias in the matrix: ``online`` must remain parity-equivalent
+# to ``blocked`` instead of silently disappearing from the train runbook.
+IMPLS = ("eager", "blocked", "online", "triton", "cuda")
 AUTOGRAD_FLAGS = ("0", "1")
 _DTYPE_NAMES = {
     "float32": torch.float32,
