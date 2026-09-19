@@ -1,9 +1,9 @@
-# OPT status — landed work (#1–#157)
+# OPT status — landed work (#1–#163; #160 docs scope retained)
 
 Private sandbox only: [`katulevskiy/bdh-gpu-opt`](https://github.com/katulevskiy/bdh-gpu-opt).
 **Do not** open PRs against `pathwaycom/bdh` or any `pathwaycom/*` repo.
 
-Tip pointer: `717c38e` (`#159` zerograd-v2 logger fallback and `#160` cache-bench-v2 follow `#158` docs and `#157` profile-v15). The landed matrix below is aligned through #157; `OPT_NOTES.md` also records #159/#160 and profile-v16. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. The self-CPU mix moved modestly within the three-active-step trace, with no GPU timing or speedup evidence; real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
+Tip pointer: `d0e667b` (`#163` structured GPU-attention measurement harness follows `#161` profile-v16, `#159` zerograd-v2, and `#160` cache-bench-v2; `#158` docs refresh through #157 and `#157` profile-v15 remain documented below). The requested through-#160 documentation is retained, with #159 now landed and #161 profile-v16 carried forward. Profile-v16 remains flat versus v15 on this CPU-only box: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call, with `cat=0` and `contiguous=0`. #163 adds structured cold/decode/dtype measurement and CPU skip coverage, but no CUDA run or GPU speedup evidence; real GPU measurement remains the P0 blocker and cold CUDA/Triton validation remains open.
 Detail / benches: [`OPT_NOTES.md`](OPT_NOTES.md). Ranked remaining: [`OPT_BACKLOG.md`](OPT_BACKLOG.md).
 
 Hard constraint (all opts): attention stays **raw scores** × **strict lower-triangular**
@@ -175,7 +175,7 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 
 ---
 
-## Landed opts (#1–#157)
+## Landed opts (#1–#163)
 
 | # | Branch / title | What landed | CPU | GPU |
 |---|----------------|-------------|-----|-----|
@@ -336,7 +336,16 @@ BDH_BENCH_AMP=1 python benchmarks/bench_train_step.py          # honest A/B
 | **155** | `opt/docs-matrix-v38` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #154 | Docs only | — |
 | **156** | `opt/layout-v3` | CPU `torch.profiler` probe of remaining layout materializations: one-time eval encoder-cache materialization, warm eager clone signatures, and ATen sampler contiguous hotspots; no unsafe layout flip or sampler/RNG rewrite | CPU-only evidence: warm eager forward remains `aten::contiguous`=0 and `aten::cat`=0, with two clone-backed shapes per layer; generate sampler retains `(B,V)` and `(B,)` contiguous hotspots | **P0** GPU measure / cold CUDA-Triton validation remains open |
 | **157** | `opt/profile-v15` | CPU re-profile after #152/#154 and #156; record self-CPU operator percentages plus `copy_`, `cat`, and `contiguous` counts without changing semantics | Attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; CPU-only evidence | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **158** | `opt/docs-matrix-v39` | Refresh `OPT_STATUS.md` / `OPT_BACKLOG.md` through #157 on the #160 code tip | Docs only | — |
+| **159** | `opt/zerograd-v2` | Make `TrainLossLogger` CUDA-deferred mode explicit: `async_cuda=True` is a no-op on CPU; add resolved-state property and synchronous CPU coverage while preserving logging and `set_to_none` defaults | CPU fallback coverage; no GPU timing or speedup claim | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **160** | `opt/cache-bench-v2` | Deepen the CPU cache-page bench with `initial→final` packed-cache capacity and final KR/V allocation in KiB; assert geometric/linear policies reach the same final capacity/allocation without changing defaults | CPU accounting only; cache/generate defaults unchanged; no GPU claim | **P0** GPU measure remains open |
+| **161** | `opt/profile-v16` | CPU re-profile after #159/#160 using the profile-v15 warmup/active-step schedule; record self-CPU mix and copy/cat/contiguous counts without changing semantics | Flat versus v15: attention `copy_`=2/call, forward `copy_`=12/call, generate `copy_`=394/call; `cat=0`, `contiguous=0`; CPU-only evidence | **P0** GPU measure / cold CUDA-Triton validation remains open |
+| **163** | `opt/gpu-measure-v2` | Deepen structured GPU-attention measurement for cold and T=1 decode paths with JSON fields, parity deltas, and CPU-safe skip diagnostics; preserve defaults and raw strict `tril(-1)` math | CPU tests/skip path only here; no CUDA run or GPU win claim | **P0** run on real GPU remains open |
 
+### Concurrent main updates
+
+- **#159** `opt/zerograd-v2` merged as `717c38e`; it was in-flight while the original docs branch was prepared but is landed on the current main tip.
+- **#161** `opt/profile-v16` merged as `8bd6b17`; **#163** `opt/gpu-measure-v2` merged as `d0e667b` with structured GPU measurement scaffolding but no CUDA results on this box.
 
 Related early landings without a #1–#33 slot (still on main, documented in notes):
 
