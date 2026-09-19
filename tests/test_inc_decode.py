@@ -76,6 +76,28 @@ def test_blocked_decode_tiled_path_matches_eager():
     assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
 
 
+def test_t1_shared_v_b1_direct_epilogue_matches_eager(monkeypatch):
+    """B=1 shared-V decode writes score×V directly into the output tile."""
+    B, H, S, N, D = 1, 4, _DECODE_ONESHOT_ELEMS + 513, 8, 16
+    Q, K, V = _make_decode_qkv(B=B, H=H, S=S, N=N, D=D, seed=101)
+    ref = eager_decode_attn(Q, K, V)
+    seen = []
+    orig = torch.baddbmm
+
+    def spy(input, batch1, batch2, *, beta=1, alpha=1, out=None):
+        if out is not None:
+            seen.append((input.data_ptr(), out.data_ptr(), batch2.stride(0)))
+        return orig(input, batch1, batch2, beta=beta, alpha=alpha, out=out)
+
+    monkeypatch.setattr(torch, "baddbmm", spy)
+    got = blocked_decode_attn(Q, K, V, block_size=64)
+
+    assert seen
+    assert all(input_ptr == out_ptr for input_ptr, out_ptr, _ in seen)
+    assert all(head_stride == 0 for _, _, head_stride in seen)
+    assert torch.allclose(got, ref, rtol=1e-5, atol=1e-5)
+
+
 def test_triton_decode_cpu_fallback_matches_eager():
     Q, K, V = _make_decode_qkv(S=24)
     got = triton_decode_attn(Q, K, V, block_size=8)

@@ -6069,3 +6069,52 @@ is made.
 - No default `BDH_BUILD_EXT`, attention, decode, or implementation change.
 - No softmax, scale, diagonal inclusion, or full-score materialization.
 - No public or `pathwaycom/*` PRs; private repository only.
+
+
+## opt/scorev-fuse-v3 — B=1 direct shared-V T=1 epilogue (2026-09-19)
+
+**Branch:** `opt/scorev-fuse-v3` (private `katulevskiy/bdh-gpu-opt` only; no
+`pathwaycom/*` or public PR).
+**Base tip:** `dba5f75` (`main`, after #134 CUDA-build-v2).
+
+### Audit / deepen
+
+The default eager T=1 decode remains `_two_gemm_decode`; it is unchanged. The
+blocked/online CPU-safe path and the CPU fallback behind `triton` already keep
+CacheManager's broadcast `V=(B,1,S,D)` unexpanded and use a direct `baddbmm`
+out epilogue for score×V tiles. The CUDA/Triton launcher remains stride-aware
+for packed KR/V views; this follow-on does not alter its GPU scaffold.
+
+The remaining small hot-path staging was the common `B=1` case: the shared-V
+epilogue rebuilt `(B,H,1,D)` / `(B,H,1,Bj)` views and entered a one-iteration
+Python batch loop even though the score and output were already flattened as
+`(B*H,1,*)`. The B=1 branch now reuses those flattened views and sends one
+zero-stride shared-V view directly to `torch.baddbmm(..., out=target)`. `B>1`
+keeps the existing per-sample zero-stride path, and autograd keeps the
+allocation-safe matmul fallback because `out=` operators are not differentiable.
+
+Math is unchanged: raw scores × strict `tril(diagonal=-1)`, no softmax, no
+scale, no SDPA. `pos0==0`, cat-free generate, default eager, and all resolver
+behavior remain unchanged.
+
+### Tests (CPU-only; no GPU claims)
+
+```text
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest \
+  tests/test_inc_decode.py tests/test_gen_sample.py tests/test_fuse_scorev.py -q
+# 111 passed, 3 skipped in 20.40s
+
+/workspace/bdh-gpu-opt/.venv/bin/python -m pytest -q
+# 533 passed, 19 skipped, 3 warnings in 121.09s
+```
+
+Coverage includes eager-vs-blocked/online/triton/cuda-ref decode parity, exact
+position-zero zeros, the B=1 direct out-buffer epilogue, and generate token
+parity with `torch.cat` count zero. This CPU box has no GPU; no timing,
+kernel-on-hardware, correctness-on-GPU, or speedup claim is made.
+
+### Non-goals
+
+- No default eager, attention math, or generate behavior change.
+- No softmax, scale, diagonal inclusion, or full score materialization.
+- No GPU claims; no public PR and no PRs to `pathwaycom/*`.
