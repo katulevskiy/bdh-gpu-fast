@@ -395,6 +395,24 @@ def test_attn_auto_does_not_create_omitted_cold_threshold(monkeypatch):
     assert "BDH_ATTN_AUTO_COLD_THRESHOLD" not in os.environ
 
 
+def test_attn_auto_restores_omitted_threshold_after_exception(monkeypatch):
+    """An interrupted single-gate override must not leak the omitted gate."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "0")
+    monkeypatch.setenv("BDH_ATTN_AUTO_THRESHOLD", "old-decode")
+    monkeypatch.delenv("BDH_ATTN_AUTO_COLD_THRESHOLD", raising=False)
+
+    with pytest.raises(RuntimeError, match="stop auto"):
+        with bench_generate._attn_auto(True, cold_threshold=128):
+            assert os.environ["BDH_ATTN_AUTO"] == "1"
+            assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
+            assert os.environ["BDH_ATTN_AUTO_COLD_THRESHOLD"] == "128"
+            raise RuntimeError("stop auto")
+
+    assert os.environ["BDH_ATTN_AUTO"] == "0"
+    assert os.environ["BDH_ATTN_AUTO_THRESHOLD"] == "old-decode"
+    assert "BDH_ATTN_AUTO_COLD_THRESHOLD" not in os.environ
+
+
 def test_attn_auto_restores_unset_environment_after_exception(monkeypatch):
     """AUTO must not leave newly introduced variables behind."""
     for name in (
