@@ -31,8 +31,9 @@ Optional native build (``csrc/``)::
 
 Cold CUDA kernel (``tril_score_v_cuda``) uses **tiled online** accumulation
 (shared-mem Q/K/V tiles; no global T×T scores). Decode is a separate
-packed-past tiled scaffold with **larger past tiles** (``DECODE_TILE_N``)
-and a dedicated ``Tq=1`` kernel. Without the extension, training and tests
+packed-past tiled scaffold with **adaptive past tiles** (``pick_cuda_decode_tile_n``;
+base ``DECODE_TILE_N=32``, long-S up to 128 on CUDA / 512 on CPU refs) and a
+dedicated ``Tq=1`` kernel. Without the extension, training and tests
 still work via pure-PyTorch refs. Import of this module **never** raises if
 the native ext is missing — ``has_cuda_ext()`` is False and dispatch falls back.
 
@@ -52,8 +53,13 @@ import torch
 CUDA_TILE_M = 16  # query rows per tile (cold)
 CUDA_TILE_N = 16  # key cols per online tile (cold)
 CUDA_TILE_D = 32  # Dv columns (CUDA blockDim.x; CPU uses full Dv via matmul)
-# Decode past tiles can be larger (no causal diagonal — all keys valid).
-CUDA_DECODE_TILE_N = 32
+# Decode past tiles: base / max (no causal diagonal — all keys valid).
+# cuda-decode-v3: adaptive long-S tiles (pair #55/#62); CUDA smem caps at MAX.
+CUDA_DECODE_TILE_N = 32  # base / mid-S default (kept for back-compat asserts)
+CUDA_DECODE_TILE_N_MAX = 128  # CUDA smem-aware cap (float Dk≈64 fits ≤48 KiB)
+CUDA_DECODE_TILE_N_CPU_MAX = 512  # CPU refs: same long-S preference as Triton #62
+# Soft smem budget matching csrc SMEM_CAP (bytes) for float-size estimates.
+_CUDA_DECODE_SMEM_CAP = 48 * 1024
 
 # Soft budget: below this, cold/decode refs prefer a single vectorized two-GEMM
 # (bit-identical to eager). Above it, use tiled online to avoid a full T×T /
@@ -111,6 +117,67 @@ def _check_decode_shapes(
     if v_past.size(1) not in (1, H):
         raise ValueError("v_past heads must equal q heads or 1")
     return B, H, Tq, S, v_past.size(-1)
+
+
+def pick_cuda_decode_tile_n(
+    S: int,
+    Dk: int = 64,
+    *,
+    for_smem: bool = False,
+    tile_n: int | None = None,
+) -> int:
+    """Power-of-2 past tiles for CUDA T=1 decode (long-S: up to 128 GPU / 512 CPU).
+
+    Pairs with #55 blocked long-S wins and #62 Triton tile picker: larger past
+    tiles on long packed caches (decode has no causal diagonal). CUDA launch
+    uses ``for_smem=True`` (cap ``CUDA_DECODE_TILE_N_MAX``, shrink for 48 KiB
+    smem). CPU tiled refs use ``for_smem=False`` so long-S can reach 512 like
+    Triton while still matching blocked/eager numerically.
+    """
+    def _p2_cap(x: int, lo: int, hi: int) -> int:
+        x = max(lo, min(int(x), hi))
+        p = lo
+        while p < x:
+            nxt = p << 1
+            if nxt > hi:
+                break
+            p = nxt
+        return p
+
+    hi = CUDA_DECODE_TILE_N_MAX if for_smem else CUDA_DECODE_TILE_N_CPU_MAX
+    lo = 16
+    if tile_n is not None:
+        tn = _p2_cap(int(tile_n), lo, hi)
+    else:
+        S = max(int(S), 1)
+        # Mirror #62 _pick_triton_decode_tiles long-S preference (CPU refs).
+        if S <= 64:
+            want = 32
+        elif S <= 256:
+            want = 64
+        elif S <= 1024:
+            want = 128
+        elif S <= 2048:
+            want = 256
+        else:
+            want = 512
+        tn = _p2_cap(min(S, want), lo, hi)
+
+    if for_smem:
+        Dk = max(int(Dk), 1)
+        # float-sized estimate: Qs[Dk] + Ks[TN*Dk] + Vs[TN*TILE_D]
+        esz = 4
+
+        def _smem(tn: int) -> int:
+            return esz * (Dk + tn * Dk + tn * CUDA_TILE_D)
+
+        while tn > CUDA_DECODE_TILE_N and _smem(tn) > _CUDA_DECODE_SMEM_CAP:
+            tn >>= 1
+        tn = max(tn, CUDA_DECODE_TILE_N) if _smem(CUDA_DECODE_TILE_N) <= _CUDA_DECODE_SMEM_CAP else max(16, tn)
+        # Final clamp: never exceed MAX; if even base overflows, caller falls naive.
+        tn = min(tn, CUDA_DECODE_TILE_N_MAX)
+    return max(lo, tn)
+
 
 
 def tril_score_v_ref(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -241,8 +308,8 @@ def tril_decode_ref(
     (same as ``tril(diagonal=-1)``).
 
     Small ``Tq×S``: single vectorized two-GEMM (bit-identical to eager decode).
-    Large past: tiles over ``CUDA_TILE_N`` key chunks (CUDA-mirror; no full
-    ``Tq×S`` retained). V broadcast without expand.
+    Large past: tiles over ``pick_cuda_decode_tile_n`` key chunks (CUDA-mirror;
+    no full ``Tq×S`` retained). V broadcast without expand.
     """
     B, H, Tq, S, Dv = _check_decode_shapes(q, k_past, v_past)
     if S == 0:
@@ -262,15 +329,16 @@ def tril_decode_tiled_ref(
     k_past: torch.Tensor,
     v_past: torch.Tensor,
     *,
-    tile_n: int = CUDA_DECODE_TILE_N,
+    tile_n: int | None = None,
 ) -> torch.Tensor:
     """CPU mirror of the CUDA **tiled online** decode kernel (no Tq×S retained).
 
-    Tiles the past axis in chunks of ``tile_n`` (default
-    ``CUDA_DECODE_TILE_N`` = 32 — larger than cold ``TILE_N`` because decode
-    has no causal diagonal). Accumulates with ``out.add_`` via
-    ``_two_gemm_decode`` — same structure as ``tril_decode_tiled_kernel`` /
-    ``tril_decode_tq1_kernel`` in ``csrc/tril_attn_cuda.cu``.
+    Tiles the past axis in chunks of ``tile_n``. When omitted, uses
+    ``pick_cuda_decode_tile_n(S, Dk)`` (cuda-decode-v3: long-S up to 512 on
+    CPU — same preference as #62 Triton / #55 blocked). Accumulates with
+    ``out.add_`` via ``_two_gemm_decode`` — same structure as
+    ``tril_decode_tiled_kernel`` / ``tril_decode_tq1_kernel`` in
+    ``csrc/tril_attn_cuda.cu``. Numerically matches ``blocked_decode_attn``.
     """
     from .attention import _two_gemm_decode
 
@@ -278,7 +346,8 @@ def tril_decode_tiled_ref(
     if S == 0:
         return q.new_zeros(B, H, Tq, Dv)
 
-    TN = max(1, int(tile_n))
+    Dk = q.size(-1)
+    TN = pick_cuda_decode_tile_n(S, Dk, tile_n=tile_n)
     if q.dtype in (torch.float16, torch.bfloat16):
         acc_dtype = torch.float32
     else:

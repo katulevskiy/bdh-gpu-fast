@@ -8,9 +8,32 @@ namespace {
 // Match csrc/tril_attn_cuda.cu tile sizes for CPU online scaffolds.
 constexpr int64_t TILE_M = 16;
 constexpr int64_t TILE_N = 16;
-constexpr int64_t DECODE_TILE_N = 32;  // decode-mm: larger past tiles (no causal diag)
+constexpr int64_t DECODE_TILE_N = 32;  // base (decode-mm)
+constexpr int64_t DECODE_TILE_N_CPU_MAX = 512;  // cuda-decode-v3: pair #55/#62 long-S
 // Below this score footprint, prefer a single vectorized matmul (eager-shaped).
 constexpr int64_t SCORE_ELEMS_EAGER_OK = 256 * 256;
+
+// Adaptive past tile (CPU refs — no smem cap; mirrors pick_cuda_decode_tile_n).
+inline int64_t pick_decode_tile_n_cpu(int64_t S) {
+  int64_t want;
+  if (S <= 64) {
+    want = 32;
+  } else if (S <= 256) {
+    want = 64;
+  } else if (S <= 1024) {
+    want = 128;
+  } else if (S <= 2048) {
+    want = 256;
+  } else {
+    want = 512;
+  }
+  int64_t tn = 16;
+  const int64_t target = std::min(std::max(S, int64_t{1}), want);
+  while (tn < target && tn < DECODE_TILE_N_CPU_MAX) {
+    tn <<= 1;
+  }
+  return std::min(tn, DECODE_TILE_N_CPU_MAX);
+}
 
 // Widen half/bf16 to fp32 for accumulation; leave f32/f64 alone (no copy).
 inline torch::Tensor maybe_acc(const torch::Tensor& t) {
@@ -117,14 +140,15 @@ static torch::Tensor tril_decode_cpu_tiled(torch::Tensor q, torch::Tensor k_past
   const auto Tq = q.size(2);
   const auto S = k_past.size(2);
   const auto Dv = v_past.size(3);
+  const int64_t TN = pick_decode_tile_n_cpu(S);
 
   auto qf = maybe_acc(q);
   auto kf = maybe_acc(k_past);
   auto vf = maybe_acc(v_past);
   auto out = torch::zeros({B, H, Tq, Dv}, qf.options());
 
-  for (int64_t j0 = 0; j0 < S; j0 += DECODE_TILE_N) {
-    const int64_t j1 = std::min(j0 + DECODE_TILE_N, S);
+  for (int64_t j0 = 0; j0 < S; j0 += TN) {
+    const int64_t j1 = std::min(j0 + TN, S);
     auto Kj = kf.narrow(/*dim=*/2, j0, j1 - j0);
     auto Vj = vf.narrow(/*dim=*/2, j0, j1 - j0);
     out.add_(at::matmul(at::matmul(qf, Kj.transpose(-2, -1)), Vj));

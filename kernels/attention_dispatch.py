@@ -240,7 +240,7 @@ def bdh_attn_decode(
     - blocked / online: online tiled decode (broadcast-V tight oneshot; ``out.add_``;
       long-S peak ~Tq×tile; larger default tile)
     - triton:  fused decode + V_BROADCAST on CUDA; blocked fallback on CPU
-    - cuda:    ``tril_decode`` (Tq=1 + DECODE_TILE_N CUDA ext if built, else ref)
+    - cuda:    ``tril_decode`` (Tq=1 + adaptive DECODE_TILE_N CUDA ext if built, else ref)
 
     With ``BDH_ATTN_AUTO=1`` and base ``eager``, switches when
     ``K_past.size(2) > BDH_ATTN_AUTO_THRESHOLD`` (default 512) to ``triton``
