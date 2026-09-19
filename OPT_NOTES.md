@@ -1332,3 +1332,84 @@ modest `T` (interpreter overhead). The win here is **peak score memory**
 - No softmax / diagonal inclusion / SDPA
 - No change to default `BDH_ATTN_IMPL=eager`
 - No fake GPU speedups from CPU profiler/bench absolute times
+
+## opt/compile-harden — BDH_COMPILE probe + inductor CPU harden (2026-09-19)
+
+**Branch:** `opt/compile-harden` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `75ce4a2` (current main after cache-v2 + triton-decode2 + fuse-scorev).
+
+### Goal
+
+Harden the optional `torch.compile` path (`BDH_COMPILE=1`): probe the graph
+that training actually runs, document Dynamo graph-break boundaries, keep
+dropout / RoPE / cache inductor-safe on **CPU**, and lock compile↔eager
+parity at `dropout=0`. **No fake GPU claims** (this box: `cuda=False`).
+
+### Probe improvements (`train.maybe_compile`)
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `BDH_COMPILE` | `0` | Opt-in compile |
+| `BDH_COMPILE_MODE` | `default` | passed to `torch.compile` |
+| `BDH_COMPILE_PROBE` | `train` | `eval` \| `train` \| `train_bwd` |
+| `BDH_COMPILE_FULLGRAPH` | `0` | `fullgraph=True` when set |
+
+Previously the probe ran **`eval()` + `no_grad` only**. Dynamo treats train vs
+eval as **separate graphs** (dropout / `torch.is_grad_enabled()` guards) — an
+eval-only probe can “succeed” then pay a second compile (or fail) on the first
+`train_step`. Default probe is now **`train`** forward with targets; `train_bwd`
+also runs `loss.backward()` + `zero_grad(set_to_none=True)`.
+
+On non-CUDA devices, `mode=reduce-overhead` prints an honest note: **no CUDA
+graphs** here (inductor may still run). Failures log exception type + device.
+
+### Model harden (`bdh.py`)
+
+1. **Hoist** `bdh_attn` / `bdh_attn_decode` imports — no lazy import inside
+   `Attention.forward` (avoids a Dynamo graph break / recompile edge).
+2. **RoPE cis cache** — skip `_rope_cis` Python attribute writes while
+   `torch.compiler.is_compiling()` so tracing does not bake a mid-graph module
+   mutation; eager / post-compile execution still warms the table.
+3. **`generate()`** — `@torch.compiler.disable` (dynamic length, multinomial,
+   `CacheManager` mutation). Compiled `forward` remains usable for train.
+
+Dropout path unchanged from #17: `dropout_p==0` identity; `F.dropout` when
+`p>0` (torch RNG only).
+
+### Documented graph-break / compile boundaries
+
+| Region | Compiled? | Notes |
+|--------|-----------|-------|
+| `BDH.forward` cold train (no cache, fixed B×T) | Yes (target) | `fullgraph=True` OK at dropout=0 on CPU inductor |
+| `get_batch` / DataLoader / prefetch | **Outside** | Keep host gather + H2D out of the module |
+| Logging `.item()` / print | **Outside** | Only every `LOG_FREQ` |
+| `generate()` / variable-T sample | **Disabled** | Decorator; call after train |
+| `CacheManager` decode under compile | Works on CPU | Prefill+step parity tested; still prefer eager generate |
+| `BDH_ATTN_IMPL` env | Specialized at compile | Change env → need recompile |
+| CUDA graphs (`reduce-overhead`) | CUDA only | Not claimed on this CPU box |
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_compile.py tests/ -q
+# compile+forward matches eager at dropout=0 (atol 1e-5; inductor float noise)
+# fullgraph eval smoke; rope cache + packed cache decode parity; maybe_compile probe
+```
+
+Inductor CPU can differ from eager at ~1e-7–1e-6; tests use `atol=1e-5`, not
+`torch.equal`. **No end-to-end train speedup claimed** on CPU from compile alone.
+
+### Honest limits
+
+- No GPU on this box — do not claim CUDA-graph or GPU inductor wins.
+- `train_bwd` probe doubles compile time on first step (intentional).
+- Changing `T` may recompile (Dynamo dynamic shapes); fixed `BLOCK_SIZE` train
+  loop avoids that.
+- Still no softmax / no scale / no SDPA / no PRs to `pathwaycom/*`.
+
+### Non-goals
+
+- No PRs to `pathwaycom/bdh`
+- No attention math / Parameter layout changes
+- No default `BDH_COMPILE=1` on `train.py` (stays opt-in; `train_fast` still
+  setdefaults to 1)

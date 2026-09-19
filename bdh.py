@@ -12,6 +12,9 @@ from torch import nn
 
 from bdh_cache import CacheManager
 
+# Eager import so Attention.forward has no lazy-import graph break under Dynamo.
+from kernels.attention_dispatch import bdh_attn, bdh_attn_decode
+
 
 @dataclasses.dataclass
 class BDHConfig:
@@ -137,8 +140,12 @@ class Attention(torch.nn.Module):
         cos, sin = self.phases_cos_sin(self._rope_phases(T, 0, device))
         # Detach so a cached table never holds an autograd graph across steps.
         cos, sin = cos.detach(), sin.detach()
-        self._rope_cis_key = key
-        self._rope_cis = (cos, sin)
+        # Skip Python attribute writes while Dynamo is tracing/compiling.
+        # Mutating ``_rope_cis`` mid-trace can confuse guards / inductor on CPU
+        # when T changes; eager path and post-compile execution still warm cache.
+        if not torch.compiler.is_compiling():
+            self._rope_cis_key = key
+            self._rope_cis = (cos, sin)
         return cos, sin
 
     def forward(
@@ -180,8 +187,6 @@ class Attention(torch.nn.Module):
             # Training / cold prefill: unified backend dispatch.
             # Semantics: tril(QR @ QR.T, diagonal=-1) @ V — no softmax, no scale.
             # BDH_ATTN_AUTOGRAD=1 remains supported by the dispatcher.
-            from kernels.attention_dispatch import bdh_attn
-
             out = bdh_attn(QR, QR, V)
             return out, QR, V
 
@@ -206,8 +211,6 @@ class Attention(torch.nn.Module):
                 scores = QR @ past_kr.mT  # (B, nh, 1, S)
                 out = scores @ past_v
             else:
-                from kernels.attention_dispatch import bdh_attn_decode
-
                 out = bdh_attn_decode(QR, past_kr, past_v, impl=impl)
             return out, QR, V
 
@@ -530,6 +533,7 @@ class BDH(nn.Module):
         return logits, loss
 
     @torch.no_grad()
+    @torch.compiler.disable
     def generate(
         self,
         idx: torch.Tensor,
@@ -542,6 +546,10 @@ class BDH(nn.Module):
         cache_page_size: int | None = None,
     ) -> torch.Tensor:
         """Autoregressive decode with packed KR/V cache (preallocated max_seq).
+
+        Marked ``torch.compiler.disable``: dynamic length, multinomial,
+        and CacheManager mutation graph-break / fight CUDA graphs. Call from
+        eager (or after training); ``forward`` itself may still be compiled.
 
         cache_dtype: optional storage dtype for the cache (e.g. torch.float16).
         Compute stays fp32 for RoPE score GEMMs when storage is narrower.
