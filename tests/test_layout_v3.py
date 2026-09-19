@@ -247,3 +247,50 @@ def test_sampler_idx_out_accepts_noncontiguous_column_stride():
         )
         assert torch.equal(got, ref), name
         assert torch.equal(destination[:, 1:2, 0], ref), name
+
+
+def test_sampler_idx_out_does_not_clobber_strided_neighbors():
+    """Sampler writes must stay within the requested non-contiguous view."""
+    torch.manual_seed(0)
+    logits = torch.randn(2, 32)
+    cases = (
+        ("multinomial", dict(scale=None, do_topk=False, top_k_n=0)),
+        ("topk-one", dict(scale=0.7, do_topk=True, top_k_n=1)),
+        ("topk-full", dict(scale=0.7, do_topk=True, top_k_n=32)),
+        ("topk-overflow", dict(scale=0.7, do_topk=True, top_k_n=40)),
+    )
+
+    for name, kwargs in cases:
+        destination = torch.full((2, 3, 3), -123, dtype=torch.long)
+        before = destination.clone()
+        idx_out = destination[:, 1:2, 1]
+        assert idx_out.shape == (2, 1), name
+        assert idx_out.stride() == (9, 3), name
+
+        torch.manual_seed(17)
+        got = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+            idx_out=idx_out,
+        )
+        assert got is idx_out
+
+        target = torch.zeros_like(destination, dtype=torch.bool)
+        target[:, 1:2, 1] = True
+        assert torch.equal(
+            destination.masked_select(~target), before.masked_select(~target)
+        ), name
+
+        torch.manual_seed(17)
+        ref = bdh.BDH._sample_from_logits(
+            logits.clone(),
+            **kwargs,
+            probs_buf=torch.empty_like(logits),
+            softmax=torch.nn.functional.softmax,
+            multinomial=torch.multinomial,
+        )
+        assert torch.equal(got, ref), name
+        assert torch.equal(destination[:, 1:2, 1], ref), name
