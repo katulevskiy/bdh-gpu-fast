@@ -7207,3 +7207,19 @@ python -m pytest tests/test_rope_cache.py tests/test_rope_fuse.py tests/test_rop
 
 No GPU is available here; no GPU timing, kernel-on-hardware result, or GPU
 RoPE win is claimed.
+
+## opt/scorev-v5 — B=1 packed shared-V epilogue edge coverage (2026-09-19)
+
+**Branch:** `opt/scorev-v5` (private `katulevskiy/bdh-gpu-opt` only; no
+public PR and no PRs to `pathwaycom/*`).
+**Base tip:** `4bd410a` (`main`, post-#193 docs).
+
+The score×V follow-on adds CPU coverage for the remaining B=1 edge cases after
+#165/#135: a long, capacity-strided CacheManager prefix must keep the direct
+`baddbmm(..., out=target)` accumulation on beta=1 tiles, and a grad-enabled
+B=1 decode must retain the allocation-safe fallback. The test checks output
+and input/output pointer aliasing for the out path, packed KR/V strides, and
+finite gradients. Defaults remain eager, and attention remains raw scores ×
+strict `tril(diagonal=-1)`.
+
+Validation is CPU-only; no timing, GPU correctness, or speedup claim is made.
