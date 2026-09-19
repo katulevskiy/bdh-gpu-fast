@@ -95,6 +95,25 @@ def test_run_auto_ab_sweep_preserves_explicit_cold_threshold(monkeypatch):
     ]
 
 
+def test_run_auto_ab_sweep_continues_after_failed_threshold(monkeypatch):
+    """A failed threshold run must not prevent later sweep values from running."""
+    calls = []
+
+    def fake_run_auto_ab(args, device):
+        calls.append(args.auto_threshold)
+        return 1 if args.auto_threshold == 256 else 0
+
+    monkeypatch.setattr(bench_generate, "run_auto_ab", fake_run_auto_ab)
+    args = argparse.Namespace(
+        auto_threshold=999,
+        auto_cold_threshold=64,
+        auto_threshold_sweep="256,512",
+    )
+
+    assert bench_generate.run_auto_ab_sweep(args, object()) == 1
+    assert calls == [256, 512]
+
+
 def test_run_auto_ab_sweep_rejects_invalid_values_before_model_setup(
     monkeypatch, capsys
 ):
