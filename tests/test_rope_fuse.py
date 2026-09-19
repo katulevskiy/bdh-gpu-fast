@@ -23,7 +23,7 @@ from kernels.rope import (
     fused_rope_rotate_triton,
     _can_use_triton_rope,
 )
-from kernels.rope_dispatch import bdh_rope_rotate, resolve_rope_impl
+from kernels.rope_dispatch import backend_info, bdh_rope_rotate, resolve_rope_impl
 
 
 def _small_cfg(**kwargs) -> bdh.BDHConfig:
@@ -228,6 +228,29 @@ def test_triton_entry_cpu_falls_back_to_blocked(monkeypatch):
     out_e = eager_rope_rotate(v, cos, sin)
     assert torch.equal(out_t, out_b)
     assert torch.equal(out_t, out_e)
+
+
+def test_triton_gate_and_backend_info_are_cpu_safe():
+    """Unavailable CUDA or mismatched auxiliary tensors cleanly skip Triton."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=8, seed=26)
+    assert not _can_use_triton_rope(v, cos, sin)
+    info = backend_info(torch.device("cuda"))
+    assert info["device"] == "cuda"
+    assert info["triton_usable"] is False
+
+
+def test_t_gt1_noncontiguous_cpu_parity_and_out():
+    """T>1 pair views preserve parity for transposed leading dimensions."""
+    _, _, cos, sin, v, _ = _cis_and_v(T=7, seed=27)
+    v_nc = v.transpose(1, 2)
+    cos_nc = cos.transpose(1, 2)
+    sin_nc = sin.transpose(1, 2)
+    ref = eager_rope_rotate(v_nc, cos_nc, sin_nc)
+    out = torch.empty_like(v_nc)
+    got = fused_rope_rotate_blocked(v_nc, cos_nc, sin_nc, out=out, block=3)
+    assert got is out
+    assert torch.equal(got, ref)
+    assert torch.equal(fused_rope_rotate_pytorch(v_nc, cos_nc, sin_nc), ref)
 
 
 def test_fused_out_none_pair_store_parity():
