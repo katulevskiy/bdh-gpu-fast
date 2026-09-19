@@ -3482,3 +3482,86 @@ AUTO threshold re-tune on CUDA. #55–#58 already on main — strike from “nex
 - No GPU speedup claims from these CPU % figures
 - No defaulting `BDH_ATTN_IMPL=blocked` or `BDH_ATTN_AUTO=1` on CPU
 
+## opt/triton-decode-v3 — deepen Triton T=1 decode scaffold (2026-09-19)
+
+**Branch:** `opt/triton-decode-v3` (private `katulevskiy/bdh-gpu-opt` only).
+**Base tip:** `8182124` (main after `#61` fix-gen-host-test / `#60` docs-matrix).
+
+### Goal
+
+Pair with `#55` blocked long-S wins: deepen the **Triton** T=1 decode scaffold
+vs packed KR/V (long-S tiles, Q-hoist, broadcast-V staging) and teach
+`BDH_ATTN_AUTO` to **prefer Triton when CUDA+Triton are available**, else keep
+the #55 blocked path. **No GPU on this box** — CPU fallback honesty + tests that
+skip cleanly. Hard constraints: `tril(diagonal=-1)`, `aten::cat=0`, **default
+eager** unchanged.
+
+### What changed
+
+| Piece | Change |
+|-------|--------|
+| `kernels/attention.py` | `_bdh_decode_fwd_kernel`: `HOIST_Q` when `N<=BLOCK_K` (one Q load / past scan); `_pick_triton_decode_tiles` long-S up to **512**; `triton_decode_available()`; CPU `triton_decode_attn` → `#55` `blocked_decode_attn` |
+| `kernels/attention_dispatch.py` | AUTO long-S: eager→**triton** if `triton_decode_available()` else **blocked**; `backend_info` adds `triton_decode_available` / `auto_decode_prefers` |
+| `kernels/README.md` / `__init__.py` | Document AUTO×Triton; export `triton_decode_available` |
+| `tests/test_attn_auto.py` | AUTO prefers triton\|blocked; parity; backend_info fields |
+| `tests/test_inc_decode.py` | Tile picker long-S; CPU fallback ≡ blocked; CUDA kernel skip; tril(-1) last-row |
+
+```bash
+export BDH_ATTN_IMPL=eager     # default — unchanged
+export BDH_ATTN_AUTO=1         # opt-in: past_len > thr → triton (GPU) or blocked (CPU)
+export BDH_ATTN_AUTO_THRESHOLD=512
+export BDH_ATTN_IMPL=triton    # explicit: fused decode on CUDA; #55 blocked on CPU
+```
+
+### BDH_ATTN_AUTO interaction
+
+```text
+cold / prefill:  always BDH_ATTN_IMPL   (AUTO ignored)
+T=1 decode:
+  if AUTO off or IMPL != eager:     IMPL
+  elif past_len > THRESHOLD:
+       if triton_decode_available():  triton   # CUDA + Triton import
+       else:                          blocked  # #55 CPU long-S
+  else:                               eager
+# tril(diagonal=-1); past-only; cat=0; default AUTO off / IMPL=eager
+```
+
+On this CPU box `triton_decode_available()==False` → AUTO still selects
+**blocked** (same as `#56`). On a future CUDA box with Triton, AUTO selects
+**triton** so the deepened fused decode runs without changing the default
+eager path.
+
+### Semantics (unchanged)
+
+```text
+out = (Q @ K_past.mT) @ V_past     # all keys j < S; no self
+# ≡ last row of tril(Q_all @ K_all.T, diagonal=-1) @ V_all
+# CacheManager: aten::cat = 0; pos0 / S=0 → zeros
+```
+
+### Correctness (this box, CPU)
+
+```text
+.venv/bin/python -m pytest tests/test_attn_auto.py tests/test_inc_decode.py \
+  tests/test_triton_attn.py tests/test_attn_unify.py -q
+# AUTO off → eager; AUTO on (CPU) → blocked when S>512; triton CPU fallback
+# ≡ blocked (#55); tile picker S=4096 → BLOCK_N=512; CUDA kernel tests skip
+```
+
+### Honest limits (no GPU claims)
+
+- **No GPU on this box** — fused Triton decode kernel is in-tree (Q-hoist +
+  long-S tiles) but **unexecuted** here; `triton_decode_attn` →
+  `blocked_decode_attn` (#55 tight oneshot / peak bound).
+- AUTO×Triton preference is **scaffolded** for CUDA; this box still exercises
+  AUTO→blocked only. Do **not** claim GPU wall wins from CPU medians.
+- Measure later: `bench_gpu_attn.py --mode decode` / `bench_generate.py` with
+  `BDH_ATTN_AUTO=1` and `BDH_ATTN_IMPL=triton` on A100/H100.
+
+### Non-goals
+
+- No PRs to `pathwaycom/*`
+- No change to default `BDH_ATTN_IMPL=eager` or AUTO-off behavior
+- No re-introducing `aten::cat` in generate / CacheManager
+- No softmax / scale / SDPA
+

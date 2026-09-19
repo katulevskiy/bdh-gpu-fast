@@ -14,13 +14,18 @@ Backends (``BDH_ATTN_IMPL``)::
 Opt-in long-S decode auto-select (does **not** change default)::
 
     export BDH_ATTN_AUTO=1                 # off unless set
-    export BDH_ATTN_AUTO_THRESHOLD=512     # default 512; past_len > thr → blocked
+    export BDH_ATTN_AUTO_THRESHOLD=512     # default 512; past_len > thr → prefer
 
 When ``BDH_ATTN_AUTO`` is truthy and ``BDH_ATTN_IMPL`` resolves to ``eager``,
-T=1 decode switches to ``blocked`` once ``past_len`` exceeds the threshold
-(CPU-honest crossover from #55 decode-online-v2 benches). Cold / prefill
-always follows ``BDH_ATTN_IMPL`` only. Explicit non-eager ``IMPL`` is never
-overridden. Default (AUTO unset) remains eager for all paths.
+T=1 decode switches once ``past_len`` exceeds the threshold:
+
+- **Triton** when ``triton_decode_available()`` (CUDA + Triton import) — fused
+  decode scaffold for GPU long-S; CPU fallback inside ``triton_decode_attn``
+  still uses #55 blocked.
+- **blocked** otherwise — CPU-honest #55 long-S wins.
+
+Cold / prefill always follows ``BDH_ATTN_IMPL`` only. Explicit non-eager
+``IMPL`` is never overridden. Default (AUTO unset) remains eager for all paths.
 
 Backends: eager, blocked (=online), triton, or cuda.
 
@@ -30,9 +35,10 @@ Wire-up in ``bdh.Attention.forward``:
   With ``BDH_ATTN_AUTOGRAD=1``, wraps in ``StrictTrilAttnFn`` (analytic train).
 - Multi-token + past under AUTOGRAD: also ``bdh_attn`` → ``strict_tril_attn``.
 - T=1 decode (packed past KR/V): ``bdh_attn_decode`` — eager two-GEMM by
-  default; with ``BDH_ATTN_AUTO=1`` and long past, eager→blocked; else
-  blocked/triton/cuda use their decode paths (cuda → ``kernels.cuda_attn.tril_decode``).
-  Decode stays outside StrictTrilAttnFn (generate is no_grad / CacheManager-safe).
+  default; with ``BDH_ATTN_AUTO=1`` and long past, eager→triton (if CUDA+Triton)
+  else blocked (#55); else blocked/triton/cuda use their decode paths
+  (cuda → ``kernels.cuda_attn.tril_decode``). Decode stays outside
+  StrictTrilAttnFn (generate is no_grad / CacheManager-safe).
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ from .attention import (
     eager_decode_attn,
     eager_tril_attn,
     triton_decode_attn,
+    triton_decode_available,
     triton_tril_attn,
 )
 from .attention_bwd import _env_autograd_enabled, strict_tril_attn
@@ -120,7 +127,7 @@ def attn_auto_enabled() -> bool:
 
 
 def attn_auto_threshold() -> int:
-    """Past-length threshold for AUTO eager→blocked decode (default 512)."""
+    """Past-length threshold for AUTO eager→triton|blocked decode (default 512)."""
     global _ATTN_AUTO_THR_ENV, _ATTN_AUTO_THR
     env = os.environ.get("BDH_ATTN_AUTO_THRESHOLD", "")
     if env is _ATTN_AUTO_THR_ENV or env == _ATTN_AUTO_THR_ENV:
@@ -153,7 +160,11 @@ def resolve_decode_impl(
     Cold/prefill must keep using ``resolve_attn_impl`` / ``bdh_attn`` (AUTO
     does not apply there). When AUTO is off, or ``BDH_ATTN_IMPL`` is already
     non-eager, this matches ``resolve_attn_impl``. When AUTO is on and the
-    base impl is eager, returns ``blocked`` iff ``past_len > threshold``.
+    base impl is eager and ``past_len > threshold``:
+
+    - ``triton`` if ``triton_decode_available()`` (CUDA + Triton) — GPU fused
+      decode; host still falls back to #55 blocked when the kernel cannot run.
+    - ``blocked`` otherwise — CPU-honest #55 long-S path.
     """
     name = resolve_attn_impl(requested)
     if name != "eager":
@@ -161,6 +172,8 @@ def resolve_decode_impl(
     if not attn_auto_enabled():
         return "eager"
     if int(past_len) > attn_auto_threshold():
+        if triton_decode_available():
+            return "triton"
         return "blocked"
     return "eager"
 
@@ -229,9 +242,10 @@ def bdh_attn_decode(
     - triton:  fused decode + V_BROADCAST on CUDA; blocked fallback on CPU
     - cuda:    ``tril_decode`` (Tq=1 + DECODE_TILE_N CUDA ext if built, else ref)
 
-    With ``BDH_ATTN_AUTO=1`` and base ``eager``, switches to ``blocked`` when
-    ``K_past.size(2) > BDH_ATTN_AUTO_THRESHOLD`` (default 512). Explicit
-    non-eager ``impl`` / ``BDH_ATTN_IMPL`` is never overridden.
+    With ``BDH_ATTN_AUTO=1`` and base ``eager``, switches when
+    ``K_past.size(2) > BDH_ATTN_AUTO_THRESHOLD`` (default 512) to ``triton``
+    if CUDA+Triton are available, else ``blocked`` (#55). Explicit non-eager
+    ``impl`` / ``BDH_ATTN_IMPL`` is never overridden.
     """
     past_len = int(K_past.size(2))
     name = resolve_decode_impl(past_len, requested=impl)
@@ -274,6 +288,10 @@ def backend_info() -> dict:
         "BDH_ATTN_AUTO": attn_auto_enabled(),
         "BDH_ATTN_AUTO_THRESHOLD": attn_auto_threshold(),
         "has_triton": _HAS_TRITON,
+        "triton_decode_available": triton_decode_available(),
+        "auto_decode_prefers": (
+            "triton" if triton_decode_available() else "blocked"
+        ),
         "has_cuda_ext": has_cuda_ext(),
         "has_cuda_kernel": has_cuda_kernel(),
         "cuda": cuda_dev,

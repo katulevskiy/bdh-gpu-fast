@@ -17,7 +17,10 @@ from bdh_cache import CacheManager
 from kernels.attention import (
     DEFAULT_BLOCK_DECODE,
     _DECODE_ONESHOT_ELEMS,
+    _HAS_TRITON,
+    _can_use_triton,
     _pick_tile_size,
+    _pick_triton_decode_tiles,
     _tiled_score_v,
     blocked_decode_attn,
     blocked_tril_attn,
@@ -26,6 +29,7 @@ from kernels.attention import (
     max_decode_score_elems,
     online_decode_attn,
     triton_decode_attn,
+    triton_decode_available,
 )
 from kernels.attention_dispatch import bdh_attn_decode, resolve_attn_impl
 
@@ -475,3 +479,84 @@ def test_pick_tile_size_honors_decode_score_budget():
     tile = _pick_tile_size(8192, 1, 256, score_budget=_DECODE_ONESHOT_ELEMS)
     assert tile <= _DECODE_ONESHOT_ELEMS
     assert tile >= 256
+
+
+# --- opt/triton-decode-v3: deepen Triton T=1 scaffold + CPU honesty ---
+
+def test_pick_triton_decode_tiles_long_s():
+    """Long S prefers larger past tiles (up to 512); mid-S stays moderate."""
+    bn64, bd, bk = _pick_triton_decode_tiles(64, 64, 128)
+    assert bn64 == 64 and bd >= 16 and bk >= 16
+    bn512, _, _ = _pick_triton_decode_tiles(512, 64, 128)
+    assert bn512 == 128
+    bn2k, _, _ = _pick_triton_decode_tiles(2048, 64, 128)
+    assert bn2k == 256
+    bn4k, _, bk4 = _pick_triton_decode_tiles(4096, 64, 128)
+    assert bn4k == 512
+    # N<=64 → BLOCK_K covers N → host will set HOIST_Q=1
+    assert bk4 >= 64
+    # explicit override still power-of-2 capped
+    bn_o, _, _ = _pick_triton_decode_tiles(4096, 32, 32, block_n=300)
+    assert bn_o == 512
+
+
+def test_triton_decode_available_cpu_honest():
+    """No GPU on this box → triton_decode_available is False (AUTO → blocked)."""
+    avail = triton_decode_available()
+    if not torch.cuda.is_available() or not _HAS_TRITON:
+        assert avail is False
+    else:
+        assert avail is True
+
+
+@pytest.mark.parametrize("S", [64, 256, 1024, 4096])
+def test_triton_decode_long_s_cpu_fallback_matches_blocked(S):
+    """CPU triton_decode_attn → blocked_decode (#55 oneshot); ≡ eager last-row math."""
+    Q, K, V = _make_decode_qkv(B=2, H=4, S=S, N=16, D=32, Tq=1, seed=50 + S)
+    tri = triton_decode_attn(Q, K, V)
+    blk = blocked_decode_attn(Q, K, V)
+    ref = eager_decode_attn(Q, K, V)
+    assert torch.allclose(tri, blk, atol=0), "CPU fallback must be blocked_decode"
+    assert torch.allclose(tri, ref, rtol=1e-4, atol=1e-5)
+    assert not _can_use_triton(Q)  # CPU tensor → no kernel launch
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not _HAS_TRITON,
+    reason="CUDA+Triton required for fused decode kernel",
+)
+@pytest.mark.parametrize("S", [32, 128, 1024])
+def test_triton_decode_kernel_matches_eager_cuda(S):
+    """Fused Triton decode ≡ eager on CUDA (skip cleanly on CPU boxes)."""
+    device = "cuda"
+    g = torch.Generator(device="cpu").manual_seed(77 + S)
+    B, H, N, D = 2, 4, 64, 64
+    Q = torch.randn(B, H, 1, N, generator=g).to(device)
+    K = torch.randn(B, H, S, N, generator=g).to(device)
+    V = torch.randn(B, 1, S, D, generator=g).to(device)
+    assert _can_use_triton(Q)
+    got = triton_decode_attn(Q, K, V)
+    ref = eager_decode_attn(Q, K, V)
+    assert torch.allclose(got, ref, rtol=1e-3, atol=1e-3), (
+        f"S={S} maxdiff={(got - ref).abs().max().item()}"
+    )
+
+
+def test_triton_decode_vs_full_tril_minus_one():
+    """triton decode (CPU→blocked) ≡ last row of eager tril(diagonal=-1)."""
+    B, H, S, N, D = 2, 4, 48, 16, 32
+    g = torch.Generator().manual_seed(91)
+    past_k = torch.randn(B, H, S, N, generator=g)
+    past_v = torch.randn(B, 1, S, D, generator=g)
+    q = torch.randn(B, H, 1, N, generator=g)
+    K_all = torch.cat([past_k, q], dim=2)
+    V_new = torch.randn(B, 1, 1, D, generator=g)
+    V_all = torch.cat([past_v, V_new], dim=2)
+    last = eager_tril_attn(K_all, K_all, V_all)[:, :, -1:, :]
+    dec = triton_decode_attn(q, past_k, past_v)
+    assert torch.allclose(dec, last, rtol=1e-5, atol=1e-5)
+    # poison new V — must not affect (tril -1)
+    V_all2 = torch.cat([past_v, torch.randn_like(V_new) * 9], dim=2)
+    last2 = eager_tril_attn(K_all, K_all, V_all2)[:, :, -1:, :]
+    assert torch.allclose(last, last2, atol=0)
+

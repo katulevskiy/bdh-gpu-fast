@@ -1,4 +1,4 @@
-"""Opt-in BDH_ATTN_AUTO: long-S T=1 decode → blocked; default eager unchanged."""
+"""Opt-in BDH_ATTN_AUTO: long-S T=1 decode → triton|blocked; default eager unchanged."""
 
 from __future__ import annotations
 
@@ -13,7 +13,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import bdh
-from kernels.attention import blocked_decode_attn, eager_decode_attn
+from kernels.attention import (
+    blocked_decode_attn,
+    eager_decode_attn,
+    triton_decode_attn,
+    triton_decode_available,
+)
 from kernels.attention_dispatch import (
     DEFAULT_ATTN_AUTO_THRESHOLD,
     attn_auto_enabled,
@@ -41,6 +46,12 @@ def _make_decode(S, B=2, H=4, N=16, D=32, seed=0):
     K = torch.randn(B, H, S, N, generator=g)
     V = torch.randn(B, 1, S, D, generator=g)
     return Q, K, V
+
+
+def _auto_long_s_impl() -> str:
+    """What AUTO selects above threshold: triton on CUDA+Triton, else blocked."""
+    return "triton" if triton_decode_available() else "blocked"
+
 
 
 def test_default_auto_off(monkeypatch):
@@ -78,7 +89,7 @@ def test_auto_switches_eager_decode_past_threshold(monkeypatch):
     _bump_caches()
     thr = attn_auto_threshold()
     assert resolve_decode_impl(thr) == "eager"
-    assert resolve_decode_impl(thr + 1) == "blocked"
+    assert resolve_decode_impl(thr + 1) == _auto_long_s_impl()
     # cold/prefill path unchanged
     assert resolve_attn_impl() == "eager"
 
@@ -90,7 +101,7 @@ def test_auto_custom_threshold(monkeypatch):
     _bump_caches()
     assert attn_auto_threshold() == 128
     assert resolve_decode_impl(128) == "eager"
-    assert resolve_decode_impl(129) == "blocked"
+    assert resolve_decode_impl(129) == _auto_long_s_impl()
 
 
 def test_auto_does_not_override_explicit_non_eager(monkeypatch):
@@ -113,14 +124,16 @@ def test_auto_decode_parity_vs_eager_and_blocked(monkeypatch):
     Q, K, V = _make_decode(S=64, seed=11)
     got = bdh_attn_decode(Q, K, V)
     assert torch.allclose(got, eager_decode_attn(Q, K, V), rtol=1e-5, atol=1e-5)
-    # above threshold → blocked path (parity with both refs)
+    # above threshold → triton|blocked (CPU: blocked via triton fallback; parity)
     Q, K, V = _make_decode(S=600, seed=12)
     got = bdh_attn_decode(Q, K, V)
     ref_e = eager_decode_attn(Q, K, V)
     ref_b = blocked_decode_attn(Q, K, V)
+    ref_t = triton_decode_attn(Q, K, V)
     assert torch.allclose(got, ref_e, rtol=1e-4, atol=1e-5)
     assert torch.allclose(got, ref_b, rtol=1e-5, atol=1e-5)
-    assert resolve_decode_impl(600) == "blocked"
+    assert torch.allclose(got, ref_t, rtol=1e-5, atol=1e-5)
+    assert resolve_decode_impl(600) == _auto_long_s_impl()
 
 
 def test_auto_off_long_s_stays_eager(monkeypatch):
@@ -174,7 +187,7 @@ def test_attention_module_auto_decode(monkeypatch):
         Q, Q, torch.randn_like(V) * 99, rope_start=S, past_kr=past_kr, past_v=past_v
     )
     assert torch.allclose(out, out2, atol=0)
-    assert resolve_decode_impl(S) == "blocked"
+    assert resolve_decode_impl(S) == _auto_long_s_impl()
 
 
 def test_invalid_threshold_raises(monkeypatch):
@@ -182,3 +195,31 @@ def test_invalid_threshold_raises(monkeypatch):
     _bump_caches()
     with pytest.raises(ValueError, match="BDH_ATTN_AUTO_THRESHOLD"):
         attn_auto_threshold()
+
+
+def test_auto_prefers_triton_when_available(monkeypatch):
+    """Document AUTO → triton on CUDA+Triton, else blocked (#55 CPU path)."""
+    monkeypatch.setenv("BDH_ATTN_AUTO", "1")
+    monkeypatch.delenv("BDH_ATTN_AUTO_THRESHOLD", raising=False)
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump_caches()
+    info = backend_info()
+    assert info["auto_decode_prefers"] == _auto_long_s_impl()
+    assert info["triton_decode_available"] == triton_decode_available()
+    # On this CPU box: False → blocked; GPU boxes with Triton: True → triton.
+    if triton_decode_available():
+        assert resolve_decode_impl(4096) == "triton"
+    else:
+        assert resolve_decode_impl(4096) == "blocked"
+        assert not torch.cuda.is_available() or not info["has_triton"]
+
+
+def test_backend_info_auto_decode_fields(monkeypatch):
+    monkeypatch.delenv("BDH_ATTN_AUTO", raising=False)
+    monkeypatch.delenv("BDH_ATTN_IMPL", raising=False)
+    _bump_caches()
+    info = backend_info()
+    assert "triton_decode_available" in info
+    assert "auto_decode_prefers" in info
+    assert info["auto_decode_prefers"] in ("triton", "blocked")
+
