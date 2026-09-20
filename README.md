@@ -1,4 +1,6 @@
-# BDH (Dragon Hatchling)
+# BDH Fast (Dragon Hatchling) - OPTIMIZED GPU LIB FOR BDH.
+
+## Optimized kernels, memory allocations, calls amount for different paths. Up to 77x improvement for certain tasks.
 
 > **Private GPU-opt sandbox** (`katulevskiy/bdh-gpu-opt` only — **not** `pathwaycom/bdh`).
 > Landed opts **#1–#54**, env flags (`BDH_ATTN_IMPL`, `BDH_ATTN_AUTOGRAD`, `BDH_ROPE_IMPL`, `BDH_COMPILE`, `BDH_PREFETCH_ASYNC`, `BDH_AMP_DTYPE`, `BDH_AMP_FORWARD_ONLY`),
