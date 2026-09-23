@@ -826,14 +826,19 @@ def maybe_compile(
         if probe == "train_bwd":
             # A failed forward/backward probe may have left partial gradients
             # on the original parameters. Keep the eager fallback clean just
-            # like the successful probe path above.
+            # like the successful probe path above. If zero_grad itself fails,
+            # drop .grad references directly so the discarded wrapper cannot
+            # leave dirty state on the retained eager module.
             try:
                 clear_grads(model)
             except Exception as cleanup_error:
                 print(
                     "torch.compile probe gradient cleanup failed "
-                    f"({type(cleanup_error).__name__}: {cleanup_error})"
+                    f"({type(cleanup_error).__name__}: {cleanup_error}); "
+                    "falling back to direct parameter grad discard"
                 )
+                for _param in model.parameters():
+                    _param.grad = None
         if was_training:
             model.train()
         else:
