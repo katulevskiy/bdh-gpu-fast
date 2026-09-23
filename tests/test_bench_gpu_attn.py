@@ -32,7 +32,7 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
     assert "median ms" not in result.stdout
 
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 12
+    assert summary["schema_version"] == 13
     assert summary["status"] == "skip"
     assert summary["reason"] == "cuda_unavailable"
     assert summary["mode"] == "cold"
@@ -43,6 +43,11 @@ def test_no_cuda_skip_is_actionable_and_clean(tmp_path):
             "reason": "cuda_unavailable",
             "detail": "torch.cuda.is_available() is false",
             "timing_scope": "none",
+            "bit_identical": None,
+            "allclose_at_1e-4": None,
+            "max_abs_delta": None,
+            "max_rel_delta": None,
+            "median_ms": None,
             "cuda_available": False,
             "cuda_runtime_state": summary["cuda_runtime_state"],
             "cuda_built": summary["cuda_built"],
@@ -295,6 +300,11 @@ def test_device_probe_failure_skips_before_cuda_measurement(
             "reason": "cuda_unavailable",
             "detail": "CUDA device probe raised RuntimeError: driver query failed",
             "timing_scope": "none",
+            "bit_identical": None,
+            "allclose_at_1e-4": None,
+            "max_abs_delta": None,
+            "max_rel_delta": None,
+            "median_ms": None,
             "cuda_available": True,
             "cuda_runtime_state": "runtime_unavailable",
             "cuda_built": True,
@@ -354,6 +364,11 @@ def test_no_visible_device_skips_before_cuda_measurement(
             "reason": "cuda_unavailable",
             "detail": "CUDA runtime state is no_visible_device",
             "timing_scope": "none",
+            "bit_identical": None,
+            "allclose_at_1e-4": None,
+            "max_abs_delta": None,
+            "max_rel_delta": None,
+            "median_ms": None,
             "cuda_available": True,
             "cuda_runtime_state": "no_visible_device",
             "cuda_built": True,
@@ -424,6 +439,11 @@ def test_build_probe_failure_skips_before_cuda_measurement(
             "reason": "cuda_unavailable",
             "detail": "CUDA runtime state is build_probe_failed",
             "timing_scope": "none",
+            "bit_identical": None,
+            "allclose_at_1e-4": None,
+            "max_abs_delta": None,
+            "max_rel_delta": None,
+            "median_ms": None,
             "cuda_available": True,
             "cuda_runtime_state": "build_probe_failed",
             "cuda_built": False,
@@ -470,7 +490,7 @@ def test_force_cpu_summary_does_not_claim_gpu_timings(tmp_path):
 
     assert result.returncode == 0, result.stderr
     summary = json.loads(summary_path.read_text())
-    assert summary["schema_version"] == 12
+    assert summary["schema_version"] == 13
     assert summary["status"] == "cpu_smoke"
     assert summary["reason"] == "force_cpu"
     assert summary["device"] == "cpu"
@@ -622,6 +642,11 @@ def test_unavailable_cuda_with_visible_device_skips_before_measurement(
             "reason": "cuda_unavailable",
             "detail": "torch.cuda.is_available() is false",
             "timing_scope": "none",
+            "bit_identical": None,
+            "allclose_at_1e-4": None,
+            "max_abs_delta": None,
+            "max_rel_delta": None,
+            "median_ms": None,
             "cuda_available": False,
             "cuda_runtime_state": "runtime_unavailable",
             "cuda_built": True,
