@@ -65,7 +65,7 @@ BACKENDS_DECODE: dict[str, Callable[..., torch.Tensor]] = {
 }
 
 
-SUMMARY_SCHEMA_VERSION = 12
+SUMMARY_SCHEMA_VERSION = 13
 
 
 # Keep these commands in sync with the GPU microbench runbook in
@@ -213,6 +213,13 @@ def _skip_summary(
                 "reason": "cuda_unavailable",
                 "detail": skip_detail,
                 "timing_scope": "none",
+                # Parity/timing fields stay present-but-null so skip consumers
+                # share one schema with backend skips — never substitute CPU timing.
+                "bit_identical": None,
+                "allclose_at_1e-4": None,
+                "max_abs_delta": None,
+                "max_rel_delta": None,
+                "median_ms": None,
                 "cuda_available": cuda_available,
                 "cuda_runtime_state": cuda_runtime["cuda_runtime_state"],
                 "cuda_built": cuda_runtime["cuda_built"],
